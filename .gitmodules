@@ -1,0 +1,5 @@
+[submodule "sjtu-canvas-assistant"]
+	path = sjtu-canvas-assistant
+	url = https://github.com/Aspirin0000/sjtu-canvas-assistant.git
+	ignore = dirty
+

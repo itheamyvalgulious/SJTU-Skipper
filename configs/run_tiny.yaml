@@ -1,0 +1,28 @@
+model:
+  arch: unimernet
+  model_type: unimernet
+  model_config:
+    model_name: weights/unimernet_tiny
+    max_seq_len: 1536
+
+  load_pretrained: True
+  pretrained: weights/unimernet_tiny/unimernet_tiny.pth
+  tokenizer_config:
+    path: weights/unimernet_tiny
+
+datasets:
+  formula_rec_eval:
+    vis_processor:
+      eval:
+        name: "formula_image_eval"
+        image_size:
+          - 192
+          - 672
+   
+run:
+  runner: runner_iter
+  task: unimernet_train
+  evaluate: True
+  device: "cuda"
+  generate_cfg:
+    temperature: 0.0

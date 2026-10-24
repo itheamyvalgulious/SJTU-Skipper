@@ -1,0 +1,42 @@
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+.coverage
+htmlcov/
+
+# Program Outputs & Temp
+output_*/
+temp/
+*.log
+
+# Heavy Data & Media (Videos, Audio, Datasets, Weights)
+data/
+weights/
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.wav
+*.mp3
+*.part
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
