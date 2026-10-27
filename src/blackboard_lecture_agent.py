@@ -1,30 +1,18 @@
 """
-Algebraic Topology Dual-Lecture Blackboard Digitization Agent (v2 Production Pipeline)
-========================================================================================
-Processes the two latest lectures of Algebraic Topology (2026-10-22):
-  - Lecture 1 (07:55 - 08:50, ~55 min)
-  - Lecture 2 (08:50 - 09:45, ~55 min)
+Universal Blackboard Lecture Digitization Agent (v2 Production Pipeline)
+========================================================================
+Supports dual-lecture processing for all recorded university math courses:
+  - 复分析 (Complex Analysis)
+  - 数学分析（荣誉）III (Mathematical Analysis III Honours)
+  - 代数拓扑 (Algebraic Topology)
 
-Core Upgrades in v2 Pipeline:
-  1. Dense Temporal Sampling & Fourier Phase Correlation Registration (频域重定位配准):
-     Extracts 20-second window at 4 fps (80 frames) via ffmpeg pipe. Computes 2D FFT normalized
-     cross-power spectrum to dynamically register PTZ camera movements (sub-pixel accuracy),
-     completely eliminating camera-motion ghosting (重影).
-  2. Temporal Persistence & Monotonic Edge Filtering (时序持续性与单调边缘滤波):
-     - Low-percentile (30%) dark blackboard background anchor.
-     - Temporal variance / motion activity filter to remove walking/gesturing teachers.
-     - Persistence thresholding (>= 5 frames) + monotonic edge protection (fresh writes / fresh erases).
-     - Rejects transient 1~2 frame spikes, 100% eliminating clothing wrinkles, eraser dust, and messy lines.
-  3. Robust Chalk Union (稳态粉笔字迹并集):
-     Uses nanmedian over active chalk frames to composite onto pure background, adhering to the
-     "字迹优先保留 (Max/Union)" principle without luminance bloom.
-  4. Strict LaTeX Formatting:
-     Mandates ONLY `$` (inline) and `$$` (display). Strictly bans `\\[`, `\\]`, `\\(`, `\\)`.
-     Strict space rules: ` $formula$ ` (space outside, tight inside); `$$` on separate line with empty lines.
-  5. Global Deduplication:
-     Eliminates verbatim repetition of multi-frame lingering theorems/diagrams (e.g. Zig-Zag Lemma).
-  6. Ground-Truth Proof Faithfulness:
-     Accurately captures only the steps actually proved on the physical blackboard (e.g. Zig-Zag Lemma (3)).
+Core Pipeline:
+  1. Dense Temporal Sampling (20s @ 4fps = 80 frames)
+  2. Fourier Phase Correlation Sub-Pixel Motion Registration (频域重定位配准)
+  3. Temporal Persistence & Monotonic Edge Filtering (时序持续性与单调边缘滤波消遮挡)
+  4. Robust Chalk Union (稳态粉笔字迹并集)
+  5. Stage 1 Parallel VLM Recognition with Strict LaTeX & Diagram Placeholders
+  6. Stage 2 Global Note Synthesis with Semantic Deduplication
 """
 
 import os
@@ -41,15 +29,21 @@ import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Tuple
+from pathlib import Path
 import numpy as np
 from PIL import Image
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(ROOT_DIR, "data")
+OUTPUTS_DIR = os.path.join(DATA_DIR, "outputs")
+NOTES_DIR = os.path.join(DATA_DIR, "notes")
 
 # ============================================================================
 # Configuration & Environment
 # ============================================================================
 
 def _load_env_file():
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    env_path = os.path.join(ROOT_DIR, ".env")
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -68,25 +62,123 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-LECTURES = [
-    {
-        "id": "lec1",
-        "title": "代数拓扑 (第1节) 0755-0850",
-        "video_path": "data/videos/代数拓扑/代数拓扑_2026-10-22_代数拓扑 (第1节)_0755-0850.mp4"
+COURSE_SESSIONS = {
+    "ca_1019": {
+        "course": "复分析",
+        "date": "2026-10-19",
+        "title": "复分析 (2026-10-19)",
+        "output_dir": os.path.join(OUTPUTS_DIR, "ca_1019"),
+        "lectures": [
+            {
+                "id": "lec1",
+                "title": "复分析 (第9节) 1555-1650",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/复分析/复分析_2026-10-19_复分析 (第9节)_1555-1650.mp4")
+            },
+            {
+                "id": "lec2",
+                "title": "复分析 (第10节) 1650-1745",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/复分析/复分析_2026-10-19_复分析 (第10节)_1650-1745.mp4")
+            }
+        ]
     },
-    {
-        "id": "lec2",
-        "title": "代数拓扑 (第2节) 0850-0945",
-        "video_path": "data/videos/代数拓扑/代数拓扑_2026-10-22_代数拓扑 (第2节)_0850-0945.mp4"
+    "ca_1021": {
+        "course": "复分析",
+        "date": "2026-10-21",
+        "title": "复分析 (2026-10-21)",
+        "output_dir": os.path.join(OUTPUTS_DIR, "ca_1021"),
+        "lectures": [
+            {
+                "id": "lec1",
+                "title": "复分析 (第7节) 1355-1450",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/复分析/复分析_2026-10-21_复分析 (第7节)_1355-1450.mp4")
+            },
+            {
+                "id": "lec2",
+                "title": "复分析 (第8节) 1450-1545",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/复分析/复分析_2026-10-21_复分析 (第8节)_1450-1545.mp4")
+            }
+        ]
+    },
+    "ma_1019": {
+        "course": "数学分析（荣誉）III",
+        "date": "2026-10-19",
+        "title": "数学分析（荣誉）III (2026-10-19)",
+        "output_dir": os.path.join(OUTPUTS_DIR, "ma_1019"),
+        "lectures": [
+            {
+                "id": "lec1",
+                "title": "数学分析（荣誉）III (第3节) 0955-1050",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/数学分析（荣誉）III/数学分析（荣誉）III_2026-10-19_数学分析（荣誉）III (第3节)_0955-1050.mp4")
+            },
+            {
+                "id": "lec2",
+                "title": "数学分析（荣誉）III (第4节) 1050-1150",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/数学分析（荣誉）III/数学分析（荣誉）III_2026-10-19_数学分析（荣誉）III (第4节)_1050-1150.mp4")
+            }
+        ]
+    },
+    "ma_1021": {
+        "course": "数学分析（荣誉）III",
+        "date": "2026-10-21",
+        "title": "数学分析（荣誉）III (2026-10-21)",
+        "output_dir": os.path.join(OUTPUTS_DIR, "ma_1021"),
+        "lectures": [
+            {
+                "id": "lec1",
+                "title": "数学分析（荣誉）III (第1节) 0755-0850",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/数学分析（荣誉）III/数学分析（荣誉）III_2026-10-21_数学分析（荣誉）III (第1节)_0755-0850.mp4")
+            },
+            {
+                "id": "lec2",
+                "title": "数学分析（荣誉）III (第2节) 0850-0945",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/数学分析（荣誉）III/数学分析（荣誉）III_2026-10-21_数学分析（荣誉）III (第2节)_0850-0945.mp4")
+            }
+        ]
+    },
+    "topo_1020": {
+        "course": "代数拓扑",
+        "date": "2026-10-20",
+        "title": "代数拓扑 (2026-10-20)",
+        "output_dir": os.path.join(OUTPUTS_DIR, "topo_1020"),
+        "lectures": [
+            {
+                "id": "lec1",
+                "title": "代数拓扑 (第3节) 0955-1050",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/代数拓扑/代数拓扑_2026-10-20_代数拓扑 (第3节)_0955-1050.mp4")
+            },
+            {
+                "id": "lec2",
+                "title": "代数拓扑 (第4节) 1050-1150",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/代数拓扑/代数拓扑_2026-10-20_代数拓扑 (第4节)_1050-1150.mp4")
+            }
+        ]
+    },
+    "topo_1022": {
+        "course": "代数拓扑",
+        "date": "2026-10-22",
+        "title": "代数拓扑 (2026-10-22)",
+        "output_dir": os.path.join(OUTPUTS_DIR, "topo_agent"),
+        "lectures": [
+            {
+                "id": "lec1",
+                "title": "代数拓扑 (第1节) 0755-0850",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/代数拓扑/代数拓扑_2026-10-22_代数拓扑 (第1节)_0755-0850.mp4")
+            },
+            {
+                "id": "lec2",
+                "title": "代数拓扑 (第2节) 0850-0945",
+                "video_path": os.path.join(ROOT_DIR, "data/videos/代数拓扑/代数拓扑_2026-10-22_代数拓扑 (第2节)_0850-0945.mp4")
+            }
+        ]
     }
-]
+}
 
 # ============================================================================
 # Cost Monitor
 # ============================================================================
 
 class CostMonitor:
-    def __init__(self, max_cost_rmb: float = 2.0):
+    def __init__(self, max_cost_rmb: float = 3.0):
         self.max_cost = max_cost_rmb
         self.lock = threading.Lock()
         self.total_prompt_tokens = 0
@@ -101,9 +193,6 @@ class CostMonitor:
             self.total_completion_tokens += completion_tokens
             self.total_reasoning_tokens += (reasoning_tokens or 0)
             
-            # Conservative peak pricing:
-            # Prompt: 2.0 RMB / 1M tokens
-            # Completion: 8.0 RMB / 1M tokens
             step_cost = (prompt_tokens * 2.0 + completion_tokens * 8.0) / 1_000_000.0
             self.total_cost_rmb += step_cost
             if self.total_cost_rmb >= self.max_cost:
@@ -122,7 +211,7 @@ class CostMonitor:
             }
 
 # ============================================================================
-# v2 Image Extraction & Fourier Registered Persistence Fusion Engine
+# Image Extraction & Fourier Registered Persistence Fusion Engine
 # ============================================================================
 
 def extract_registered_persistence_fusion(
@@ -150,7 +239,7 @@ def extract_registered_persistence_fusion(
         raise RuntimeError(f"FFmpeg failed to extract frames around t={t_center}s from {video_path}")
         
     frames = np.frombuffer(raw_data, dtype=np.uint8).reshape((num_frames, h, w))
-    # Active blackboard vertical span in Shangyuan 113: y in [0, 740], x in [200, 1800]
+    # Full active blackboard span across classrooms and PTZ variations: y in [0, 740], x in [200, 1800]
     board_frames = frames[:, 0:740, 200:1800]
     N, bh, bw = board_frames.shape
     
@@ -212,7 +301,6 @@ def extract_registered_persistence_fusion(
 
 
 def _extract_task_worker(task: Dict[str, Any]) -> Dict[str, Any]:
-    """Worker function for parallel frame extraction."""
     save_path = task["save_path"]
     frame_id = task["frame_id"]
     t0 = time.time()
@@ -242,12 +330,11 @@ def prepare_all_frames(
     sample_limit: int = None,
     max_workers: int = 4
 ) -> List[Dict[str, Any]]:
-    """Extract and crop registered persistence-fused blackboard frames for all scheduled timestamps in parallel."""
     frames_meta = []
     frames_dir = f"{output_dir}/frames"
     os.makedirs(frames_dir, exist_ok=True)
     
-    print("\n[Phase 1] Extracting Registered Persistence Fusion Frames (v2 Pipeline)...")
+    print("\n[Phase 1] Extracting Registered Persistence Fusion Frames...")
     tasks = []
     
     for lec in lectures:
@@ -291,7 +378,6 @@ def prepare_all_frames(
         for future in as_completed(futures):
             frames_meta.append(future.result())
             
-    # Sort chronologically by (lec_id, timestamp_sec)
     frames_meta.sort(key=lambda x: (x["lec_id"], x["timestamp_sec"]))
     print(f"  [Phase 1 Completed] {len(frames_meta)} frames ready in {time.time() - t_start:.1f}s\n")
     return frames_meta
@@ -303,7 +389,8 @@ def prepare_all_frames(
 def process_single_frame(
     frame_info: Dict[str, Any],
     cost_monitor: CostMonitor,
-    stage1_dir: str
+    stage1_dir: str,
+    course_name: str
 ) -> Dict[str, Any]:
     """Recognize single blackboard frame via deepseek-flash with thinking disabled."""
     if cost_monitor.aborted:
@@ -332,14 +419,14 @@ def process_single_frame(
         img_b64 = base64.b64encode(f.read()).decode("utf-8")
         
     prompt_text = (
-        f"这是大学数学系《代数拓扑》课堂在 {frame_info['timestamp_str']} 时的黑板板书图像。\n"
-        "请准确识别并完整转录图中的全部手写数学板书内容（包括拓扑空间、链复形、同调群、长正合列、交换图表、引理、定理、定义、命题、证明推导细节及中文说明）。\n\n"
+        f"这是大学数学系《{course_name}》课堂在 {frame_info['timestamp_str']} 时的黑板板书图像。\n"
+        "请准确识别并完整转录图中的全部手写数学板书内容（包括引理、定理、定义、命题、推论、证明推导细节、数学公式及中文说明）。\n\n"
         "【LaTeX 公式规范（绝对严格）】：\n"
         "1. 只能使用 $（行内公式）与 $$（行间公式）。严禁使用 \\[、\\]、\\(、\\)。\n"
         "2. 行内公式外侧留空格，内侧紧贴不留空格；行间公式 $$ 独占一行前后各空一行。\n"
         "3. 如果黑板上尚未书写数学内容或黑板为空，请仅回复【黑板暂无板书】，不要转录监控摄像机的时间戳水印。\n\n"
         "【手绘示意图占位符规范（绝对严格）】：\n"
-        "对黑板上的手绘示意图（如空间几何图形、闭合曲线围道、区域映射示意图等），必须使用 Markdown 图片语法占位符：\n"
+        "对黑板上的手绘示意图（如几何图形、闭合曲线围道、区域映射示意图、复平面图、图表等），必须使用 Markdown 图片语法占位符：\n"
         "![{对图形的简短中文描述}]()\n"
         "例如黑板画了同心圆，必须写入：![同心圆区域示意图]()。\n"
         "严禁写成普通文字描述或括号备注（如严禁写成“（手绘示意图：...）”）。\n"
@@ -383,7 +470,6 @@ def process_single_frame(
         
         content = data["choices"][0]["message"].get("content", "").strip()
         
-        # Save output
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         with open(md_path, "w", encoding="utf-8") as f:
@@ -391,7 +477,7 @@ def process_single_frame(
             
         print(f"[{frame_info['frame_id']}] {t_elapsed:.2f}s | "
               f"In:{prompt_tokens} Out:{completion_tokens} | "
-              f"Total Cost: ¥{total_cost:.4f}{' [LIMIT REACHED!]' if aborted else ''}")
+              f"Session Cost: ¥{total_cost:.4f}{' [LIMIT REACHED!]' if aborted else ''}")
               
         return {
             "frame_id": frame_info["frame_id"],
@@ -411,10 +497,10 @@ def process_single_frame(
 def run_stage1_parallel(
     frames_meta: List[Dict[str, Any]],
     output_dir: str,
+    course_name: str,
     max_workers: int = 10,
     cost_monitor: CostMonitor = None
 ) -> List[Dict[str, Any]]:
-    """Execute Stage 1 concurrently across worker threads."""
     stage1_dir = f"{output_dir}/stage1_transcriptions"
     os.makedirs(stage1_dir, exist_ok=True)
     
@@ -423,14 +509,14 @@ def run_stage1_parallel(
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_frame = {
-            executor.submit(process_single_frame, fm, cost_monitor, stage1_dir): fm
+            executor.submit(process_single_frame, fm, cost_monitor, stage1_dir, course_name): fm
             for fm in frames_meta
         }
         for future in as_completed(future_to_frame):
             res = future.result()
             results.append(res)
             if cost_monitor.aborted:
-                print(">>> WARNING: Budget limit (¥2.0) reached! Terminating pending jobs...")
+                print(">>> WARNING: Budget limit reached! Terminating pending jobs...")
                 break
                 
     results.sort(key=lambda x: x.get("frame_id", ""))
@@ -441,22 +527,11 @@ def run_stage1_parallel(
 # ============================================================================
 
 def enforce_latex_formatting(text: str) -> str:
-    """
-    Strictly enforce LaTeX rules:
-    1. Replaces any \\[ ... \\] with $$ ... $$
-    2. Replaces any \\( ... \\) with $ ... $
-    3. Display $$ on separate lines with empty line before and after.
-    4. Inline $ with space outside, tight inside.
-    """
-    # 1. Replace \\[ ... \\]
     text = re.sub(re.escape(r'\[') + r'\s*', '\n\n$$\n', text)
     text = re.sub(r'\s*' + re.escape(r'\]'), '\n$$\n\n', text)
-    
-    # 2. Replace \\( ... \\)
     text = re.sub(re.escape(r'\(') + r'\s*', ' $', text)
     text = re.sub(r'\s*' + re.escape(r'\)'), '$ ', text)
     
-    # 3. Format display $$ blocks
     lines = text.split('\n')
     out_lines = []
     in_display = False
@@ -479,35 +554,25 @@ def enforce_latex_formatting(text: str) -> str:
                     continue
                 out_lines.append(line)
             else:
-                out_lines.append(line)
+                formatted_line = re.sub(r'(?<![\$\s])\$([^\$]+?)\$(?![\$\s])', r' $\1$ ', line)
+                formatted_line = re.sub(r' +', ' ', formatted_line)
+                out_lines.append(formatted_line)
                 
-    cleaned = '\n'.join(out_lines)
-    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-    
-    # 4. Inline $...$ spacing
-    def fix_inline(m):
-        f = m.group(1).strip()
-        return f' ${f}$ '
-        
-    cleaned = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', fix_inline, cleaned)
-    cleaned = re.sub(r' +', ' ', cleaned)
-    cleaned = re.sub(r' +([，。、：；,\.!\?])', r'\1', cleaned)
-    cleaned = re.sub(r'\n +', '\n', cleaned)
-    return cleaned.strip()
+    res = '\n'.join(out_lines)
+    res = re.sub(r'\n{3,}', '\n\n', res)
+    return res.strip()
 
 # ============================================================================
-# Stage 2: Global Note Synthesis with Low Effort & Deduplication / Strict LaTeX
+# Stage 2: Global Deduplication & Unified Synthesis
 # ============================================================================
 
 def run_stage2_synthesis(
     stage1_results: List[Dict[str, Any]],
     output_dir: str,
+    course_name: str,
+    session_title: str,
     cost_monitor: CostMonitor
 ) -> str:
-    """
-    Consolidate all frame notes, run DeepSeek-Flash with effort: low
-    to generate the complete, pristine, non-duplicate mathematical lecture notes.
-    """
     stage2_dir = f"{output_dir}/stage2_final"
     os.makedirs(stage2_dir, exist_ok=True)
     
@@ -515,7 +580,7 @@ def run_stage2_synthesis(
         print("Skipping Stage 2 because budget limit was reached in Stage 1.")
         return ""
         
-    print("\n[Phase 3] Running Stage 2 Global Note Synthesis (effort: low, strict LaTeX & deduplication)...")
+    print(f"\n[Phase 3] Running Stage 2 Global Note Synthesis for {session_title} (effort: low)...")
     
     valid_results = [r for r in stage1_results if r.get("status") in ["success", "cached"] and r.get("content")]
     
@@ -529,7 +594,7 @@ def run_stage2_synthesis(
     with open(f"{stage2_dir}/raw_stage1_feed.md", "w", encoding="utf-8") as f:
         f.write(feed_text)
         
-    synthesis_prompt = f"""以下是大学数学系《代数拓扑》最新两节课（共计 110 分钟）按每 2 分钟时序抽样转录的全部黑板板书记录序列：
+    synthesis_prompt = f"""以下是大学数学系《{course_name}》课程（{session_title}，共计两节大课约 110 分钟）按每 2 分钟时序抽样转录的全部黑板板书记录序列：
 
 {feed_text}
 
@@ -550,13 +615,13 @@ def run_stage2_synthesis(
      $$
 
 【去重与结构整合规范（绝对严格执行）】：
-1. 严禁机械重复：因摄像机镜头移动或多次采样而连续出现的同一交换图表、引理陈述或定义，必须在全局中去重合并，严禁机械重复抄写多遍（例如 Zig-Zag Lemma 交换图与引理陈述只能且必须完整出现一次）。
+1. 严禁机械重复：因摄像机镜头移动或多次采样而连续出现的同一图表、引理陈述、命题或定义，必须在全局中去重合并，严禁机械重复抄写多遍。
 2. 忠实还原黑板授课脉络：
-   - 黑板上老师推导过的步骤（如 Zig-Zag Lemma 中关于 (3) 的详细证明），必须完整、严谨地还原。
-   - 黑板上老师仅列出待证目标但未书写证明的部分（如 (1)、(2)），忠实保持黑板原状，不私自伪造编造黑板上不存在的板书证明。
-3. 允许且必须结合数学语义上下文，针对黑板部分模糊、反光或字迹遮挡处做精确修正与补齐（例如正合列的指标下标、同态映射箭头符号、拓扑同调群符号等）。
+   - 黑板上老师推导过的步骤，必须完整、严谨地还原。
+   - 黑板上老师仅列出待证目标但未书写证明的部分，忠实保持黑板原状，不私自伪造编造黑板上不存在的板书证明。
+3. 允许且必须结合数学语义上下文，针对黑板部分模糊、反光或字迹遮挡处做精确修正与补齐（例如数学符号上下标、积分限、映射箭头符号等）。
 4. 滤除空黑板时期的无意义占位（如【黑板暂无板书】）。
-5. 保留并整合正文中的手绘示意图占位符（如 ![{description}]()），不随意增减，忠实复刻黑板上的示意图脉络。
+5. 保留并整合正文中的手绘示意图占位符（如 ![{{description}}]()），不随意增减，忠实复刻黑板上的示意图脉络。
 6. 输出内容除了黑板完整板书内容外，绝对不要包含任何问候、前言、总结结语或元说明等非板书文字。"""
 
     payload = {
@@ -588,94 +653,119 @@ def run_stage2_synthesis(
         
         raw_final_notes = data["choices"][0]["message"].get("content", "").strip()
         
-        # Save raw JSON response
         with open(f"{stage2_dir}/deepseek_stage2_response.json", "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
             
-        # Enforce strict LaTeX formatting
         final_notes = enforce_latex_formatting(raw_final_notes)
         
-        final_notes_path = f"{stage2_dir}/代数拓扑_最新两节课完整板书笔记.md"
+        final_notes_path = f"{stage2_dir}/{session_title}_完整板书笔记.md"
         with open(final_notes_path, "w", encoding="utf-8") as f:
             f.write(final_notes)
             
-        # Also copy to workspace root for quick user access
-        root_notes_path = "./代数拓扑_最新两节课完整板书笔记.md"
+        os.makedirs(NOTES_DIR, exist_ok=True)
+        root_notes_path = os.path.join(NOTES_DIR, f"{session_title}_完整板书笔记.md")
         shutil.copy2(final_notes_path, root_notes_path)
         
         print(f"Stage 2 completed in {t_elapsed:.2f}s | "
               f"In:{prompt_tokens} Out:{completion_tokens} (Reasoning:{reasoning_tokens}) | "
-              f"Final Total Cost: ¥{total_cost:.4f}")
+              f"Session Total Cost: ¥{total_cost:.4f}")
         print(f"Final lecture notes saved to: {final_notes_path} and {root_notes_path}")
-        return final_notes_path
+        return root_notes_path
         
     except Exception as e:
         print(f"Stage 2 Exception: {str(e)}")
         return ""
+
+
+def run_session(
+    session_key: str,
+    workers: int = 10,
+    extract_workers: int = 4,
+    max_cost: float = 3.0,
+    sample_n: int = None
+) -> str:
+    session = COURSE_SESSIONS[session_key]
+    out_dir = session["output_dir"]
+    os.makedirs(out_dir, exist_ok=True)
+    cost_monitor = CostMonitor(max_cost_rmb=max_cost)
+
+    print("\n" + "=" * 70)
+    print(f"   STARTING SESSION: {session['title']}")
+    print(f"   Output Directory: {out_dir}")
+    print(f"   Lectures: {[l['title'] for l in session['lectures']]}")
+    print("=" * 70)
+
+    frames_meta = prepare_all_frames(
+        lectures=session["lectures"],
+        output_dir=out_dir,
+        interval_sec=120.0,
+        sample_limit=sample_n,
+        max_workers=extract_workers
+    )
+
+    if not frames_meta:
+        print("No frames were extracted.")
+        return ""
+
+    stage1_results = run_stage1_parallel(
+        frames_meta=frames_meta,
+        output_dir=out_dir,
+        course_name=session["course"],
+        max_workers=workers,
+        cost_monitor=cost_monitor
+    )
+
+    final_path = run_stage2_synthesis(
+        stage1_results=stage1_results,
+        output_dir=out_dir,
+        course_name=session["course"],
+        session_title=session["title"],
+        cost_monitor=cost_monitor
+    )
+
+    summary = cost_monitor.get_summary()
+    print("\n" + "-" * 70)
+    print(f"   SESSION SUMMARY: {session['title']}")
+    print(f"   - Processed Frames: {len(stage1_results)}")
+    print(f"   - Total Tokens: {summary['total_tokens']}")
+    print(f"   - Total Cost: ¥{summary['total_cost_rmb']:.4f} RMB")
+    print(f"   - Result: {final_path}")
+    print("-" * 70 + "\n")
+    return final_path
+
 
 # ============================================================================
 # Main Entry Point
 # ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Algebraic Topology Dual-Lecture Blackboard Agent (v2 Pipeline)")
-    parser.add_argument("--sample-n", type=int, default=None, help="Run dry run with only N frames")
-    parser.add_argument("--workers", type=int, default=10, help="Number of concurrent workers for Stage 1")
-    parser.add_argument("--extract-workers", type=int, default=4, help="Number of threads for parallel frame extraction")
-    parser.add_argument("--output", type=str, default="./output_topo_agent", help="Output directory")
-    parser.add_argument("--max-cost", type=float, default=2.0, help="Maximum budget in RMB before auto-abort")
+    parser = argparse.ArgumentParser(description="Universal Blackboard Digitization Agent")
+    parser.add_argument("--session", type=str, default="all",
+                        choices=list(COURSE_SESSIONS.keys()) + ["all"],
+                        help="Specific session key to process, or 'all'")
+    parser.add_argument("--sample-n", type=int, default=None, help="Dry run with only N frames per session")
+    parser.add_argument("--workers", type=int, default=10, help="Stage 1 recognition threads")
+    parser.add_argument("--extract-workers", type=int, default=4, help="Frame extraction threads")
+    parser.add_argument("--max-cost", type=float, default=3.0, help="Budget per session in RMB")
     args = parser.parse_args()
 
-    os.makedirs(args.output, exist_ok=True)
-    cost_monitor = CostMonitor(max_cost_rmb=args.max_cost)
-    
-    print("=" * 70)
-    print("   Algebraic Topology Dual-Lecture Blackboard Digitization Agent (v2)")
-    print(f"   Fusion Engine: Phase Correlation Alignment + Temporal Persistence Filter")
-    print(f"   Mode: Stage 1 (thinking: disabled) -> Stage 2 (effort: low)")
-    print(f"   Max Budget: ¥{args.max_cost:.2f} | Concurrency: {args.workers} workers")
-    print("=" * 70)
+    sessions_to_run = list(COURSE_SESSIONS.keys()) if args.session == "all" else [args.session]
 
-    # 1. Prepare / Extract v2 registered persistence fusion frames
-    frames_meta = prepare_all_frames(
-        lectures=LECTURES,
-        output_dir=args.output,
-        interval_sec=120.0,
-        sample_limit=args.sample_n,
-        max_workers=args.extract_workers
-    )
-    
-    if not frames_meta:
-        print("No frames were extracted. Exiting.")
-        return
+    completed = {}
+    for sk in sessions_to_run:
+        res = run_session(
+            session_key=sk,
+            workers=args.workers,
+            extract_workers=args.extract_workers,
+            max_cost=args.max_cost,
+            sample_n=args.sample_n
+        )
+        completed[sk] = res
 
-    # 2. Stage 1 Parallel Recognition
-    stage1_results = run_stage1_parallel(
-        frames_meta=frames_meta,
-        output_dir=args.output,
-        max_workers=args.workers,
-        cost_monitor=cost_monitor
-    )
-
-    # 3. Stage 2 Global Note Synthesis
-    final_path = run_stage2_synthesis(
-        stage1_results=stage1_results,
-        output_dir=args.output,
-        cost_monitor=cost_monitor
-    )
-
-    # Summary
-    summary = cost_monitor.get_summary()
     print("\n" + "=" * 70)
-    print("   EXECUTION SUMMARY")
-    print(f"   - Processed Frames: {len(stage1_results)}")
-    print(f"   - Total Prompt Tokens: {summary['total_prompt_tokens']}")
-    print(f"   - Total Completion Tokens: {summary['total_completion_tokens']}")
-    print(f"   - Total Reasoning Tokens: {summary['total_reasoning_tokens']}")
-    print(f"   - Total Tokens: {summary['total_tokens']}")
-    print(f"   - Total Cost: ¥{summary['total_cost_rmb']:.4f} RMB (Budget limit: ¥{args.max_cost:.2f})")
-    if final_path:
-        print(f"   - Final Notes: {final_path}")
+    print("   ALL REQUESTED SESSIONS PROCESSED")
+    for sk, p in completed.items():
+        print(f"   - {COURSE_SESSIONS[sk]['title']}: {p}")
     print("=" * 70)
 
 if __name__ == "__main__":

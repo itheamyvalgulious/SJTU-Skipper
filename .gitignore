@@ -12,13 +12,16 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Program Outputs & Temp
-output_*/
+# 生成数据与产物（视频、帧、中间结果、板书笔记、实验输出）
+# 布局：data/videos、data/outputs/<session>、data/notes
+data/
 temp/
 *.log
 
+# 兼容旧布局（历史上根目录下的 output_* 目录）
+output_*/
+
 # Heavy Data & Media (Videos, Audio, Datasets, Weights)
-data/
 weights/
 *.mp4
 *.mkv

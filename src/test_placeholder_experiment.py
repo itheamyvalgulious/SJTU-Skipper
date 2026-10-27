@@ -7,8 +7,13 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(ROOT_DIR, "data")
+OUTPUTS_DIR = os.path.join(DATA_DIR, "outputs")
+NOTES_DIR = os.path.join(DATA_DIR, "notes")
+
 def _load_env_file():
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    env_path = os.path.join(ROOT_DIR, ".env")
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -26,7 +31,7 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-OUT_DIR = "output_placeholder_test"
+OUT_DIR = os.path.join(OUTPUTS_DIR, "placeholder_test")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 SAMPLES = [
@@ -58,7 +63,7 @@ prompt_text = (
 
 def process_sample(s):
     sid = s["id"]
-    img_path = f"data/eval_samples/{sid}.jpg"
+    img_path = os.path.join(DATA_DIR, "eval_samples", f"{sid}.jpg")
     with open(img_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode("utf-8")
         
