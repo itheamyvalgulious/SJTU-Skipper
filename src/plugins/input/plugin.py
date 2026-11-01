@@ -286,7 +286,7 @@ class InputPlugin(Plugin):
                     "text": (
                         "⚠️ **Canvas Token 未配置**\n\n"
                         "请在设置 → **Canvas** 分组中填写 `input.canvas_token`，"
-                        "或将 `CANVAS_TOKEN` 写入 `legacy/sjtu-canvas-assistant/.env`。"
+                        "或将 `CANVAS_TOKEN` 写入 `.env`。"
                     ),
                 }
             ]

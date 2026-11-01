@@ -32,7 +32,7 @@
 - 虚拟环境：`.venv`（Python 3.12；已删除旧的不可用 `.venv` 并重建）。
 - 依赖：`fastapi`, `uvicorn[standard]`, `httpx`, `pydantic`, `python-dotenv`, `numpy`, `pillow`, `markdown-it-py`, `beautifulsoup4`, `rich`, `typer`；测试 `pytest`, `pytest-asyncio`。
 - 外部命令：`ffmpeg`, `ffprobe`, `aria2c`（可选）。
-- 真实冒烟：Canvas token 已存在于 `legacy/sjtu-canvas-assistant/.env`（旧位置）或根 `.env`；DeepSeek API key 已存在于根 `.env`。
+- 真实冒烟：Canvas token 与 DeepSeek API key 已存在于根 `.env`（git-ignored）。
 - 约束：
   - 旧 `sjtu-canvas-assistant` 子模块移入 `legacy/` 并 ignore；不参与构建。
   - `legacy/` 内的旧脚本保留本地，不参与构建。

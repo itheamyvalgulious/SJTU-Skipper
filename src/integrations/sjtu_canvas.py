@@ -47,12 +47,9 @@ def load_token_from_env() -> str:
 
     from dotenv import load_dotenv
 
-    for env_path in (
-        _PROJECT_ROOT / ".env",
-        _PROJECT_ROOT / "legacy" / "sjtu-canvas-assistant" / ".env",
-    ):
-        if env_path.exists():
-            load_dotenv(env_path, override=False)
+    env_path = _PROJECT_ROOT / ".env"
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
     return (os.getenv("CANVAS_TOKEN") or "").strip()
 
 
@@ -125,7 +122,7 @@ class SJTUCatalog:
         if not token:
             raise InputError(
                 "Canvas token 未配置。请在设置中填写 input.canvas_token，"
-                "或将 CANVAS_TOKEN 写入 legacy/sjtu-canvas-assistant/.env 文件。"
+                "或将 CANVAS_TOKEN 写入 .env 文件。"
             )
         return token
 

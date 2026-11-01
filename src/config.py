@@ -12,13 +12,12 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data" / "agent"
-LEGACY_SUBMODULE_ENV = PROJECT_ROOT / "legacy" / "sjtu-canvas-assistant" / ".env"
 
 
 def _load_env() -> None:
     """Load project and submodule .env files without overriding real env."""
 
-    for candidate in (PROJECT_ROOT / ".env", LEGACY_SUBMODULE_ENV):
+    for candidate in (PROJECT_ROOT / ".env",):
         if candidate.exists():
             load_dotenv(candidate, override=False)
 

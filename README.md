@@ -54,7 +54,7 @@ python3.12 -m venv .venv
 3. 选择录播或直播，开始一节课。
 4. 左侧「课堂」查看转写、板书、笔记。
 
-Canvas token 也可以放在 `legacy/sjtu-canvas-assistant/.env`（旧位置）或根 `.env`；DeepSeek key 放在根 `.env`：
+Canvas token 与 DeepSeek key 都放在根 `.env`（git-ignored）：
 
 ```dotenv
 DEEPSEEK_API_KEY=...
