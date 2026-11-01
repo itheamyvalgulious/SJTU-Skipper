@@ -50,7 +50,7 @@ from tests.support import FakeSettings
 def _make_config(**overrides: Any) -> ProviderConfig:
     defaults: dict[str, Any] = {
         "base_url": "https://api.test.local/v1",
-        "api_key": "sk-test",
+        "api_key": "test-key",
         "model": "test-model",
         "timeout": 10,
         "max_retries": 1,
@@ -666,13 +666,13 @@ def test_service_profile_vlm() -> None:
         if profile == "vlm":
             cfg = ProviderConfig(
                 base_url="http://vlm.test",
-                api_key="sk-vlm",
+                api_key="vlm-key",
                 model="vlm-model",
             )
         else:
             cfg = ProviderConfig(
                 base_url="http://agent.test",
-                api_key="sk-agent",
+                api_key="agent-key",
                 model="agent-model",
             )
         configs.append(cfg)
@@ -875,7 +875,7 @@ def test_llm_plugin_setup_registers_settings_and_service() -> None:
 def test_llm_plugin_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default base_url / api_key come from env vars."""
     monkeypatch.setenv("OPENAI_BASE_URL", "https://custom.openai.com/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
 
     from plugins.llm_core.plugin import LLMPlugin, _resolve_env
 
@@ -883,7 +883,7 @@ def test_llm_plugin_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert url == "https://custom.openai.com/v1"
 
     key = _resolve_env("LLM_API_KEY", ("LLM_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"), "")
-    assert key == "sk-env-key"
+    assert key == "env-key"
 
 
 # ---------------------------------------------------------------------------

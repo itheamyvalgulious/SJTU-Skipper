@@ -34,7 +34,7 @@ GROUPED = [
         default="",
         group="LLM",
         order=2,
-        placeholder="sk-...",
+        placeholder="key...",
     ),
     SettingsSpec(
         key="input.playback_speed",
@@ -207,9 +207,9 @@ def test_secret_masking_and_internal_value(tmp_path: Path) -> None:
         ],
     )
     assert service.public_all() == {"llm.model": "m", "llm.api_key": ""}
-    service.set("llm.api_key", "sk-real-token")
-    assert service.get("llm.api_key") == "sk-real-token"
-    assert service.all()["llm.api_key"] == "sk-real-token"
+    service.set("llm.api_key", "real-token")
+    assert service.get("llm.api_key") == "real-token"
+    assert service.all()["llm.api_key"] == "real-token"
     assert service.public_all()["llm.api_key"] == SECRET_MASK
     assert service.all(public=True)["llm.api_key"] == SECRET_MASK
     described = {item["key"]: item for item in service.describe()}
@@ -223,13 +223,13 @@ def test_set_many_keeps_secret_when_empty_or_masked(tmp_path: Path) -> None:
         tmp_path,
         [SettingsSpec(key="llm.api_key", label="API Key", type="secret", default="")],
     )
-    service.set("llm.api_key", "sk-secret")
+    service.set("llm.api_key", "secret-value")
     assert service.set_many({"llm.api_key": ""}) == {}
     assert service.set_many({"llm.api_key": SECRET_MASK}) == {}
-    assert service.get("llm.api_key") == "sk-secret"
+    assert service.get("llm.api_key") == "secret-value"
     # An explicit (non-empty) value replaces it, and "" via set() clears it.
-    service.set_many({"llm.api_key": "sk-new"})
-    assert service.get("llm.api_key") == "sk-new"
+    service.set_many({"llm.api_key": "new-secret"})
+    assert service.get("llm.api_key") == "new-secret"
     service.set("llm.api_key", "")
     assert service.get("llm.api_key") == ""
 
@@ -287,7 +287,7 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         service = runtime.services.require("settings")
         for spec in GROUPED:
             service.register(spec)
-        service.set("llm.api_key", "sk-secret")
+        service.set("llm.api_key", "secret-value")
 
         state = runtime.ui.state()
         tab = next(t for t in state["right_tabs"] if t["id"] == "settings")
@@ -310,7 +310,7 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         assert field["type"] == "secret"
         assert field["value"] == SECRET_MASK
         assert field["is_set"] is True
-        assert field["placeholder"] == "sk-..."
+        assert field["placeholder"] == "key..."
         assert fields["llm.model"]["value"] == "deepseek-chat"
         assert forms[0]["submit"]["action"] == "settings.save"
     finally:
@@ -323,7 +323,7 @@ def test_action_save_converts_and_keeps_secret(tmp_path: Path) -> None:
         service = runtime.services.require("settings")
         for spec in GROUPED:
             service.register(spec)
-        service.set("llm.api_key", "sk-secret")
+        service.set("llm.api_key", "secret-value")
 
         result = runtime.ui.dispatch_action(
             "settings.save",
@@ -338,7 +338,7 @@ def test_action_save_converts_and_keeps_secret(tmp_path: Path) -> None:
         assert result.ok is True
         assert "已保存" in result.message
         assert service.get("llm.model") == "deepseek-reasoner"
-        assert service.get("llm.api_key") == "sk-secret"
+        assert service.get("llm.api_key") == "secret-value"
         assert service.get("input.playback_speed") == 1.5
 
         bad = runtime.ui.dispatch_action(
