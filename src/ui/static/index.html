@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>课堂总 Agent</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2358a6ff'/%3E%3Ctext x='16' y='24' text-anchor='middle' font-size='22' fill='%230b1220'%3E%E2%88%91%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script>
+    window.MathJax = {
+      tex: {inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$','$$'], ['\\[','\\]']]},
+      options: {skipHtmlTags: ['script','noscript','style','textarea','pre','code']}
+    };
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">∑</div>
+      <div>
+        <h1>课堂总 Agent</h1>
+        <p class="brand-sub">流 · 转写 · 板书 · 行为 · 笔记</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="connection" class="pill pill-muted">连接中</span>
+      <span id="session-pill" class="pill pill-muted">无会话</span>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <aside class="sidebar sidebar-left">
+      <div id="left-tabs" class="side-tabs"></div>
+      <div id="left-toolbox" class="toolbox"></div>
+    </aside>
+
+    <main class="center">
+      <div id="page-tabs" class="page-tabs"></div>
+      <div id="page-content" class="page-content">
+        <div class="welcome">
+          <div class="welcome-mark">∮</div>
+          <h2>开始一节课</h2>
+          <p>左侧「课程」里选择录播或直播；设置里填入 Canvas token 与模型 API key。</p>
+          <p class="muted">也可以运行 <code>lecture-agent demo</code> 查看完整链路。</p>
+        </div>
+      </div>
+    </main>
+
+    <aside class="sidebar sidebar-right">
+      <div id="right-tabs" class="side-tabs"></div>
+      <div id="right-toolbox" class="toolbox"></div>
+    </aside>
+  </div>
+
+  <footer id="statusbar" class="statusbar">
+    <span class="muted">等待运行时状态…</span>
+  </footer>
+</div>
+
+<div id="toast" class="toast" role="status"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

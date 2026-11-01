@@ -8,6 +8,7 @@ ENV/
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
 *.pytest_cache/
 .coverage
 htmlcov/
@@ -35,6 +36,8 @@ weights/
 .env
 .env.*
 !.env.example
+agent.toml
+!agent.toml.example
 
 # IDE & OS
 .idea/
@@ -43,3 +46,5 @@ weights/
 *.swo
 .DS_Store
 Thumbs.db
+# Deprecated code / old submodule (kept locally only)
+legacy/

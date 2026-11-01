@@ -1,0 +1,15 @@
+# Copy to agent.toml to customise the runtime.
+# Runtime-editable settings (API keys, prompts, thresholds) live in
+# data/agent/settings.json and are managed by the settings page.
+
+[agent]
+data_dir = "data/agent"
+host = "127.0.0.1"
+port = 8765
+log_level = "INFO"
+enable_input = true
+enable_stt = true
+enable_vlm = true
+enable_summarize = true
+demo_mode = false
+# plugins = ["my_package.my_module:MyPlugin"]
