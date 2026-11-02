@@ -296,7 +296,8 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         assert len(item_ids) == len({spec.group for spec in GROUPED})
         llm_item = next(i for i in tab["toolbox"] if i["id"] == "settings.group.llm")
         assert llm_item["title"] == "LLM"
-        assert any(block["type"] == "form" for block in llm_item["blocks"])
+        assert any(block["type"] == "buttons" for block in llm_item["blocks"])
+        assert not any(block["type"] == "form" for block in llm_item["blocks"])
 
         runtime.ui.open_page("settings:main")
         blocks = runtime.ui.state()["page_content"]["settings:main"]

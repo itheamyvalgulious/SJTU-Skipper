@@ -11,7 +11,6 @@ from .errors import (
     LLMStreamError,
     LLMTimeoutError,
 )
-from .mock import MockProvider
 from .openai_compat import OpenAICompatibleProvider
 from .provider import Provider, ProviderRegistry
 from .service import LLMService
@@ -42,7 +41,6 @@ __all__ = [
     "LLMTimeoutError",
     "LLMService",
     "Message",
-    "MockProvider",
     "OpenAICompatibleProvider",
     "Provider",
     "ProviderConfig",

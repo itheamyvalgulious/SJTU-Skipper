@@ -52,6 +52,7 @@ class VlmPlugin(Plugin):
         self._consecutive_errors = 0
         self._last_visual_text: str = ""
         self._latest_image_path: str = ""
+        self._last_error: str = ""
         self._shutting_down = False
 
         self._register_settings()
@@ -163,6 +164,7 @@ class VlmPlugin(Plugin):
                 "session_id": self._last_session,
                 "latest_image": self._latest_image_path,
                 "consecutive_errors": self._consecutive_errors,
+                "last_error": self._last_error,
                 "worker_alive": self._worker is not None and self._worker.is_alive(),
             }
 
@@ -190,6 +192,7 @@ class VlmPlugin(Plugin):
                 "vlm.board",
                 "板书",
                 description="最新融合图像与板书文字",
+                render=self._render_board_item,
                 plugin_id=self.id,
             )
         except ValueError:
@@ -200,6 +203,38 @@ class VlmPlugin(Plugin):
             render=self._render_board_page,
             plugin_id=self.id,
         )
+
+    def _render_board_item(self) -> list[dict[str, Any]]:
+        status = self.status()
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "keyvalue",
+                "items": [
+                    ["状态", "运行中" if status.get("worker_alive") else "未启动"],
+                    ["已处理到", f"{float(status.get('cursor', 0.0)):.0f}s"],
+                    ["累计错误", status.get("consecutive_errors", 0)],
+                    ["最近错误", status.get("last_error") or "—"],
+                ],
+            },
+            {
+                "type": "buttons",
+                "buttons": [
+                    {
+                        "label": "打开板书页",
+                        "action": "ui.open_page",
+                        "value": {"page_id": "vlm:board"},
+                        "class": "btn btn-sm btn-primary",
+                    },
+                    {
+                        "label": "VLM 设置",
+                        "action": "ui.open_page",
+                        "value": {"page_id": "settings:main"},
+                        "class": "btn btn-sm",
+                    },
+                ],
+            },
+        ]
+        return blocks
 
     def _render_board_page(self) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
@@ -302,13 +337,23 @@ class VlmPlugin(Plugin):
         while not self._stop_event.is_set():
             try:
                 self._process_next_window()
-            except Exception:
+            except Exception as exc:
                 logger.exception("VLM worker iteration failed")
+                self._last_error = f"{type(exc).__name__}: {exc}"
                 self._consecutive_errors += 1
+                ctx = self._ctx
+                if ctx is not None:
+                    ctx.events.emit(
+                        "vlm.error",
+                        session_id=ctx.streams.current.session_id,
+                        error=self._last_error,
+                    )
+                    ctx.ui.refresh("vlm.error")
                 backoff = min(10.0, 0.5 * (2 ** min(self._consecutive_errors, 5)))
                 self._stop_event.wait(backoff)
             else:
                 self._consecutive_errors = 0
+                self._last_error = ""
 
         # Flush remaining frames
         try:
@@ -424,17 +469,17 @@ class VlmPlugin(Plugin):
         timestamp = f"{_fmt_time(start)}–{_fmt_time(end)}"
         try:
             text = self._ask_image(image_path.read_bytes(), timestamp)
-        except Exception:
-            logger.exception("VLM LLM call failed")
-            self._consecutive_errors += 1
+        except Exception as exc:
+            self._last_error = f"{type(exc).__name__}: {exc}"
             ctx.events.emit(
                 "vlm.error",
                 session_id=ctx.streams.current.session_id,
                 start=start,
                 end=end,
-                error="LLM call failed",
+                error=self._last_error,
             )
-            return {"ok": False, "start": start, "end": end, "error": "LLM call failed"}
+            ctx.ui.refresh("vlm.error")
+            raise
 
         # --- Emit segment ---
         ctx.events.emit(

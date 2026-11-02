@@ -255,3 +255,17 @@ video { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }
   .workspace { grid-template-columns: 1fr; }
   .sidebar { display: none; }
 }
+
+/* --- interaction polish ------------------------------------------------ */
+.table-wrap { overflow-x: auto; }
+.markdown button {
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+  border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 12px;
+}
+.markdown button:hover { background: var(--panel-3); }
+.toolbox-body .cards { grid-template-columns: 1fr; }
+.toolbox-body .data-table { font-size: 11.5px; }
+.toolbox-body .btn { width: 100%; margin-top: 6px; }
+.toolbox-head { position: relative; padding-right: 56px; }
+.toolbox-head .btn-ghost { position: absolute; right: 8px; top: 10px; width: auto; margin: 0; }
+.page-content { max-width: 1680px; margin: 0 auto; width: 100%; }

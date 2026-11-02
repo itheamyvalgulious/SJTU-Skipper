@@ -59,51 +59,24 @@ def fuse_frames(
 
     Notes
     -----
-    - Fewer than 3 frames: falls back to the last frame.
-    - Any unhandled exception: returns the last decoded frame and
-      records a warning.
+    - At least 3 valid frames are required; there is no silent fallback.
+    - Decode/fusion errors are raised to the caller.
     """
-    if not frames:
-        raise ValueError("at least one frame is required")
+    if len(frames) < 3:
+        raise ValueError("at least 3 frames are required for fusion")
 
-    try:
-        return _fuse_impl(
-            frames,
-            crop=crop,
-            max_width=max_width,
-            align=align,
-            min_persistence=min_persistence,
-        )
-    except Exception:
-        logger.warning(
-            "fusion failed; falling back to last frame (%d frames)",
-            len(frames),
-            exc_info=True,
-        )
-        return _decode_last(frames, crop=crop, max_width=max_width)
+    return _fuse_impl(
+        frames,
+        crop=crop,
+        max_width=max_width,
+        align=align,
+        min_persistence=min_persistence,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Implementation
 # ---------------------------------------------------------------------------
-
-def _decode_last(
-    frames: Sequence[VideoFrame],
-    *,
-    crop: tuple[float, float, float, float],
-    max_width: int,
-) -> np.ndarray:
-    # Walk backwards to find the first valid JPEG.
-    for frame in reversed(frames):
-        try:
-            arr = _decode_jpeg(frame.data)
-            arr = _apply_crop(arr, crop)
-            arr = _resize_width(arr, max_width)
-            return arr
-        except Exception:
-            logger.debug("skipping corrupt frame in fallback", exc_info=True)
-    raise ValueError("all frames are undecodable")
-
 
 def _fuse_impl(
     frames: Sequence[VideoFrame],
@@ -118,10 +91,6 @@ def _fuse_impl(
     decoded = [_apply_crop(d, crop) for d in decoded]
     decoded = [_resize_width(d, max_width) for d in decoded]
     N = len(decoded)
-    if N < 3:
-        logger.debug("only %d frame(s) – returning last", N)
-        return decoded[-1]
-
     bh, bw = decoded[0].shape
     board_frames = np.stack(decoded, axis=0).astype(np.float32)
 

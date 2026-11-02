@@ -15,7 +15,7 @@
                                 │ UIManager（状态 + action）
 ┌───────────────────────────────┴──────────────────────────────────────┐
 │                         行为层（Behavior）                            │
-│  插件：llm-agent / summarize / demo                                   │
+│  插件：llm-agent / summarize / 自定义行为插件                          │
 │  能力：事件总线、流读取、LLM、UI、服务注册与调用                       │
 │  依赖：只依赖「流接口 + 事件 + 服务接口 + LLM 接口」                   │
 └───────────────▲───────────────────────────────▲──────────────────────┘
@@ -34,7 +34,7 @@
                                 │
 ┌───────────────────────────────┴──────────────────────────────────────┐
 │ LLM 层（协议无关）                                                    │
-│  Provider 注册表：openai-compatible / mock / 未来 anthropic 等         │
+│  Provider 注册表：openai-compatible / 未来 anthropic 等                 │
 │  统一 ChatRequest / ChatResponse / StreamEvent                        │
 │  重试、超时、流式 SSE、工具调用、图片输入、用量统计                    │
 └──────────────────────────────────────────────────────────────────────┘
@@ -289,7 +289,6 @@ stt
 vlm
 llm-agent
 summarize
-demo（可选）
 ```
 
 拓扑序由 `requires` 决定，不依赖注册顺序。`llm-agent` 依赖 `llm` + `settings`；`summarize` 依赖 `llm-agent`；`stt`/`vlm` 依赖 `llm`（复用 provider 配置）。
@@ -362,8 +361,6 @@ class Provider(Protocol):
   - 支持 `/chat/completions`、SSE 流式、工具调用、`image_url`（URL 或 data URL）。
   - base URL 归一化：`.../v1`、`.../v1/`、完整 `.../chat/completions` 均可。
   - 额外 header / body 可配置（如 `thinking: disabled`）。
-- `MockProvider`
-  - 用于 demo 和测试，可按脚本返回文本或工具调用。
 
 Provider 通过 `ProviderRegistry` 注册，后续可加 Anthropic、Gemini native、vLLM 等。
 
@@ -496,7 +493,7 @@ SettingsSpec(
 
 - 服务名：`llm`（`LLMService`）。
 - 注册 settings（见 5.4）。
-- 注册 `openai` provider；可注册 `mock`（demo/测试）。
+- 注册 `openai` provider。
 - 不注册 UI page；设置由 settings 插件统一渲染。
 
 ### 7.3 input（输入插件）
@@ -519,20 +516,25 @@ SettingsSpec(
   - 解析 JPEG SOI/EOI 边界，逐帧 `append_frame`。
 - 一个 `SourceManager` 保证同一时刻最多一个源；支持 pause/resume/stop/seek（seek 仅录播/本地文件）。
 - UI：
-  - 左侧 tab「课程」：toolbox「我的课程」「手动直播」「当前会话」。
-  - 课程 page：直播/录播两个表；每行有「观看」「处理」按钮。
-  - 会话 page：状态、进度、开始/停止、当前课程信息。
+  - 左侧 tab「课程」：toolbox「课程录播」「我的课程」。
+  - 左侧 tab「直播」：toolbox「今日直播」「手动播放 URL」。
+  - 右侧 tab「播放控制」：toolbox「当前播放」。
+  - 页面 `input:courses`：课程卡片与录播入口；`input:course:<id>`：只展示该课程的录播表。
+  - 页面 `input:live`：只展示今日正在/即将开始的直播表。
+  - 页面 `input:session`：播放状态、音频/视频时长、暂停/继续/停止。
+  - 页面 `input:manual`：手动 URL 表单。
+  - 录播与直播完全分离，不再把直播表嵌入课程录播页。
 - 行为层只看到 `hub.current.audio/video`，看不到 Canvas/SJTU/ffmpeg 对象。
 
 ### 7.4 stt（语音识别插件）
 
 - 服务名：`stt`。
-- 设置项：provider (`openai` / `faster-whisper` / `mock`)、model、language、chunk_seconds、overlap、min_seconds、enabled。
+- 设置项：provider (`none` / `openai` / `faster-whisper`)、model、language、chunk_seconds、overlap、min_seconds、enabled。
 - 工作线程：读 `audio`，按 `chunk_seconds` 切片，写临时 WAV，调用后端，追加 `transcript`。
 - 后端：
   - `OpenAITranscriptionBackend`：OpenAI 兼容 `/audio/transcriptions`。
   - `FasterWhisperBackend`：可选依赖，本地推理。
-  - `MockSTTBackend`：demo/测试。
+  - `none`：只接入音频流，不输出任何文字。
 - 重叠去重：保留 0.3–0.5 s 重叠，结果做最长公共前后缀裁剪。
 - 事件：`stt.segment`、`stt.error`。
 - UI：左侧 tab「课堂」下的 toolbox「转写」；page 显示实时文字流和状态。
@@ -596,14 +598,6 @@ SettingsSpec(
 - 成功后推进水位；失败保留水位，指数退避重试；连续失败发 `summarize.error`。
 - UI：左侧 tab「课堂」下的 toolbox「笔记」；page 三个 tab 展示文件，支持「立即总结」。
 
-### 7.8 demo
-
-- 可选插件，依赖全部核心插件。
-- 提供「演示」toolbox：
-  - 启动合成会话，按脚本向 `transcript` / `visual` 追加中文数学课堂内容；
-  - 使用 `MockProvider` 让 summarize 真正调用工具写文件；
-  - 无需 Canvas/API/ffmpeg，用于端到端验证 UI 与插件链路。
-
 ## 8. 数据与持久化
 
 ```text
@@ -648,7 +642,7 @@ data/agent/
 - 事件 `*.error` 可在 UI 状态栏查看。
 - LLM 错误分类：认证、限流、超时、服务端、协议解析、流中断。
 - 输入源断开：直播自动重连（指数退避，最大次数可配）；录播结束发 `input.status`。
-- STT/VLM 单窗口失败：记录并推进游标，避免永久卡死；连续失败降级（STT 可切换 mock，VLM 可关闭）。
+- STT/VLM 单窗口失败：保留游标并指数退避重试同一窗口，同时发出 `*.error` 并在 UI 显示；不跳过窗口、不静默回退。
 - Agent 工具异常：作为 tool 结果返回给模型，不中断循环；连续工具错误超过阈值则终止。
 
 ## 11. 安全与隐私
@@ -658,7 +652,7 @@ data/agent/
 - 文件工具限制在会话 workspace，拒绝 `..` 和绝对路径。
 - artifact 路由只允许 `data_dir` 下的路径。
 - UI 默认只监听 `127.0.0.1`；对外暴露需显式 `--host 0.0.0.0` 并自行加认证。
-- demo/mock 不访问外网。
+- 单元测试不访问外网；生产代码不包含 mock provider / mock STT 后端。
 
 ## 12. 目录结构
 
@@ -666,7 +660,7 @@ data/agent/
 src/                       # 新架构直接位于 src 下，不再有 lecture_agent 子目录
 ├── __main__.py
 ├── app.py                 # Runtime 构建 + FastAPI app factory
-├── cli.py                 # serve / check / demo
+├── cli.py                 # serve / check
 ├── config.py              # AppConfig、路径、.env
 ├── applog.py
 ├── core/
@@ -682,7 +676,6 @@ src/                       # 新架构直接位于 src 下，不再有 lecture_a
 │   ├── errors.py
 │   ├── provider.py
 │   ├── openai_compat.py
-│   ├── mock.py
 │   └── service.py
 ├── plugins/
 │   ├── builtin.py
@@ -693,7 +686,6 @@ src/                       # 新架构直接位于 src 下，不再有 lecture_a
 │   ├── vlm/
 │   ├── agent/
 │   ├── summarize/
-│   └── demo/
 ├── integrations/
 │   ├── sjtu_canvas.py     # 客户端池 + 目录封装
 │   └── sjtu_canvas_assistant/  # vendored SJTU Canvas/视频客户端
@@ -716,7 +708,7 @@ docs/
 5. **P4 输入**：SJTU catalog（VOD + live）/ ffmpeg source / UI pages / tests。
 6. **P5 STT/VLM**：后端、worker、picture_parser 融合、prompt、tests。
 7. **P6 UI**：FastAPI + 静态前端 + WebSocket + 端到端演示。
-8. **P7 收尾**：demo、README、架构文档、真实 Canvas 冒烟、代码审查。
+8. **P7 收尾**：README、架构文档、真实 Canvas 冒烟、代码审查。
 
 ## 14. 非目标（v1 不做）
 
@@ -731,7 +723,6 @@ docs/
 
 - `pytest` 全绿；核心模块单测覆盖流、事件、插件、设置、LLM 重试、Agent 工具、总结、UI、VLM 融合。
 - `sjtu-skipper check` 输出正确的拓扑加载顺序。
-- `sjtu-skipper demo` 在无外网、无 token 的情况下启动 UI，合成课堂内容，自动触发 summarize 并写出三个 Markdown 文件。
 - `sjtu-skipper serve` 能加载真实 settings；输入插件能列出 Canvas 课程与 SJTU 录播/直播（有 token 时）。
 - 输入、STT、VLM 三个模块除流接口外没有互相 import；行为插件没有 import 输入/STT/VLM 实现。
 - 所有 LLM 请求（Agent、VLM、Summary）都经过 `LLMService`，无插件直连 HTTP。

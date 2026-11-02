@@ -19,7 +19,7 @@ from typing import Any, Mapping
 class FileWorkspace:
     """A sandbox that maps logical names to absolute file paths.
 
-    Plugins (summarise, demo) create a workspace per session and pass it to
+    Plugins (for example summarise) create a workspace per session and pass it to
     ``AgentService.create_session(files=ws)``.  The agent tools only see the
     logical names; the real paths are never exposed to the LLM.
     """

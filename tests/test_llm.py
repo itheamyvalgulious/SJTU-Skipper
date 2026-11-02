@@ -21,7 +21,6 @@ from llm.errors import (
     LLMRetryExhausted,
     LLMStreamError,
 )
-from llm.mock import MockProvider
 from llm.openai_compat import (
     OpenAICompatibleProvider,
     _normalise_base_url,
@@ -99,6 +98,49 @@ def _sse_lines(*lines: str) -> bytes:
 )
 def test_normalise_base_url(raw: str, expected: str) -> None:
     assert _normalise_base_url(raw) == expected
+
+
+class ScriptedProvider:
+    """Test-only provider; production has no mock LLM provider."""
+
+    name = "scripted"
+
+    def __init__(self, script=None):
+        self.script = list(script or [])
+        self.calls = []
+
+    def _next_response(self, request):
+        self.calls.append({
+            "model": request.model,
+            "message_count": len(request.messages),
+            "tools": [t.name for t in request.tools],
+            "stream": request.stream,
+        })
+        if not self.script:
+            raise LLMError("scripted script exhausted")
+        item = self.script.pop(0)
+        result = item(request) if callable(item) else item
+        if isinstance(result, str):
+            return ChatResponse(content=result, model=self.name)
+        if isinstance(result, ChatResponse):
+            return result
+        return ChatResponse(content=str(result), model=self.name)
+
+    def chat(self, request):
+        return self._next_response(request)
+
+    def stream(self, request):
+        response = self._next_response(request)
+        text = response.content
+        chunks = [text[i:i + 3] for i in range(0, len(text), 3)] if text else [""]
+        for chunk in chunks:
+            yield StreamEvent(type="text", text=chunk)
+        for tc in response.tool_calls:
+            yield StreamEvent(type="tool_call", tool_call=tc)
+        yield StreamEvent(type="done", response=response)
+
+    def close(self):
+        pass
 
 
 def test_request_url_no_double_v1() -> None:
@@ -647,9 +689,9 @@ def test_stream_no_retry_after_first_delta() -> None:
 
 def test_service_profile_agent() -> None:
     """LLMService.chat(profile="agent") delegates to the configured provider."""
-    mock_provider = MockProvider(script=["agent response"])
+    scripted_provider = ScriptedProvider(script=["agent response"])
     service = LLMService()
-    service.register_provider("openai", mock_provider)
+    service.register_provider("openai", scripted_provider)
 
     response = service.chat(
         profile="agent",
@@ -678,9 +720,9 @@ def test_service_profile_vlm() -> None:
         configs.append(cfg)
         return cfg
 
-    mock_provider = MockProvider(script=["vlm reply"])
+    scripted_provider = ScriptedProvider(script=["vlm reply"])
     service = LLMService(config_provider=config_cb)
-    service.register_provider("openai", mock_provider)
+    service.register_provider("openai", scripted_provider)
 
     response = service.chat(profile="vlm", messages=[Message(role="user", content="describe this")])
     assert response.content == "vlm reply"
@@ -691,15 +733,15 @@ def test_service_profile_vlm() -> None:
 
 def test_service_message_dict() -> None:
     """LLMService accepts OpenAI-style dict messages."""
-    mock_provider = MockProvider(script=["ok"])
+    scripted_provider = ScriptedProvider(script=["ok"])
     service = LLMService()
-    service.register_provider("openai", mock_provider)
+    service.register_provider("openai", scripted_provider)
 
     response = service.chat(
         messages=[{"role": "user", "content": "test"}],
     )
     assert response.content == "ok"
-    assert len(mock_provider.calls) == 1
+    assert len(scripted_provider.calls) == 1
 
 
 def test_service_config_for() -> None:
@@ -730,29 +772,29 @@ def test_service_config_for() -> None:
 
 def test_service_info() -> None:
     service = LLMService()
-    mock_provider = MockProvider()
-    service.register_provider("openai", mock_provider)
+    scripted_provider = ScriptedProvider()
+    service.register_provider("openai", scripted_provider)
     info = service.info()
     assert "openai" in info["providers"]
     assert info["default_provider"] == "openai"
 
 
 def test_service_close() -> None:
-    mock_provider = MockProvider()
+    scripted_provider = ScriptedProvider()
     service = LLMService()
-    service.register_provider("openai", mock_provider)
+    service.register_provider("openai", scripted_provider)
     service.close()
     # Registry should be empty after close_all
     assert service.registry.names() == []
 
 
 # ---------------------------------------------------------------------------
-# MockProvider
+# ScriptedProvider
 # ---------------------------------------------------------------------------
 
 
-def test_mock_provider_text() -> None:
-    provider = MockProvider(script=["hello", "world"])
+def test_scripted_provider_text() -> None:
+    provider = ScriptedProvider(script=["hello", "world"])
     r1 = provider.chat(_make_request())
     assert r1.content == "hello"
     r2 = provider.chat(_make_request())
@@ -761,8 +803,8 @@ def test_mock_provider_text() -> None:
         provider.chat(_make_request())
 
 
-def test_mock_provider_response_objects() -> None:
-    provider = MockProvider(script=[
+def test_scripted_provider_response_objects() -> None:
+    provider = ScriptedProvider(script=[
         ChatResponse(content="a", finish_reason="stop", model="mock"),
     ])
     r = provider.chat(_make_request())
@@ -770,8 +812,8 @@ def test_mock_provider_response_objects() -> None:
     assert r.model == "mock"
 
 
-def test_mock_provider_tool_calls() -> None:
-    provider = MockProvider(script=[
+def test_scripted_provider_tool_calls() -> None:
+    provider = ScriptedProvider(script=[
         ChatResponse(
             content="",
             tool_calls=[ToolCall(id="c1", name="f", arguments={"x": 1})],
@@ -784,8 +826,8 @@ def test_mock_provider_tool_calls() -> None:
     assert r.tool_calls[0].arguments == {"x": 1}
 
 
-def test_mock_provider_stream() -> None:
-    provider = MockProvider(script=["abcdef"])
+def test_scripted_provider_stream() -> None:
+    provider = ScriptedProvider(script=["abcdef"])
     events = list(provider.stream(_make_request()))
     text_events = [e for e in events if e.type == "text"]
     assert len(text_events) == 2  # 3-char chunks: "abc", "def"
@@ -795,11 +837,11 @@ def test_mock_provider_stream() -> None:
     assert done[0].response.content == "abcdef"
 
 
-def test_mock_provider_callable_script() -> None:
+def test_scripted_provider_callable_script() -> None:
     def handler(req: ChatRequest) -> str:
         return f"echo: {req.messages[0].content}"
 
-    provider = MockProvider(script=[handler])
+    provider = ScriptedProvider(script=[handler])
     r = provider.chat(_make_request())
     assert r.content == "echo: hello"
 
@@ -861,8 +903,8 @@ def test_llm_plugin_setup_registers_settings_and_service() -> None:
     # Replace the openai provider with a mock for testing
     llm_service.registry.unregister("openai")
     llm_service.registry.unregister("openai-compatible")
-    mock_provider = MockProvider(script=["plugin test ok"])
-    llm_service.register_provider("openai", mock_provider)
+    scripted_provider = ScriptedProvider(script=["plugin test ok"])
+    llm_service.register_provider("openai", scripted_provider)
     response = llm_service.chat(
         profile="agent",
         messages=[Message(role="user", content="hi")],

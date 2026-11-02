@@ -416,7 +416,7 @@
         item.description ? el("div", { class: "toolbox-desc", text: item.description }) : null,
       ]);
       if (pageId) {
-        const open = actionButton("打开", "ui.open_page", { page_id: pageId }, "btn btn-sm btn-ghost");
+        const open = actionButton("打开页面", "ui.open_page", { page_id: pageId }, "btn btn-sm btn-ghost");
         open.style.float = "right";
         head.appendChild(open);
       }
@@ -451,7 +451,10 @@
   function renderPageTabs() {
     const bar = $("#page-tabs");
     bar.replaceChildren();
-    const pages = state.ui.pages || [];
+    const openIds = state.ui.open_pages || [];
+    const pages = (state.ui.pages || []).filter(
+      (p) => openIds.includes(p.id) || p.id === state.ui.active_page
+    );
     for (const page of pages) {
       const active = page.id === state.ui.active_page;
       const tab = el("div", { class: `page-tab ${active ? "active" : ""}` }, [
@@ -483,7 +486,6 @@
         el("div", { class: "welcome-mark", text: "∮" }),
         el("h2", { text: "开始一节课" }),
         el("p", { text: "左侧「课程」里选择录播或直播；设置里填入 Canvas token 与模型 API key。" }),
-        el("p", { class: "muted", text: "也可以运行 sjtu-skipper demo 查看完整链路。" }),
       ]));
       return;
     }

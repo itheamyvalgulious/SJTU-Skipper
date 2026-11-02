@@ -177,7 +177,7 @@ def build_runtime(
 ) -> Runtime:
     """Construct a runtime without starting it.
 
-    ``llm`` can be injected for tests/demo.  Otherwise the ``llm`` plugin must
+    ``llm`` can be injected for tests.  Otherwise the ``llm`` plugin must
     register the service during setup.
     """
 

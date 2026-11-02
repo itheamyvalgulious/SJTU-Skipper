@@ -31,17 +31,7 @@ python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
 
-### 2. 离线演示（无需 token / 网络）
-
-```bash
-.venv/bin/sjtu-skipper demo
-# 打开 http://127.0.0.1:8765
-# 兼容别名：.venv/bin/lecture-agent
-```
-
-点击左侧「演示」→「开始演示」：系统会合成一段复分析课堂内容，自动触发 summarize Agent，把内容分类写入 `knowledge.md`、`gossip.md`、`notice.md`。
-
-### 3. 真实运行
+### 2. 真实运行
 
 ```bash
 .venv/bin/sjtu-skipper check   # 检查插件拓扑加载
@@ -67,11 +57,10 @@ LLM_MODEL=...
 
 设置会持久化到 `data/agent/settings.json`（权限 0600）。
 
-### 4. 命令行
+### 3. 命令行
 
 ```bash
 sjtu-skipper serve [--host 0.0.0.0] [--port 8765] [--data-dir PATH]
-sjtu-skipper demo
 sjtu-skipper check
 
 # 兼容旧命令：lecture-agent <同上>
@@ -108,7 +97,6 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 | vlm | `vlm` | 视频流 -> 融合板书 -> 文字流 |
 | llm-agent | `llm-agent` | 多会话 REPL Agent，info/read/replace/append |
 | summarize | `summarize` | 按 N 字符/秒触发，写 knowledge/gossip/notice |
-| demo | `demo` | 离线合成课堂，端到端演示 |
 
 ## 旧板书流水线
 
@@ -130,7 +118,7 @@ src/                              # 新总 Agent（直接位于 src 下）
 ├── applog.py
 ├── core/                         # 流、事件、插件、服务、UI、runtime
 ├── llm/                          # 协议无关 LLM 层
-├── plugins/                      # settings/llm/input/stt/vlm/agent/summarize/demo
+├── plugins/                      # settings/llm/input/stt/vlm/agent/summarize
 ├── integrations/                 # vendored SJTU Canvas/视频客户端
 └── ui/                           # FastAPI + 静态前端
 legacy/                           # 旧脚本与旧子模块，git-ignored，仅本地保留
@@ -151,7 +139,7 @@ data/                             # 运行产物（gitignore）
 .venv/bin/python -m pytest -q
 ```
 
-测试不访问网络：LLM 用 `httpx.MockTransport` 或 `tests/support.py` 的 `FakeLLM`，Canvas/SJTU 用 fake client；demo 使用进程内 `DemoLLM`。
+测试不访问网络：LLM 用 `httpx.MockTransport` 或测试内的脚本化 provider，Canvas/SJTU 用 fake client。生产代码不包含 mock provider / mock STT 后端。
 
 ## 说明
 

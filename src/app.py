@@ -7,7 +7,7 @@ from typing import Any
 
 from config import AppConfig, load_config
 from core.runtime import Runtime, build_runtime
-from plugins.builtin import builtin_plugins, demo_plugins
+from plugins.builtin import builtin_plugins
 
 logger = logging.getLogger("lecture_agent.app")
 
@@ -15,14 +15,6 @@ logger = logging.getLogger("lecture_agent.app")
 def build_default_runtime(config: AppConfig | None = None) -> Runtime:
     config = (config or load_config()).resolve()
     plugins = builtin_plugins(config)
-    return build_runtime(config, plugins=plugins)
-
-
-def build_demo_runtime(config: AppConfig | None = None) -> Runtime:
-    config = (config or load_config()).resolve()
-    config.demo_mode = True
-    config.enable_summarize = True
-    plugins = demo_plugins(config)
     return build_runtime(config, plugins=plugins)
 
 
@@ -38,13 +30,12 @@ def run_server(
     *,
     config: AppConfig | None = None,
     runtime: Runtime | None = None,
-    demo: bool = False,
 ) -> None:
     import uvicorn
 
     config = (config or load_config()).resolve()
     if runtime is None:
-        runtime = build_demo_runtime(config) if demo else build_default_runtime(config)
+        runtime = build_default_runtime(config)
     app = create_app(runtime)
     uvicorn.run(
         app,
@@ -57,7 +48,6 @@ def run_server(
 __all__ = [
     "Runtime",
     "build_default_runtime",
-    "build_demo_runtime",
     "create_app",
     "run_server",
 ]

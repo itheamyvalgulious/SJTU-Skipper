@@ -58,18 +58,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_demo(args: argparse.Namespace) -> int:
-    from app import build_demo_runtime, create_app
-    import uvicorn
-
-    cfg = _config_from_args(args)
-    cfg.demo_mode = True
-    runtime = build_demo_runtime(cfg)
-    app = create_app(runtime)
-    uvicorn.run(app, host=cfg.host, port=cfg.port, log_level=cfg.log_level.lower())
-    return 0
-
-
 def cmd_check(args: argparse.Namespace) -> int:
     from app import build_default_runtime
 
@@ -97,10 +85,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(serve)
     serve.add_argument("--plugin", action="append", default=[], help="extra plugin module:Class")
     serve.set_defaults(func=cmd_serve)
-
-    demo = sub.add_parser("demo", help="start the web UI with synthetic classroom content")
-    _add_common(demo)
-    demo.set_defaults(func=cmd_demo)
 
     check = sub.add_parser("check", help="load plugins and print the topological order")
     _add_common(check)

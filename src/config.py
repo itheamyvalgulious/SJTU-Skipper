@@ -10,7 +10,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data" / "agent"
 
 
@@ -39,7 +39,6 @@ class AppConfig:
     enable_stt: bool = True
     enable_vlm: bool = True
     enable_summarize: bool = True
-    demo_mode: bool = False
     config_file: Path | None = None
 
     def resolve(self) -> "AppConfig":
@@ -98,7 +97,6 @@ def load_config(
         cfg.enable_summarize = _coerce_bool(
             section.get("enable_summarize"), cfg.enable_summarize
         )
-        cfg.demo_mode = _coerce_bool(section.get("demo_mode"), cfg.demo_mode)
         cfg.config_file = candidate
 
     if data_dir is not None:

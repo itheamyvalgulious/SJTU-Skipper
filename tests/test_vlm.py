@@ -100,20 +100,17 @@ def _make_frames(
 # ---------------------------------------------------------------------------
 
 class TestFusion:
-    def test_single_frame_returns_decoded(self):
+    def test_single_frame_raises(self):
         arr = _synthetic_frame()
         jpeg = _to_jpeg(arr)
         frames = [_make_video_frame(jpeg, 0.0, 1.0)]
-        result = fuse_frames(frames)
-        assert isinstance(result, np.ndarray)
-        assert result.dtype == np.uint8
-        assert result.ndim == 2
-        assert result.size > 0
+        with pytest.raises(ValueError, match="at least 3 frames"):
+            fuse_frames(frames)
 
-    def test_two_frames_fallback_to_last(self):
+    def test_two_frames_raise(self):
         frames = _make_frames(2)
-        result = fuse_frames(frames)
-        assert result.shape[1] <= WIDTH  # may be resized
+        with pytest.raises(ValueError, match="at least 3 frames"):
+            fuse_frames(frames)
 
     def test_many_frames_output_non_empty(self):
         frames = _make_frames(20)
@@ -124,7 +121,7 @@ class TestFusion:
         assert result.max() > 0  # white lines should survive
 
     def test_empty_frames_raises(self):
-        with pytest.raises(ValueError, match="at least one frame"):
+        with pytest.raises(ValueError, match="at least 3 frames"):
             fuse_frames([])
 
     def test_crop_reduces_size(self):
@@ -156,17 +153,17 @@ class TestFusion:
         result = fuse_frames(frames)
         assert np.mean(result) < 30  # mostly dark
 
-    def test_exception_falls_back_to_last_frame(self):
-        """Corrupt JPEG after the first frame triggers fallback to last valid."""
+    def test_corrupt_frame_raises(self):
+        """Corrupt JPEGs must surface an error, not fall back silently."""
         good_arr = _synthetic_frame()
         good_jpeg = _to_jpeg(good_arr)
         frames = [
             _make_video_frame(good_jpeg, 0.0, 1.0),
-            _make_video_frame(b"not-a-jpeg", 1.0, 2.0),
+            _make_video_frame(good_jpeg, 1.0, 2.0),
+            _make_video_frame(b"not-a-jpeg", 2.0, 3.0),
         ]
-        # First frame decodes fine, second corrupts decode -> exception caught
-        result = fuse_frames(frames)
-        assert result.size > 0
+        with pytest.raises(Exception):
+            fuse_frames(frames)
 
 
 # ---------------------------------------------------------------------------
@@ -495,13 +492,12 @@ class TestVlmPlugin:
         arr = _synthetic_frame()
         jpeg = _to_jpeg(arr)
         frames = [_make_video_frame(jpeg, 0.0, 1.0)]
-        result = vlm_plugin.process_window(0.0, 1.0, frames)
+        with pytest.raises(RuntimeError, match="simulated LLM failure"):
+            vlm_plugin.process_window(0.0, 1.0, frames)
         vlm_ctx.events.flush(timeout=1.0)
 
-        assert result.get("ok") is False
-        assert "error" in result
         assert len(errors) >= 1
-        assert errors[0].get("error") == "LLM call failed"
+        assert "simulated LLM failure" in errors[0].get("error", "")
 
 
 # ---------------------------------------------------------------------------

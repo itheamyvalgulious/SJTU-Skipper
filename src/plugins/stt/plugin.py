@@ -6,10 +6,9 @@ the duplicated text against the previously appended line before appending a
 ``TextItem`` with ``source="stt"``.  Session switches flush the tail of the old
 session and reset the cursor; a session ``ended_at`` flushes the tail too.
 
-Failures never propagate out of the worker: the plugin degrades to an error
-status (visible in the page and in ``stt.error``), retries the same window with
-exponential backoff, and skips it after a few attempts so a bad chunk cannot
-stall the rest of the lesson.
+Failures surface as an error status (visible in the page and in ``stt.error``).
+The same window is retried with exponential backoff instead of being skipped,
+so a broken backend is reported loudly and no audio is silently dropped.
 """
 
 from __future__ import annotations
@@ -43,7 +42,6 @@ ITEM_ID = "stt.transcript"
 PAGE_ID = "stt:transcript"
 
 MIN_OVERLAP_CHARS = 4
-MAX_WINDOW_RETRIES = 3
 
 
 def _specs() -> tuple[SettingsSpec, ...]:
@@ -61,10 +59,10 @@ def _specs() -> tuple[SettingsSpec, ...]:
             key="stt.provider",
             label="STT 后端",
             type="select",
-            default="mock",
+            default="none",
             group="STT",
             options=PROVIDERS,
-            description="openai 走兼容接口；faster-whisper 需可选依赖；mock 用于演示与测试。",
+            description="none = 只接入音频流、不输出文字；openai = 兼容接口；faster-whisper = 本地依赖。",
             order=11,
         ),
         SettingsSpec(
@@ -118,7 +116,7 @@ def _specs() -> tuple[SettingsSpec, ...]:
             type="string",
             default="",
             group="STT",
-            description="留空则回退到 llm 的 stt profile 配置。",
+            description="OpenAI 兼容转写接口的 Base URL。",
             placeholder="https://api.openai.com/v1",
             order=17,
         ),
@@ -128,7 +126,7 @@ def _specs() -> tuple[SettingsSpec, ...]:
             type="secret",
             default="",
             group="STT",
-            description="留空则回退到 llm 的 stt profile 配置。",
+            description="OpenAI 兼容转写接口的 API Key。",
             order=18,
         ),
     )
@@ -136,10 +134,10 @@ def _specs() -> tuple[SettingsSpec, ...]:
 
 @dataclass(frozen=True, slots=True)
 class STTConfig:
-    """Snapshot of the STT settings (plus llm fallbacks)."""
+    """Snapshot of the STT settings."""
 
     enabled: bool = True
-    provider: str = "mock"
+    provider: str = "none"
     model: str = "whisper-1"
     language: str = "zh"
     chunk_seconds: float = 30.0
@@ -174,7 +172,7 @@ def _as_text(value: Any, default: str = "") -> str:
 
 
 class STTService:
-    """Public ``stt`` service consumed by UI/demo/other plugins.
+    """Public ``stt`` service consumed by UI/other plugins.
 
     The service is a thin facade over the plugin so callers never need the
     worker internals: ``status()`` for the UI, ``transcribe_once()`` for
@@ -395,19 +393,14 @@ class SttPlugin(Plugin):
             return default
 
     def config(self) -> STTConfig:
-        """Read the current settings, falling back to the ``stt`` llm profile."""
+        """Read the current settings; no implicit fallback to another profile."""
 
         base_url = _as_text(self._get("stt.base_url", ""))
         api_key = _as_text(self._get("stt.api_key", ""))
         model = _as_text(self._get("stt.model", ""))
-        if not base_url or not api_key or not model:
-            profile_base, profile_key, profile_model = self._llm_profile()
-            base_url = base_url or profile_base
-            api_key = api_key or profile_key
-            model = model or profile_model
         return STTConfig(
             enabled=_as_bool(self._get("stt.enabled", True), True),
-            provider=_as_text(self._get("stt.provider", "mock"), "mock").lower(),
+            provider=_as_text(self._get("stt.provider", "none"), "none").lower(),
             model=model or "whisper-1",
             language=_as_text(self._get("stt.language", "zh")),
             chunk_seconds=_as_float(self._get("stt.chunk_seconds", 30.0), 30.0),
@@ -417,33 +410,14 @@ class SttPlugin(Plugin):
             api_key=api_key,
         )
 
-    def _llm_profile(self) -> tuple[str, str, str]:
-        ctx = self._ctx
-        if ctx is None:
-            return "", "", ""
-        getter = getattr(ctx.llm, "config_for", None)
-        if not callable(getter):
-            return "", "", ""
-        try:
-            profile = getter("stt")
-        except Exception:  # noqa: BLE001 - llm may not be ready yet
-            return "", "", ""
-        if profile is None:
-            return "", "", ""
-        return (
-            _as_text(getattr(profile, "base_url", "")),
-            _as_text(getattr(profile, "api_key", "")),
-            _as_text(getattr(profile, "model", "")),
-        )
-
     def _config_error(self, cfg: STTConfig) -> str:
         if cfg.provider not in PROVIDERS:
             return f"未知 STT provider：{cfg.provider}"
         if cfg.provider == "openai":
             if not cfg.base_url:
-                return "缺少 STT base_url（stt.base_url 或 llm stt profile）"
+                return "缺少 STT base_url（请在设置中填写 stt.base_url）"
             if not cfg.api_key:
-                return "缺少 STT API Key（stt.api_key 或 llm stt profile）"
+                return "缺少 STT API Key（请在设置中填写 stt.api_key）"
         if cfg.chunk_seconds <= 0:
             return "stt.chunk_seconds 必须为正数"
         if cfg.overlap < 0 or cfg.overlap >= cfg.chunk_seconds:
@@ -568,6 +542,12 @@ class SttPlugin(Plugin):
         if not cfg.enabled:
             self._set_state("disabled", "")
             return 0
+        if cfg.provider == "none":
+            # Audio is connected, but no transcription backend is attached:
+            # deliberately produce no text and do not move the cursor, so a
+            # later backend can transcribe the whole session.
+            self._set_state("idle", "")
+            return 0
         error = self._config_error(cfg)
         if error:
             self._set_state("error", error, emit=True)
@@ -599,17 +579,10 @@ class SttPlugin(Plugin):
             outcome = self._process_window(session, window, cfg)
 
             if outcome == "failed":
+                # No silent skip: keep the cursor and surface the error.  The
+                # next pump retries the same window after the backoff delay.
                 with self._lock:
                     self._window_failures += 1
-                    failures = self._window_failures
-                if failures < MAX_WINDOW_RETRIES:
-                    break  # keep the cursor; retry after backoff
-                with self._lock:
-                    self._cursor = end
-                    self._window_failures = 0
-                self._logger.warning(
-                    "STT skipping window %.1f-%.1f after %d failures", cursor, end, failures
-                )
                 break
 
             if outcome == "empty":
@@ -839,6 +812,8 @@ class SttPlugin(Plugin):
     def _state_label(self, status: dict[str, Any]) -> str:
         if not status["enabled"]:
             return "已关闭"
+        if status.get("provider") == "none":
+            return "未接入 STT 后端（仅接收音频流）"
         return {
             "idle": "等待音频",
             "running": "转写中",
@@ -860,7 +835,7 @@ class SttPlugin(Plugin):
     def _status_rows(self, status: dict[str, Any]) -> list[list[str]]:
         rows = [
             ["状态", self._state_label(status)],
-            ["后端", status["provider"]],
+            ["后端", "未接入" if status["provider"] == "none" else status["provider"]],
             ["模型", status["model"] or "-"],
             ["语言", status["language"] or "自动"],
             ["会话", status["session_id"] or "-"],
@@ -878,6 +853,25 @@ class SttPlugin(Plugin):
         text = self._recent_text(limit=2)
         if text:
             blocks.append({"type": "text", "text": text})
+        blocks.append(
+            {
+                "type": "buttons",
+                "buttons": [
+                    {
+                        "label": "打开转写页",
+                        "action": "ui.open_page",
+                        "value": {"page_id": PAGE_ID},
+                        "class": "btn btn-sm btn-primary",
+                    },
+                    {
+                        "label": "STT 设置",
+                        "action": "ui.open_page",
+                        "value": {"page_id": "settings:main"},
+                        "class": "btn btn-sm",
+                    },
+                ],
+            }
+        )
         return blocks
 
     def _render_page(self) -> list[dict[str, Any]]:

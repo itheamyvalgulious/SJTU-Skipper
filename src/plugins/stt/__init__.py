@@ -13,7 +13,6 @@ from .audio import Window, compute_windows, dedupe_overlap, pcm_to_wav, wav_dura
 from .backends import (
     PROVIDERS,
     FasterWhisperBackend,
-    MockSTTBackend,
     OpenAITranscriptionBackend,
     STTBackend,
     STTBackendError,
@@ -29,7 +28,6 @@ from .plugin import STTConfig, STTPlugin, STTService, SttPlugin
 __all__ = [
     "PROVIDERS",
     "FasterWhisperBackend",
-    "MockSTTBackend",
     "OpenAITranscriptionBackend",
     "STTBackend",
     "STTBackendError",

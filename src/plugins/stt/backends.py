@@ -1,12 +1,11 @@
 """Speech-to-text backends.
 
-Three implementations share one tiny protocol:
+Two implementations share one tiny protocol:
 
 * :class:`OpenAITranscriptionBackend` — any OpenAI-compatible
   ``/audio/transcriptions`` endpoint (multipart upload, ``httpx``).
 * :class:`FasterWhisperBackend` — optional local inference; the dependency is
   imported lazily so the core install stays light.
-* :class:`MockSTTBackend` — deterministic placeholder text for demo/tests.
 
 Backends only translate WAV bytes into :class:`STTResult`; they never touch
 streams, settings or the event bus.  That keeps them usable from
@@ -24,11 +23,10 @@ from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 import httpx
 
-from .audio import wav_duration
 
 DEFAULT_MODEL = "whisper-1"
 DEFAULT_FASTER_WHISPER_MODEL = "base"
-PROVIDERS: tuple[str, ...] = ("openai", "faster-whisper", "mock")
+PROVIDERS: tuple[str, ...] = ("none", "openai", "faster-whisper")
 
 TRANSCRIPTION_PATH = "/audio/transcriptions"
 
@@ -249,7 +247,7 @@ def _import_faster_whisper() -> Any:
     except ImportError as exc:  # pragma: no cover - dependency is optional
         raise STTUnavailableError(
             "未安装 faster-whisper，无法本地转写；请执行 "
-            "`.venv/bin/pip install 'sjtu-skipper[stt]'` 或把 stt.provider 改为 mock/openai"
+            "`.venv/bin/pip install 'sjtu-skipper[stt]'` 或把 stt.provider 改为 none/openai"
         ) from exc
     return faster_whisper
 
@@ -343,62 +341,6 @@ class FasterWhisperBackend:
         )
 
 
-class MockSTTBackend:
-    """Scripted backend: returns fixed lines or duration-based placeholder text.
-
-    ``script`` is cycled in call order so multi-window tests can control the
-    overlap behaviour; without a script every call returns a distinct Chinese
-    placeholder mentioning the chunk duration.
-    """
-
-    name = "mock"
-
-    def __init__(
-        self,
-        *,
-        script: Sequence[str] | None = None,
-        language: str = "zh",
-    ) -> None:
-        self.script = list(script or [])
-        self.language = language
-        self.calls = 0
-        self._lock = threading.RLock()
-
-    def transcribe(
-        self,
-        wav_bytes: bytes,
-        *,
-        language: str | None = None,
-        model: str | None = None,
-    ) -> STTResult:
-        """Return the next scripted line, or a placeholder for this duration."""
-
-        with self._lock:
-            self.calls += 1
-            call = self.calls
-        duration = 0.0
-        if wav_bytes:
-            try:
-                duration = wav_duration(wav_bytes)
-            except ValueError:
-                duration = 0.0
-        if self.script:
-            text = str(self.script[(call - 1) % len(self.script)])
-        else:
-            text = f"（模拟转写）第 {call} 段，约 {duration:.1f} 秒。"
-        return STTResult(
-            text=text,
-            segments=[STTSegment(start=0.0, end=round(duration, 3), text=text)],
-            raw={
-                "provider": self.name,
-                "duration": duration,
-                "call": call,
-                "model": model,
-                "language": language or self.language,
-            },
-        )
-
-
 def create_backend(
     provider: str,
     *,
@@ -406,7 +348,6 @@ def create_backend(
     api_key: str = "",
     model: str = "",
     timeout: float = 60.0,
-    script: Sequence[str] | None = None,
 ) -> STTBackend:
     """Build a backend by name, raising a clear error for unusable choices."""
 
@@ -424,8 +365,8 @@ def create_backend(
         )
     if name in ("faster-whisper", "faster_whisper", "whisper"):
         return FasterWhisperBackend(model=model or DEFAULT_FASTER_WHISPER_MODEL)
-    if name == "mock":
-        return MockSTTBackend(script=script)
+    if name == "none":
+        raise STTUnavailableError("STT provider 为 none，未接入转写后端")
     raise STTUnavailableError(
         f"未知 STT provider：{provider!r}（可选：{', '.join(PROVIDERS)}）"
     )

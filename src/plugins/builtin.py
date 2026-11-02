@@ -39,13 +39,3 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
     if config.enable_summarize:
         plugins.append(SummarizePlugin())
     return plugins
-
-
-def demo_plugins(config: AppConfig) -> list["Plugin"]:
-    from .demo.llm import DemoLLMPlugin
-    from .demo.plugin import DemoPlugin
-
-    plugins = [p for p in builtin_plugins(config) if p.id != "llm"]
-    plugins.insert(1, DemoLLMPlugin())
-    plugins.append(DemoPlugin())
-    return plugins

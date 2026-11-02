@@ -24,9 +24,10 @@ from core.streams import StreamHub
 from core.ui import UIManager
 from plugins.stt import (
     FasterWhisperBackend,
-    MockSTTBackend,
     OpenAITranscriptionBackend,
     STTBackendError,
+    STTResult,
+    STTSegment,
     STTUnavailableError,
     compute_windows,
     create_backend,
@@ -60,6 +61,29 @@ def pcm(seconds: float, *, sample_rate: int = SAMPLE_RATE, fill: int = 0) -> byt
     frames = int(round(seconds * sample_rate))
     sample = int(fill).to_bytes(2, "little", signed=True)
     return sample * frames
+
+
+class FakeSTTBackend:
+    """Test-only scripted backend; production has no mock backend."""
+
+    name = "fake"
+
+    def __init__(self, *, script: list[str] | None = None) -> None:
+        self.script = list(script or [])
+        self.calls = 0
+
+    def transcribe(self, wav_bytes: bytes, *, language=None, model=None) -> STTResult:
+        self.calls += 1
+        duration = wav_duration(wav_bytes) if wav_bytes else 0.0
+        if self.script:
+            text = self.script[(self.calls - 1) % len(self.script)]
+        else:
+            text = f"（测试转写）第 {self.calls} 段，约 {duration:.1f} 秒。"
+        return STTResult(
+            text=text,
+            segments=[STTSegment(start=0.0, end=round(duration, 3), text=text)],
+            raw={"provider": self.name, "duration": duration, "call": self.calls},
+        )
 
 
 class ConfigLLM:
@@ -128,7 +152,9 @@ def capture_events(bus: EventBus) -> tuple[list[dict[str, Any]], list[dict[str, 
 
 
 BASE_SETTINGS: dict[str, Any] = {
-    "stt.provider": "mock",
+    "stt.provider": "openai",
+    "stt.base_url": "http://fake/v1",
+    "stt.api_key": "fake-key",
     "stt.chunk_seconds": 1.0,
     "stt.overlap": 0.2,
     "stt.min_seconds": 0.4,
@@ -140,6 +166,8 @@ def make_plugin(env, **kwargs: Any) -> SttPlugin:
     settings.update(kwargs.pop("settings", {}))
     for key, value in settings.items():
         env.settings.set(key, value)
+    if "backend_factory" not in kwargs:
+        kwargs["backend_factory"] = lambda cfg: FakeSTTBackend()
     plugin = SttPlugin(auto_start=False, **kwargs)
     plugin.setup(env.ctx)
     return plugin
@@ -345,8 +373,8 @@ def test_faster_whisper_maps_segments_with_injected_model() -> None:
     assert engine.calls == [{"language": "zh", "vad_filter": True}]
 
 
-def test_mock_backend_uses_duration_and_script() -> None:
-    backend = MockSTTBackend()
+def test_fake_backend_uses_duration_and_script() -> None:
+    backend = FakeSTTBackend()
     first = backend.transcribe(pcm_to_wav(pcm(1.0)))
     second = backend.transcribe(pcm_to_wav(pcm(2.5)))
 
@@ -356,7 +384,7 @@ def test_mock_backend_uses_duration_and_script() -> None:
     assert first.segments[0].end == pytest.approx(1.0)
     assert second.segments[0].end == pytest.approx(2.5)
 
-    scripted = MockSTTBackend(script=["甲", "乙"])
+    scripted = FakeSTTBackend(script=["甲", "乙"])
     wav = pcm_to_wav(pcm(0.5))
     assert [scripted.transcribe(wav).text for _ in range(3)] == ["甲", "乙", "甲"]
 
@@ -368,7 +396,8 @@ def test_create_backend_validates_configuration() -> None:
         create_backend("openai", base_url="http://x/v1", api_key="")
     with pytest.raises(STTUnavailableError, match="未知 STT provider"):
         create_backend("nope")
-    assert isinstance(create_backend("mock"), MockSTTBackend)
+    with pytest.raises(STTUnavailableError, match="none"):
+        create_backend("none")
     assert isinstance(
         create_backend("faster-whisper", model="base"), FasterWhisperBackend
     )
@@ -396,13 +425,13 @@ def test_plugin_metadata_and_registration(tmp_path) -> None:
         "stt.base_url",
         "stt.api_key",
     }
-    assert specs["stt.provider"].options == ("openai", "faster-whisper", "mock")
+    assert specs["stt.provider"].options == ("none", "openai", "faster-whisper")
     assert specs["stt.api_key"].secret is True
     assert specs["stt.api_key"].type == "secret"
 
     service = env.services.require("stt")
-    assert service.status()["provider"] == "mock"
-    assert service.backends() == ["openai", "faster-whisper", "mock"]
+    assert service.status()["provider"] == "openai"
+    assert service.backends() == ["none", "openai", "faster-whisper"]
     assert env.ctx.meta.snapshot()["stt"]["state"] in {"idle", "running"}
 
     snapshot = env.ui.snapshot()
@@ -469,7 +498,7 @@ def test_overlap_dedupe_trims_repeated_text(tmp_path) -> None:
     plugin = make_plugin(
         env,
         settings=settings,
-        backend_factory=lambda cfg: MockSTTBackend(script=script),
+        backend_factory=lambda cfg: FakeSTTBackend(script=script),
     )
 
     env.hub.current.audio.append(pcm(5.0))
@@ -539,7 +568,10 @@ def test_disabled_plugin_does_not_consume(tmp_path) -> None:
 def test_missing_api_key_reports_error_without_blocking(tmp_path) -> None:
     env = make_env(tmp_path, llm=ConfigLLM())
     segments, errors = capture_events(env.bus)
-    plugin = make_plugin(env, settings={"stt.provider": "openai"})
+    plugin = make_plugin(
+        env,
+        settings={"stt.provider": "openai", "stt.base_url": "", "stt.api_key": ""},
+    )
 
     env.hub.current.audio.append(pcm(2.0))
     assert plugin.pump() == 0
@@ -556,22 +588,22 @@ def test_missing_api_key_reports_error_without_blocking(tmp_path) -> None:
     plugin.teardown()
 
 
-def test_config_falls_back_to_llm_stt_profile(tmp_path) -> None:
-    llm = ConfigLLM(base_url="https://llm.example/v1", api_key="llm-key", model="llm-model")
-    env = make_env(tmp_path, llm=llm)
+def test_config_uses_explicit_stt_settings_only(tmp_path) -> None:
+    env = make_env(tmp_path, llm=ConfigLLM(base_url="https://llm.example/v1", api_key="llm-key"))
     plugin = make_plugin(
         env,
-        settings={"stt.provider": "openai", "stt.model": "", "stt.language": "zh"},
+        settings={
+            "stt.provider": "openai",
+            "stt.model": "whisper-1",
+            "stt.base_url": "",
+            "stt.api_key": "",
+        },
     )
-
     cfg = plugin.config()
-    assert cfg.base_url == "https://llm.example/v1"
-    assert cfg.api_key == "llm-key"
-    assert cfg.model == "llm-model"
-    assert llm.profiles and set(llm.profiles) == {"stt"}
-    assert plugin.status()["has_api_key"] is True
+    assert cfg.base_url == ""
+    assert cfg.api_key == ""
+    assert cfg.model == "whisper-1"
 
-    # Explicit settings win over the profile.
     env.settings.set("stt.base_url", "https://own.example/v1")
     env.settings.set("stt.api_key", "own-key")
     cfg = plugin.config()
@@ -580,7 +612,7 @@ def test_config_falls_back_to_llm_stt_profile(tmp_path) -> None:
     plugin.teardown()
 
 
-def test_failures_back_off_and_skip_stuck_window(tmp_path) -> None:
+def test_failures_back_off_and_keep_window(tmp_path) -> None:
     class FailingBackend:
         name = "failing"
 
@@ -613,11 +645,12 @@ def test_failures_back_off_and_skip_stuck_window(tmp_path) -> None:
     assert plugin.pump() == 0
     assert backend.calls == 1
 
-    # Forced retries eventually give up on the broken window and move on.
+    # Forced retries keep the window and surface the error; no silent skip.
     assert plugin.pump(force=True) == 0
     assert plugin.pump(force=True) == 0
     assert backend.calls == 3
-    assert plugin.status()["cursor"] == pytest.approx(1.0)
+    assert plugin.status()["cursor"] == pytest.approx(0.0)
+    assert plugin.status()["state"] == "error"
 
     assert plugin.pump(force=True) == 0
     assert backend.calls == 4
@@ -666,7 +699,7 @@ def test_ui_page_shows_live_transcript(tmp_path) -> None:
     env = make_env(tmp_path)
     plugin = make_plugin(
         env,
-        backend_factory=lambda cfg: MockSTTBackend(script=["第一句：拓扑空间", "第二句：开集"]),
+        backend_factory=lambda cfg: FakeSTTBackend(script=["第一句：拓扑空间", "第二句：开集"]),
     )
     env.hub.current.audio.append(pcm(1.2))
     plugin.pump()
@@ -679,7 +712,7 @@ def test_ui_page_shows_live_transcript(tmp_path) -> None:
     keyvalue = next(block for block in blocks if block["type"] == "keyvalue")
     rows = dict(keyvalue["items"])
     assert rows["状态"] == "转写中"
-    assert rows["后端"] == "mock"
+    assert rows["后端"] == "openai"
 
     markdown = next(block for block in blocks if block["type"] == "markdown")
     assert text in markdown["text"]
@@ -695,7 +728,10 @@ def test_ui_page_shows_live_transcript(tmp_path) -> None:
 
 def test_ui_page_reports_error_state(tmp_path) -> None:
     env = make_env(tmp_path, llm=ConfigLLM())
-    plugin = make_plugin(env, settings={"stt.provider": "openai"})
+    plugin = make_plugin(
+        env,
+        settings={"stt.provider": "openai", "stt.base_url": "", "stt.api_key": ""},
+    )
     env.ui.open_page(PAGE_ID)
     state = env.ui.state()
     blocks = state["page_content"][PAGE_ID]
@@ -717,7 +753,7 @@ def test_plugin_loads_through_plugin_manager(tmp_path) -> None:
                 "settings",
                 FakeSettings(
                     {
-                        "stt.provider": "mock",
+                        "stt.provider": "none",
                         "stt.chunk_seconds": 1.0,
                         "stt.overlap": 0.2,
                         "stt.min_seconds": 0.4,
@@ -748,8 +784,9 @@ def test_plugin_loads_through_plugin_manager(tmp_path) -> None:
         runtime.hub.current.audio.append(pcm(1.2))
         plugin = runtime.plugins.get("stt")
         assert isinstance(plugin, SttPlugin)
-        assert plugin.pump() == 1
-        assert len(runtime.hub.current.transcript) == 1
+        # Provider "none" consumes nothing and must not emit text.
+        assert plugin.pump() == 0
+        assert len(runtime.hub.current.transcript) == 0
     finally:
         runtime.stop()
     assert runtime.services.get("stt") is None

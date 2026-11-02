@@ -578,6 +578,17 @@ class SourceManager:
             self._current = source
             self._state = "playing"
         source.start()
+        if not source.running:
+            # ffmpeg failed to start (missing binary, bad URL, ...).  The
+            # source has already emitted input.error; do not keep a phantom
+            # "playing" state in the UI.
+            with self._lock:
+                if self._current is source:
+                    self._current = None
+                    self._state = "idle"
+            current = self._hub.current
+            if current.session_id != "boot" and current.ended_at is None:
+                self._hub.end_session("source failed to start")
 
     def stop(self) -> None:
         with self._lock:
@@ -613,111 +624,3 @@ class SourceManager:
                 "state": self._state,
                 "source": source.status() if source is not None else None,
             }
-
-
-# ---------------------------------------------------------------------------
-# Fake source for tests
-# ---------------------------------------------------------------------------
-
-
-class FakeSource:
-    """A source that appends fake audio/video data without ffmpeg."""
-
-    def __init__(self, spec: SourceSpec, *, hub: Any, emit: Callable[..., Any]):
-        self.spec = spec
-        self._hub = hub
-        self._emit = emit
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
-        self._pause = threading.Event()
-        self._pause.set()
-        self._running = False
-        self._started_at: float = 0.0
-
-    @property
-    def running(self) -> bool:
-        return self._running
-
-    @property
-    def paused(self) -> bool:
-        return not self._pause.is_set()
-
-    @property
-    def started_at(self) -> float:
-        return self._started_at
-
-    def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        self._started_at = time.time()
-        self._pause.set()
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run,
-            name=f"fake-input-{self.spec.title}",
-            daemon=True,
-        )
-        self._thread.start()
-        self._emit("input.status", status="playing", source=self.spec.title)
-
-    def stop(self) -> None:
-        self._running = False
-        self._stop.set()
-        self._pause.set()
-        self._emit("input.status", status="stopped", source=self.spec.title)
-
-    def pause(self) -> None:
-        self._pause.clear()
-        self._emit("input.status", status="paused", source=self.spec.title)
-
-    def resume(self) -> None:
-        self._pause.set()
-        self._emit("input.status", status="playing", source=self.spec.title)
-
-    def status(self) -> dict[str, Any]:
-        return {
-            "running": self._running,
-            "paused": self.paused,
-            "kind": self.spec.kind,
-            "title": self.spec.title,
-        }
-
-    def _run(self) -> None:
-        sample_rate = 16000
-        fake_audio_chunk = b"\x00" * (sample_rate * 2)  # 1 second of silence
-        fake_jpeg = (
-            b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
-            b"\xff\xdb\x00\x43\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07"
-            b"\x09\x09\x08\x0a\x0c\x14\x0d\x0c\x0b\x0b\x0c\x19\x12\x13\x0f"
-            b"\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c\x20\x24\x2e\x27\x20\x22"
-            b"\x2c\x23\x1c\x1c\x28\x37\x29\x2c\x30\x31\x34\x34\x34\x1f\x27"
-            b"\x39\x3d\x38\x32\x3c\x2e\x33\x34\x32\xff\xc0\x00\x0b\x08\x00"
-            b"\x01\x00\x01\x01\x01\x11\x00\xff\xc4\x00\x1f\x00\x00\x01\x05"
-            b"\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01"
-            b"\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\xff\xc4\x00\xb5\x10"
-            b"\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04\x04\x00\x00\x01"
-            b"\x7d\x01\x02\x03\x00\x04\x11\x05\x12\x21\x31\x41\x06\x13\x51"
-            b"\x61\x07\x22\x71\x14\x32\x81\x91\xa1\x08\x23\x42\xb1\xc1\x15"
-            b"\x52\xd1\xf0\x24\x33\x62\x72\x82\x09\x0a\x16\x17\x18\x19\x1a"
-            b"\x25\x26\x27\x28\x29\x2a\x34\x35\x36\x37\x38\x39\x3a\x43\x44"
-            b"\x45\x46\x47\x48\x49\x4a\x53\x54\x55\x56\x57\x58\x59\x5a\x63"
-            b"\x64\x65\x66\x67\x68\x69\x6a\x73\x74\x75\x76\x77\x78\x79\x7a"
-            b"\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94\x95\x96\x97\x98"
-            b"\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xb2\xb3\xb4\xb5"
-            b"\xb6\xb7\xb8\xb9\xba\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2"
-            b"\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5\xe6\xe7"
-            b"\xe8\xe9\xea\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xda"
-            b"\x00\x08\x01\x01\x00\x00\x3f\x00\xd2\xff\xd9"
-        )
-        while not self._stop.is_set():
-            self._pause.wait()
-            if self._stop.is_set():
-                break
-            try:
-                current = self._hub.current
-                current.audio.append(fake_audio_chunk)
-                current.video.append_frame(fake_jpeg)
-            except Exception:
-                _log.exception("fake source append")
-            time.sleep(0.05)

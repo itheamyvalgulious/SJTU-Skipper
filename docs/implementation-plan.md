@@ -10,19 +10,18 @@
 - P3 llm-agent：完成；多会话、REPL、info/read/replace/append、扩展点。
 - P4 summarize：完成；文字/音频触发、水位、重试、三文件分类。
 - P5 input：完成；Canvas 13 门活跃课程、SJTU 新版录播/直播、ffmpeg 双流、UI。
-- P6 STT：完成；openai-compatible / faster-whisper / mock 后端，worker 与 UI。
+- P6 STT：完成；none / openai-compatible / faster-whisper 后端，worker 与 UI。
 - P7 VLM：完成；picture_parser 融合算法适配、实时窗口、prompt、去重、UI。
 - P8 Web UI：完成；FastAPI + 左右多 tab + toolbox + pages + WebSocket + action。
-- P9 demo：完成；离线合成课堂，端到端写出三个笔记文件。
 - 全量测试通过；真实 Canvas/SJTU 录播/直播、真实 DeepSeek 文本/视觉调用均已冒烟。
 
 实现中的偏差/说明：
 
 - Python 的 `len(stream)` 必须是 `int`，因此 `len` 返回整秒，亚秒精度用 `stream.duration`。
 - 输入插件默认只列 `active_only=True` 的 Canvas 课程（实测 13 门）；历史学期可通过底层 catalog 扩展。
-- STT 默认 `mock`，真实使用需在设置里选择 `openai` 或安装可选 `faster-whisper` 并配置模型/密钥。
+- STT 默认 `none`：只接入音频流、不输出文字；真实使用需选择 `openai` 或安装可选 `faster-whisper` 并配置模型/密钥。
 - VLM 默认关闭（`vlm.enabled=false`），在设置里打开后会动态启动 worker；需配置视觉模型（如 `deepseek-flash`）。
-- VLM 融合窗口默认使用原管线的黑板归一化区域 `0.104,0,0.9375,0.685`，可按教室调整。
+- VLM 融合固定使用整帧原始分辨率（`crop=(0,0,1,1)`、`max_width=0`），不裁剪、不缩放、不切面板。
 - 直播设备默认取第 0 个（老师机位），可在 `input.live_device` 切换；URL 自带签名，必要时可扩展 headers。
 - 旧 `legacy/blackboard_lecture_agent.py` 与旧 `legacy/sjtu-canvas-assistant` 均已移入 git-ignored 的 `legacy/`；输入模块使用 vendored 客户端。
 
@@ -83,7 +82,6 @@
 - `src/llm/errors.py`
 - `src/llm/provider.py`
 - `src/llm/openai_compat.py`
-- `src/llm/mock.py`
 - `src/llm/service.py`
 - `src/plugins/llm_core/__init__.py`
 - `src/plugins/llm_core/plugin.py`
@@ -95,8 +93,7 @@
 - OpenAI 兼容：非流式 + SSE 流式 + 工具调用增量 + 图片 data URL。
 - 重试：连接错误、超时、408/409/429/5xx；`Retry-After`；指数退避 + jitter；流式首包前可重试。
 - `LLMService` profile 解析：`agent` / `vlm` / `stt`；设置回调可注入（不直接依赖 settings 插件）。
-- `MockProvider`：脚本化响应，支持按调用顺序返回文本/工具调用。
-- 单元测试用 `httpx.MockTransport`，不访问网络。
+- 单元测试用 `httpx.MockTransport` 或测试内脚本化 provider，不访问网络。
 - 事件回调：`on_event("llm.request"/"llm.response"/"llm.error", payload)`。
 
 不得修改 P0 文件。
@@ -199,13 +196,16 @@
   - `get_live_devices(live_course_id)`（新版 `/v1/course_vod_videoinfos`）
 - 直播/录播都映射为 `SourceSpec`，交给 `SourceManager`。
 - `FFmpegSource`：两个子进程；音频 s16le 16k mono；视频 mjpeg 默认 4fps、保持原分辨率（不缩放）；JPEG 边界解析；`-re` 用于录播；直播低延迟；支持 stop/pause/resume；状态事件。
-- `SyntheticSource` 可选（demo 用；可放 demo 插件）。
 - UI：
-  - 左侧 tab `courses`；toolbox `input.courses`、`input.manual`、`input.session`。
-  - 课程 page `input:course:<id>`：直播/录播表 + 按钮。
-  - 会话 page `input:session`：状态、停止、当前课程。
+  - 左侧 tab `courses`：toolbox `input.courses`（课程录播）。
+  - 左侧 tab `live`：toolbox `input.live`（今日直播）、`input.manual`（手动 URL）。
+  - 右侧 tab `session`：toolbox `input.session`（当前播放）。
+  - 页面 `input:courses`：课程卡片；`input:course:<id>`：只展示录播表。
+  - 页面 `input:live`：只展示正在/即将开始的直播。
+  - 页面 `input:session`：状态、音视频时长、暂停/继续/停止。
+  - 页面 `input:manual`：手动 URL 表单。
 - 设置：`input.canvas_token`（secret）、`input.canvas_base_url`、`input.video_fps`、`input.video_width`、`input.audio_rate`、`input.playback_speed`、`input.live_device`、`input.reconnect`。
-- 测试：JPEG 解析、SourceManager 单源互斥、catalog 映射（fake clients）、无 token 错误提示；不启动真实 ffmpeg（可用 `echo` 小样本或 mock）。
+- 测试：JPEG 解析、SourceManager 单源互斥、catalog 映射（fake clients）、无 token 错误提示；不启动真实 ffmpeg（可用 `echo` 小样本或 fake source）。
 
 不得修改 P0/P1/P2/P3/P4 文件。SJTU 客户端代码已 vendor 到 `src/integrations/sjtu_canvas_assistant/`。
 
@@ -224,7 +224,7 @@
 - 依赖 `settings`、`llm`。
 - `OpenAITranscriptionBackend`：WAV + multipart `/audio/transcriptions`；解析 text/segments。
 - `FasterWhisperBackend`：可选 import，缺依赖时明确报错。
-- `MockSTTBackend`：按音频时长返回脚本/占位文本。
+- `none`：只接入音频流，不输出文字（默认）。
 - Worker：按 chunk/overlap 切音频，追加 transcript；处理会话切换/结束 flush。
 - 设置：provider/model/language/chunk_seconds/overlap/min_seconds/enabled/base_url/api_key。
 - 事件 `stt.segment` / `stt.error`；UI 页 `stt:transcript`（实时文字流）。
@@ -245,7 +245,7 @@
 要求：
 
 - 依赖 `settings`、`llm`。
-- `fusion.fuse_frames(frames, ...)`：从 picture_parser 算法适配；可选的 crop/max_width 仅保留给单元测试，生产 VLM 插件固定 `crop=(0,0,1,1)`、`max_width=0`，即整帧原始分辨率，不做任何裁剪或缩放；失败回退最后一帧。
+- `fusion.fuse_frames(frames, ...)`：从 picture_parser 算法适配；可选的 crop/max_width 仅保留给单元测试，生产 VLM 插件固定 `crop=(0,0,1,1)`、`max_width=0`，即整帧原始分辨率，不做任何裁剪或缩放；帧数不足或解码/融合失败时直接抛错，不静默回退。
 - Worker：读 video 窗口，融合，保存 JPEG，调用 `ctx.llm.chat(profile="vlm", ...)`，追加 visual。
 - Prompt 继承原管线严格 LaTeX/示意图占位符/空黑板。
 - 去重：`difflib.SequenceMatcher` 阈值。
@@ -273,26 +273,8 @@
 - FastAPI app factory 接收 Runtime；lifespan 启停。
 - 路由：`/`、`/api/ui/state`、`/api/ui/action`、`/api/artifacts/{path}`、`/ws`。
 - 静态前端：左右多 tab + toolbox + 中间 pages；block 渲染；action 提交；WebSocket 刷新；MathJax。
-- CLI：`serve`、`check`、`demo`。
+- CLI：`serve`、`check`。
 - 测试：TestClient 取 state、action、artifact 越界拒绝、WebSocket 可选。
-
-### P9 Demo 插件（并行任务 I，可与 P8 同时）
-
-文件：
-
-- `src/plugins/demo/__init__.py`
-- `src/plugins/demo/plugin.py`
-- `src/plugins/demo/script.py`
-- `tests/test_demo.py`
-
-要求：
-
-- 依赖 `input`、`stt`、`vlm`、`llm-agent`、`summarize`（可选加载）。
-- 注册左侧 tab `demo`；toolbox「开始演示」/「停止」。
-- 启动合成会话：向 transcript/visual 追加中文数学课堂脚本（含知识点、生活趣事、作业通知）；按加速时钟推进。
-- 用 `MockProvider` 替换 LLM？不能替换 service；demo 应在 settings 中设置 `llm.provider=mock` 或由 runtime 注入 `MockProvider`。提供 `build_demo_runtime()`。
-- 验证 summarize 自动写文件。
-- 测试：demo 跑一轮，断言三个文件非空。
 
 ## 2. 并行批次
 
@@ -300,7 +282,7 @@
 
 - **批次 1（P0 完成后）**：A（LLM）、B（settings）、E（input，可先做 catalog/source，不依赖 agent）、F（STT）、G（VLM）。
 - **批次 2（A/B 完成后）**：C（agent）、D（summarize）、H（前端静态）。
-- **批次 3**：I（demo）、主 agent 集成、端到端测试、真实 Canvas 冒烟、文档收尾。
+- **批次 3**：主 agent 集成、端到端测试、真实 Canvas 冒烟、文档收尾。
 
 ## 3. 统一约定
 
@@ -329,12 +311,10 @@
 | stt | WAV, chunk/overlap, session switch, fake backend |
 | vlm | fusion synthetic, prompt, dedupe, fake LLM |
 | server | state/action/artifact path/websocket |
-| demo | end-to-end three files |
 
 ## 5. 真实冒烟清单
 
 1. `sjtu-skipper check`：拓扑顺序、插件加载、无异常。
-2. `sjtu-skipper demo`：无网络，UI 可打开，合成内容 -> 三文件。
 3. `sjtu-skipper serve` + 真实 settings：
    - `input.courses` 能列出 13 门 Canvas 课程。
    - 打开「代数拓扑」页，能列出录播。
@@ -356,7 +336,7 @@
 | 插件循环依赖 | 加载时检测并报错；`requires` 只写直接依赖 |
 | Agent 长任务阻塞 UI | action 后台线程；会话锁；UI 事件刷新 |
 | LLM 流式中断 | 首包前重试；首包后抛错并记录，调用方决定重试 |
-| STT/VLM 无可用模型 | mock/disabled 降级；UI 明确提示；不阻塞其他插件 |
+| STT/VLM 无可用模型 | STT 默认 none 只消费音频不输出；UI 明确提示；不阻塞其他插件 |
 
 ## 7. 交付物
 
@@ -364,4 +344,4 @@
 - `tests/` 测试套件。
 - `docs/architecture.md`、`docs/implementation-plan.md`、`docs/plugin-api.md`、`README.md` 更新。
 - `pyproject.toml`、`.gitignore` 更新。
-- 可运行的 `sjtu-skipper serve` / `check` / `demo`。
+- 可运行的 `sjtu-skipper serve` / `check`。

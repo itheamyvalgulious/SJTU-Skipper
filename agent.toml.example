@@ -11,5 +11,4 @@ enable_input = true
 enable_stt = true
 enable_vlm = true
 enable_summarize = true
-demo_mode = false
 # plugins = ["my_package.my_module:MyPlugin"]

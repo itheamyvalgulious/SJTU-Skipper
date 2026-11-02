@@ -214,7 +214,26 @@ class SettingsPlugin(Plugin):
     def _render_group(self, group: str) -> list[dict[str, Any]]:
         for name, specs in self._grouped_specs():
             if name == group:
-                return self._form_blocks(specs, group)
+                return [
+                    {
+                        "type": "keyvalue",
+                        "items": [
+                            ["分组", group or "General"],
+                            ["设置项", f"{len(specs)} 项"],
+                        ],
+                    },
+                    {
+                        "type": "buttons",
+                        "buttons": [
+                            {
+                                "label": "打开设置页编辑",
+                                "action": "ui.open_page",
+                                "value": {"page_id": PAGE_ID},
+                                "class": "btn btn-sm btn-primary",
+                            }
+                        ],
+                    },
+                ]
         return [
             {"type": "markdown", "text": f"### {group or 'General'}\n\n该分组暂无设置项。"}
         ]
