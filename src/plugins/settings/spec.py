@@ -20,6 +20,7 @@ VALID_TYPES = {
     "select",
     "secret",
     "json",
+    "action",
 }
 
 SECRET_MASK = "******"
@@ -128,6 +129,13 @@ class SettingsSpec:
     visible_when: tuple[str, tuple[Any, ...]] | None = None
     # Optional explanatory text shown above the group's form.
     group_note: str = ""
+    # Internal fields can be persisted/masked without appearing in the form.
+    hidden: bool = False
+    # Read-only display field; never saved from the browser.
+    readonly: bool = False
+    # For ``type="action"``: action id and optional button label.
+    action: str = ""
+    button_label: str = ""
 
     def __post_init__(self) -> None:
         if self.type not in VALID_TYPES:
@@ -177,6 +185,8 @@ class SettingsSpec:
             return _coerce_json(value)
         if self.type == "select":
             return self._coerce_select(value)
+        if self.type == "action":
+            return value
         # Unreachable: __post_init__ validates the type.
         raise ValueError(f"unsupported setting type {self.type!r}")
 

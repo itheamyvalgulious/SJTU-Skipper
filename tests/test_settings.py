@@ -434,3 +434,51 @@ def test_setting_persists_across_runtime_restart(tmp_path: Path) -> None:
         assert stat.S_IMODE((tmp_path / "settings.json").stat().st_mode) == 0o600
     finally:
         runtime.stop()
+
+
+def test_action_and_readonly_settings_fields(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+    try:
+        service = runtime.services.require("settings")
+        service.register(
+            SettingsSpec(
+                key="demo.status",
+                label="状态",
+                type="string",
+                default="原始",
+                readonly=True,
+                group="Demo",
+            )
+        )
+        service.register(
+            SettingsSpec(
+                key="demo.login",
+                label="登录",
+                type="action",
+                action="demo.login",
+                button_label="去登录",
+                group="Demo",
+            )
+        )
+        runtime.ui.open_page("settings:main")
+        blocks = runtime.ui.state()["page_content"]["settings:main"]
+        forms = [
+            block
+            for tab in blocks[0]["tabs"]
+            for block in tab["blocks"]
+            if block["type"] == "form"
+        ]
+        fields = {field["key"]: field for form in forms for field in form["fields"]}
+        assert fields["demo.status"]["readonly"] is True
+        assert fields["demo.login"]["type"] == "action"
+        assert fields["demo.login"]["action"] == "demo.login"
+        assert fields["demo.login"]["button_label"] == "去登录"
+        assert "name" not in fields["demo.login"]
+
+        result = runtime.ui.dispatch_action(
+            "settings.save", {"values": {"demo.status": "被篡改"}}
+        )
+        assert result.ok is True
+        assert service.get("demo.status") == "原始"
+    finally:
+        runtime.stop()

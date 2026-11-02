@@ -27,6 +27,7 @@ _INPUT_KIND = {
     "select": "select",
     "secret": "password",
     "json": "textarea",
+    "action": "button",
 }
 
 
@@ -139,6 +140,8 @@ class SettingsPlugin(Plugin):
     def _spec_visible(self, spec: SettingsSpec) -> bool:
         """Resolve a spec's ``visible_when`` condition against live values."""
 
+        if spec.hidden:
+            return False
         if spec.visible_when is None:
             return True
         key, allowed = spec.visible_when
@@ -234,8 +237,7 @@ class SettingsPlugin(Plugin):
         value = self._form_value(spec, raw)
         configured = raw not in (None, "")
         options = [option for option, _label in spec.option_pairs()]
-        return {
-            "name": spec.key,
+        base = {
             "key": spec.key,
             "label": spec.label,
             "type": spec.type,
@@ -255,8 +257,19 @@ class SettingsPlugin(Plugin):
             "description": spec.description,
             "secret": bool(spec.secret),
             "is_set": configured,
+            "readonly": bool(spec.readonly),
             "order": spec.order,
         }
+        if spec.type == "action":
+            base.update(
+                {
+                    "action": spec.action,
+                    "button_label": spec.button_label or spec.label,
+                }
+            )
+        else:
+            base["name"] = spec.key
+        return base
 
     def _form_value(self, spec: SettingsSpec, raw: Any) -> Any:
         """Serialize a value for the form (secrets masked, JSON as text)."""
@@ -325,6 +338,8 @@ class SettingsPlugin(Plugin):
             if not isinstance(key, str):
                 continue
             spec = service.get_spec(key)
+            if spec is not None and (spec.readonly or spec.type == "action"):
+                continue
             if spec is not None and spec.secret:
                 # Secrets are write-only and empty means "keep existing".
                 # Removal is an explicit settings.clear_secret action.

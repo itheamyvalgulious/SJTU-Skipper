@@ -255,6 +255,19 @@
       const id = `f-${Math.random().toString(36).slice(2)}`;
       const fieldName = field.name || field.key;
       row.appendChild(el("label", { for: id, text: field.label || fieldName }));
+      if (field.type === "action" || field.input === "button") {
+        row.appendChild(
+          actionButton(
+            field.button_label || field.label || "执行",
+            field.action,
+            {},
+            "btn btn-sm btn-primary"
+          )
+        );
+        if (field.description) row.appendChild(el("div", { class: "hint", text: field.description }));
+        form.appendChild(row);
+        continue;
+      }
       const rawType = field.type || (field.secret ? "secret" : "text");
       const type = field.input || (field.secret ? "password" : rawType);
       let input;
@@ -293,6 +306,10 @@
         if (rawType === "float") input.step = "any";
       }
       input.dataset.fieldType = rawType;
+      if (field.readonly) {
+        input.readOnly = true;
+        input.classList.add("input-readonly");
+      }
       row.appendChild(input);
       if (field.secret) {
         const status = el("div", {

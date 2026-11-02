@@ -1002,3 +1002,31 @@ def test_provider_config_defaults() -> None:
     assert cfg.model == ""
     assert cfg.timeout == 60.0
     assert cfg.max_retries == 3
+
+def test_opencode_mode_uses_app_owned_tokens(tmp_path) -> None:
+    """OpenCode mode reads its own settings, not a local OpenCode install."""
+    import time
+
+    from config import load_config
+    from core.runtime import build_runtime
+    from plugins.llm_core.plugin import LLMPlugin
+    from plugins.settings.plugin import SettingsPlugin
+
+    cfg = load_config(data_dir=tmp_path)
+    runtime = build_runtime(cfg, plugins=[SettingsPlugin(), LLMPlugin()])
+    runtime.start()
+    try:
+        settings = runtime.services.require("settings")
+        settings.set("llm.mode", "opencode")
+        settings.set("llm.opencode_access_token", "st_test")
+        settings.set("llm.opencode_refresh_token", "rt_test")
+        settings.set("llm.opencode_expires_at", int(time.time() * 1000) + 3_600_000)
+        settings.set("llm.opencode_org_id", "org_test")
+        service = runtime.services.require("llm")
+        resolved = service.config_for("agent")
+        assert resolved.base_url == "https://opencode.ai/zen/go/v1"
+        assert resolved.api_key == "st_test"
+        assert resolved.extra_headers["x-opencode-org-id"] == "org_test"
+        assert resolved.extra_headers["x-opencode-session"]
+    finally:
+        runtime.stop()

@@ -41,11 +41,12 @@ python3.12 -m venv .venv
 打开页面后：
 
 1. 右侧「设置」填入 Canvas Token、LLM API Key / Base URL；模型在 Agent / VLM 分组中设置。
-2. 左侧「课程」刷新课程列表。
-3. 选择录播或直播，开始一节课。
-4. 左侧「课堂」查看转写、板书、笔记。
+2. LLM 连接方式二选一：OpenAI 兼容接口（Base URL + API Key），或在设置里点「关联 OpenCode 套餐」完成设备授权。OpenCode 凭据独立保存在本应用，不依赖本机 OpenCode。
+3. 左侧「课程」刷新课程列表。
+4. 选择录播或直播，开始一节课。
+5. 左侧「课堂」查看转写、板书、笔记。
 
-Canvas token 与 DeepSeek key 都放在根 `.env`（git-ignored）：
+Canvas token 与 OpenAI 兼容 key 可以放在根 `.env`（git-ignored；OpenCode 套餐则走设置页授权）：
 
 ```dotenv
 DEEPSEEK_API_KEY=...

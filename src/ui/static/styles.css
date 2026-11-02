@@ -208,6 +208,7 @@ code {
 }
 .textarea { min-height: 84px; resize: vertical; font-family: "JetBrains Mono", ui-monospace, monospace; }
 .input:focus, .textarea:focus, .select:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,.12); }
+.input-readonly { color: var(--muted); background: var(--panel); }
 .form-actions { display: flex; gap: 8px; align-items: center; }
 .form-inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .form-status { font-size: 11px; color: var(--muted); }
