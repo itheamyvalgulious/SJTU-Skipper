@@ -540,13 +540,21 @@ class AgentService:
                 if tool is None:
                     result = f"错误：未知工具 {tc_name!r}"
                 else:
-                    try:
-                        result = tool.handler(**tc_args)
-                    except Exception as exc:
-                        self._ctx.logger.exception(
-                            "tool %s failed in session %s", tc_name, session.id
+                    required = list((tool.parameters or {}).get("required") or [])
+                    missing = [name for name in required if name not in tc_args]
+                    if missing:
+                        result = (
+                            f"工具参数缺失：{', '.join(missing)}。"
+                            f"请重新调用 {tc_name} 并提供完整参数。"
                         )
-                        result = f"工具执行错误：{exc}"
+                    else:
+                        try:
+                            result = tool.handler(**tc_args)
+                        except Exception as exc:
+                            self._ctx.logger.exception(
+                                "tool %s failed in session %s", tc_name, session.id
+                            )
+                            result = f"工具执行错误：{exc}"
 
                 # Truncate
                 max_out = session.max_tool_output
