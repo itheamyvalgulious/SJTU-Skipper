@@ -28,8 +28,8 @@ from .fusion import fuse_frames
 from .prompts import (
     BLANK_BOARD_MARKER,
     BOARD_RECOGNITION_PROMPT,
-    SYSTEM_PROMPT,
     build_user_message,
+    collapse_repetitions,
     is_trivial_board_text,
 )
 
@@ -263,13 +263,13 @@ class VlmPlugin(Plugin):
         items = visual.items_since(max(0, len(visual) - 20))
         visual_items = [i for i in items if i.source == "vlm"]
         if visual_items:
-            markdown_lines: list[str] = []
+            # One markdown block per window: MathJax can render them
+            # progressively instead of blocking on one huge document.
             for item in visual_items:
                 ts = ""
                 if item.start is not None and item.end is not None:
                     ts = f"**{_fmt_time(item.start)}–{_fmt_time(item.end)}**\n\n"
-                markdown_lines.append(f"{ts}{item.text}\n\n---\n")
-            blocks.append({"type": "markdown", "text": "\n".join(markdown_lines)})
+                blocks.append({"type": "markdown", "text": f"{ts}{item.text}"})
         elif not image_path:
             blocks.append({"type": "text", "text": "暂无板书识别结果"})
 
@@ -290,8 +290,10 @@ class VlmPlugin(Plugin):
         ).strip()
         if not prompt_text:
             raise ValueError("vlm.prompt 不能为空；请填写板书识别提示词")
+        # Match the legacy single-frame call shape: one user message with the
+        # prompt + image.  The extra system message is unnecessary and made
+        # the model more likely to keep re-stating the same formulas.
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": build_user_message(
@@ -307,9 +309,14 @@ class VlmPlugin(Plugin):
             messages=messages,
             temperature=0.1,
             max_tokens=2048,
-            extra={"thinking": {"type": "disabled"}},
+            extra={
+                "thinking": {"type": "disabled"},
+                "frequency_penalty": 0.2,
+                "presence_penalty": 0.2,
+            },
         )
-        return getattr(response, "content", str(response)).strip()
+        text = getattr(response, "content", str(response)).strip()
+        return collapse_repetitions(text)
 
     def _on_settings_changed(self, event: Event) -> None:
         if event.get("key") != "vlm.enabled":

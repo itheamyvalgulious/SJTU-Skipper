@@ -32,6 +32,7 @@ from plugins.vlm.prompts import (
     BLANK_BOARD_MARKER,
     BOARD_RECOGNITION_PROMPT,
     build_user_message,
+    collapse_repetitions,
     is_trivial_board_text,
 )
 from tests.support import FakeLLM, FakeSettings
@@ -191,6 +192,26 @@ class TestPrompts:
     def test_prompt_no_greeting(self):
         prompt = BOARD_RECOGNITION_PROMPT.replace("{timestamp}", "00:00")
         assert "寒暄" in prompt or "问候" in prompt  # instructs to avoid them
+
+
+    def test_collapse_repeated_display_math(self):
+        block = "$$\nT_m = \tilde{Q}_m^T A \tilde{Q}_m\n$$"
+        text = "**02:28-02:46**\n\n" + "\n\n".join([block] * 8)
+        out = collapse_repetitions(text)
+        assert out.count("T_m =") == 1
+        assert out.count("$$") == 2
+        assert "02:28-02:46" in out
+
+    def test_collapse_repeated_formula_group(self):
+        group = "$$\nA = B\n$$\n\n$$\nB = C\n$$"
+        text = "\n\n".join([group] * 5)
+        out = collapse_repetitions(text)
+        assert out.count("A = B") == 1
+        assert out.count("B = C") == 1
+
+    def test_collapse_keeps_non_repeated_content(self):
+        text = "$$\nA = B\n$$\n\n$$\nC = D\n$$\n\n$$\nA = B\n$$"
+        assert collapse_repetitions(text) == text
 
     def test_build_user_message_structure(self):
         content = build_user_message(timestamp="00:30", image_data_url="data:image/jpeg;base64,abc")
@@ -401,7 +422,10 @@ class TestVlmPlugin:
         # Check that thinking was disabled in the LLM call
         assert len(fake_llm.calls) >= 1
         last_call = fake_llm.calls[-1]
-        assert last_call.get("extra") == {"thinking": {"type": "disabled"}}
+        extra = last_call.get("extra") or {}
+        assert extra.get("thinking") == {"type": "disabled"}
+        assert extra.get("frequency_penalty") == 0.2
+        assert extra.get("presence_penalty") == 0.2
 
         # Check vlm.segment event
         assert len(segments) >= 1

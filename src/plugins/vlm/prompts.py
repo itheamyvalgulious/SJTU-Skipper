@@ -10,11 +10,6 @@ import re
 
 from llm.types import ImagePart, TextPart
 
-SYSTEM_PROMPT = (
-    "你是一个精确的大学数学板书转录专家。你的输出将直接用于生成课堂笔记，"
-    "因此必须完整、准确、忠实于黑板内容。"
-)
-
 BOARD_RECOGNITION_PROMPT = """这是大学数学课堂在 {timestamp} 时的黑板板书图像。
 
 请准确识别并完整转录图中的全部手写数学板书内容（包括引理、定理、定义、命题、推论、证明推导细节、数学公式及中文说明）。
@@ -38,6 +33,8 @@ BOARD_RECOGNITION_PROMPT = """这是大学数学课堂在 {timestamp} 时的黑�
 
 不需要精确内容或精确画，而只需要有该 ![...]() 格式的占位符即可。
 注意：必须严格复刻黑板上的示意图，不可随意增减；纯公式与文字推导绝不添加占位符。
+
+【禁止重复】：同一个公式、同一行推导或同一段文字只能输出一次；不要因为黑板上有重复笔迹、反光或重叠而重复转录。
 
 请直接输出板书转录结果，不得有任何省略或总结概括，不要输出问候寒暄。"""
 
@@ -72,6 +69,76 @@ def build_user_message(
     if image_data_url:
         content.append(ImagePart(url=image_data_url))
     return content
+
+
+def collapse_repetitions(text: str, *, max_period: int = 8) -> str:
+    """Collapse consecutive identical blocks in a VLM transcription.
+
+    Long math transcriptions sometimes degenerate into repeating the same
+    display-math block dozens of times.  The model did not do this in the
+    legacy single-frame pipeline; with fused windows it occasionally does.
+    Keep one copy of every consecutive repeated block (display math blocks are
+    treated as one unit).
+    """
+
+    if not text or not text.strip():
+        return text
+
+    lines = text.splitlines()
+    units: list[str] = []
+    buf: list[str] = []
+    in_display = False
+    for raw in lines:
+        line = raw.rstrip()
+        stripped = line.strip()
+        if in_display:
+            buf.append(line)
+            if stripped == "$$":
+                units.append("\n".join(buf).strip())
+                buf = []
+                in_display = False
+            continue
+        if stripped == "$$":
+            if buf:
+                units.append("\n".join(buf).strip())
+                buf = []
+            in_display = True
+            buf = [line]
+            continue
+        if not stripped:
+            continue
+        units.append(stripped)
+    if buf:
+        units.append("\n".join(buf).strip())
+
+    if len(units) < 2:
+        return text
+
+    out: list[str] = []
+    changed = False
+    i = 0
+    while i < len(units):
+        collapsed = False
+        limit = min(max_period, (len(units) - i) // 2)
+        for period in range(1, limit + 1):
+            block = units[i : i + period]
+            if units[i + period : i + 2 * period] != block:
+                continue
+            j = i + period
+            while j + period <= len(units) and units[j : j + period] == block:
+                j += period
+            out.extend(block)
+            i = j
+            changed = True
+            collapsed = True
+            break
+        if not collapsed:
+            out.append(units[i])
+            i += 1
+
+    if not changed:
+        return text
+    return "\n\n".join(out)
 
 
 # Matches one or more ![description]() placeholders, possibly with surrounding

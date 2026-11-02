@@ -543,11 +543,12 @@ SettingsSpec(
   2. FFT 相位相关配准（可选）；
   3. 30 分位背景 + 时序活动/方差 + 空间梯度 + 粉笔候选掩码；
   4. 时序持续性 + 单调边缘滤波；
-  5. 候选帧 nanmedian 融合。
-- 窗口默认 20 s / 4 fps，整帧原始分辨率输入，不做裁剪或缩放；三个参数均可配置。
+  5. 候选帧鲁棒中位数融合。
+- 窗口默认 20 s / 4 fps、每窗最多 12 帧；整帧原始分辨率输出，不做裁剪或缩放。
 - Prompt 继承原管线：严格 LaTeX、示意图占位符 `![描述]()`、空黑板回复 `【黑板暂无板书】`。
-- 去重：与上一条 visual 文本相似度高则跳过（`difflib.SequenceMatcher`，阈值默认 0.92）。
+- 去重：与上一条 visual 文本相似度高则跳过（`difflib.SequenceMatcher`，阈值默认 0.92）；输出后处理会折叠连续重复的公式块。
 - 保存融合图到 `data_dir/sessions/<session>/vlm/`，UI 可预览。
+- UI 按窗口/段落返回 markdown 块，MathJax 逐块渐进渲染，避免整页卡死。
 - 事件：`vlm.segment`、`vlm.error`。
 
 ### 7.6 llm-agent

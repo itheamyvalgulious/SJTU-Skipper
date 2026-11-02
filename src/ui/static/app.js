@@ -5,6 +5,7 @@
     ui: null,
     activeTab: { left: null, right: null },
     blockTabs: {},
+    pageKey: null,
     loading: false,
     lastLoad: 0,
     ws: null,
@@ -95,10 +96,61 @@
     pill.className = `pill ${ok ? "pill-ok" : "pill-err"}`;
   }
 
-  function typeset() {
-    if (window.MathJax && window.MathJax.typesetPromise) {
-      window.MathJax.typesetPromise([$("#page-content")]).catch(() => {});
+  let typesetRun = 0;
+  let typesetRetry = null;
+  let typesetPending = null;
+  let typesetAttempts = 0;
+
+  function typeset(node = $("#page-content")) {
+    if (!node) return;
+    if (!node.textContent.includes("$") && !node.textContent.includes("\\(")) {
+      return;
     }
+    typesetPending = node;
+
+    if (!window.MathJax || !window.MathJax.typesetPromise) {
+      if (typesetRetry) return;
+      typesetAttempts = 0;
+      typesetRetry = setInterval(() => {
+        typesetAttempts += 1;
+        if (!window.MathJax || !window.MathJax.typesetPromise) {
+          if (typesetAttempts > 100) {
+            clearInterval(typesetRetry);
+            typesetRetry = null;
+          }
+          return;
+        }
+        clearInterval(typesetRetry);
+        typesetRetry = null;
+        const pending = typesetPending;
+        typesetPending = null;
+        if (pending && pending.isConnected) typeset(pending);
+      }, 100);
+      return;
+    }
+
+    const run = ++typesetRun;
+    const blocks = Array.from(node.children || []).filter(
+      (el) =>
+        el.classList?.contains("block") &&
+        (el.textContent.includes("$") || el.textContent.includes("\\("))
+    );
+    const targets = blocks.length ? blocks : [node];
+    // Typeset one block at a time and yield between blocks.  A single
+    // typesetPromise over a 50KB board/notes page blocks the main thread for
+    // several seconds and makes page switching feel frozen.
+    (async () => {
+      for (const target of targets) {
+        if (run !== typesetRun) return;
+        if (!target.isConnected) return;
+        try {
+          await window.MathJax.typesetPromise([target]);
+        } catch (_) {
+          /* keep going; one bad formula must not stop the rest */
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    })();
   }
 
   // ------------------------------------------------------------------
@@ -316,6 +368,9 @@
       if (remember) state.blockTabs[key] = tabs[index]?.title || "";
       $$(".tab-btn", bar).forEach((b, i) => b.classList.toggle("active", i === active));
       body.replaceChildren(renderBlocks(tabs[index]?.blocks || []));
+      if (remember && (body.textContent.includes("$") || body.textContent.includes("\\("))) {
+        typeset(body);
+      }
     };
     tabs.forEach((tab, i) => {
       const btn = el("button", { class: "tab-btn", type: "button", text: tab.title || `Tab ${i + 1}` });
@@ -406,9 +461,9 @@
     renderSidebar("left");
     renderSidebar("right");
     renderPageTabs();
-    renderPageContent();
+    const pageChanged = renderPageContent();
     renderStatus();
-    typeset();
+    if (pageChanged) typeset();
   }
 
   function pickTab(tabs, side) {
@@ -525,7 +580,12 @@
     const container = $("#page-content");
     const active = state.ui.active_page || "";
     const blocks = active ? state.ui.page_content?.[active] : null;
+    const key = active ? `${active}\u0000${JSON.stringify(blocks || [])}` : "__welcome__";
     const samePage = container.dataset.pageId === active;
+    // Page content is polled every few seconds; never re-render or re-run
+    // MathJax when the payload is identical.  This is what made the board and
+    // notes pages feel like they were reloading constantly.
+    if (samePage && state.pageKey === key) return false;
     const scrollTop = samePage ? container.scrollTop : 0;
     const focused = document.activeElement;
     const editing =
@@ -533,9 +593,10 @@
       focused &&
       container.contains(focused) &&
       ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName);
-    if (editing) return; // don't wipe out a form the user is typing in
+    if (editing) return false; // don't wipe out a form the user is typing in
     container.replaceChildren();
     container.dataset.pageId = active;
+    state.pageKey = key;
     if (!active || !blocks) {
       container.appendChild(el("div", { class: "welcome" }, [
         el("div", { class: "welcome-mark", text: "∮" }),
@@ -543,10 +604,11 @@
         el("p", { text: "左侧「课程」里选择录播或直播；设置里填入 Canvas token 与模型 API key。" }),
       ]));
       container.scrollTop = 0;
-      return;
+      return true;
     }
     container.appendChild(renderBlocks(blocks));
     container.scrollTop = samePage ? scrollTop : 0;
+    return true;
   }
 
   function renderStatus() {

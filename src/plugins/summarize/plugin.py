@@ -213,7 +213,10 @@ class SummarizePlugin(Plugin):
             elif text == "":
                 blocks = [{"type": "text", "text": "（暂无内容）"}]
             else:
-                blocks = [{"type": "markdown", "text": text}]
+                blocks = [
+                    {"type": "markdown", "text": chunk}
+                    for chunk in _split_markdown(text)
+                ]
             tabs.append({"title": title, "blocks": blocks})
 
         return [
@@ -557,6 +560,32 @@ class SummarizePlugin(Plugin):
                 max_steps=self._max_steps,
             )
             agent.run(retry_session.id, RETRY_PROMPT)
+
+
+
+def _split_markdown(text: str, max_chars: int = 4000) -> list[str]:
+    """Split a note into paragraph-aligned chunks for progressive MathJax."""
+
+    paragraphs = text.split("\n\n")
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    in_display = False
+    in_fence = False
+    for para in paragraphs:
+        if current and size >= max_chars and not in_display and not in_fence:
+            chunks.append("\n\n".join(current))
+            current = []
+            size = 0
+        current.append(para)
+        size += len(para) + 2
+        if para.count("$$") % 2:
+            in_display = not in_display
+        if para.count("```") % 2:
+            in_fence = not in_fence
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks or [text]
 
 
 # ---------------------------------------------------------------------------

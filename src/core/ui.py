@@ -467,8 +467,11 @@ class UIManager:
             return out
 
         page_content: dict[str, list[dict[str, Any]]] = {}
+        # Only render the visible page.  Rendering every open page on each
+        # state poll made large board/notes pages expensive server-side and
+        # shipped hundreds of KB the browser did not need.
         for page in pages:
-            if page.id in open_pages or page.id == active:
+            if page.id == active:
                 page_content[page.id] = self._render(page.render, f"page:{page.id}")
 
         status: dict[str, Any] = {}
