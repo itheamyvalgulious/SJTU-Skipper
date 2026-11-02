@@ -227,7 +227,7 @@ class SummarizePlugin(Plugin):
                     }
                 ],
             },
-            {"type": "tabs", "tabs": tabs},
+            {"type": "tabs", "id": "summarize.notes", "tabs": tabs},
         ]
 
     def _read_note_file(self, filename: str) -> str | None:

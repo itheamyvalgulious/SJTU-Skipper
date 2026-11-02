@@ -300,6 +300,7 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         runtime.ui.open_page("settings:main")
         blocks = runtime.ui.state()["page_content"]["settings:main"]
         assert blocks[0]["type"] == "tabs"
+        assert blocks[0]["id"] == "settings.groups"
         forms = [
             block
             for group_tab in blocks[0]["tabs"]

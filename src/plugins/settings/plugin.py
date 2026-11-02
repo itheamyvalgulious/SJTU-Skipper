@@ -202,7 +202,7 @@ class SettingsPlugin(Plugin):
                 blocks.append({"type": "markdown", "text": note})
             blocks.extend(self._form_blocks(specs, group))
             tabs.append({"title": group or "General", "blocks": blocks})
-        return [{"type": "tabs", "tabs": tabs}]
+        return [{"type": "tabs", "id": "settings.groups", "tabs": tabs}]
 
     def _form_blocks(
         self, specs: list[SettingsSpec], group: str

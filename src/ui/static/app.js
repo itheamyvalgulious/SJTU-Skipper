@@ -4,6 +4,7 @@
   const state = {
     ui: null,
     activeTab: { left: null, right: null },
+    blockTabs: {},
     loading: false,
     lastLoad: 0,
     ws: null,
@@ -288,9 +289,13 @@
     const bar = el("div", { class: "tabs-bar" });
     const body = el("div", { class: "tabs-body" });
     const tabs = block.tabs || [];
-    let active = 0;
-    const show = (index) => {
+    const key = block.id || block.key || `tabs:${tabs.map((t) => t.title || "").join("\u0001")}`;
+    const savedTitle = state.blockTabs[key];
+    let active = tabs.findIndex((t) => (t.title || "") === savedTitle);
+    if (active < 0) active = 0;
+    const show = (index, remember = true) => {
       active = index;
+      if (remember) state.blockTabs[key] = tabs[index]?.title || "";
       $$(".tab-btn", bar).forEach((b, i) => b.classList.toggle("active", i === active));
       body.replaceChildren(renderBlocks(tabs[index]?.blocks || []));
     };
@@ -301,7 +306,7 @@
     });
     wrap.appendChild(bar);
     wrap.appendChild(body);
-    if (tabs.length) show(0);
+    if (tabs.length) show(active, false);
     return wrap;
   }
 
@@ -500,18 +505,30 @@
 
   function renderPageContent() {
     const container = $("#page-content");
-    container.replaceChildren();
-    const active = state.ui.active_page;
+    const active = state.ui.active_page || "";
     const blocks = active ? state.ui.page_content?.[active] : null;
+    const samePage = container.dataset.pageId === active;
+    const scrollTop = samePage ? container.scrollTop : 0;
+    const focused = document.activeElement;
+    const editing =
+      samePage &&
+      focused &&
+      container.contains(focused) &&
+      ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName);
+    if (editing) return; // don't wipe out a form the user is typing in
+    container.replaceChildren();
+    container.dataset.pageId = active;
     if (!active || !blocks) {
       container.appendChild(el("div", { class: "welcome" }, [
         el("div", { class: "welcome-mark", text: "∮" }),
         el("h2", { text: "开始一节课" }),
         el("p", { text: "左侧「课程」里选择录播或直播；设置里填入 Canvas token 与模型 API key。" }),
       ]));
+      container.scrollTop = 0;
       return;
     }
     container.appendChild(renderBlocks(blocks));
+    container.scrollTop = samePage ? scrollTop : 0;
   }
 
   function renderStatus() {
