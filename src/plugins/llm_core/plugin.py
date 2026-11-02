@@ -23,8 +23,6 @@ logger = logging.getLogger("lecture_agent.plugin.llm")
 _ENV_BASE_URL_KEYS = ("LLM_BASE_URL", "OPENAI_BASE_URL")
 _ENV_API_KEY_KEYS = ("LLM_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY")
 _DEFAULT_BASE_URL = "https://api.deepseek.com"
-_DEFAULT_MODEL = "deepseek-chat"
-_DEFAULT_VLM_MODEL = "deepseek-chat"
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_TEMPERATURE: float | None = None
@@ -56,81 +54,68 @@ class LLMPlugin(Plugin):
                 key="llm.base_url",
                 label="LLM Base URL",
                 type="string",
-                default=_resolve_env("LLM_BASE_URL", _ENV_BASE_URL_KEYS, _DEFAULT_BASE_URL),
+                default=_DEFAULT_BASE_URL,
                 group="LLM",
-                description="OpenAI-compatible base URL. Append /v1 if missing.",
+                description="OpenAI 兼容 Base URL；缺少 /v1 时会自动补全。",
+                env=_ENV_BASE_URL_KEYS,
+                group_note="这里只配置连接、鉴权与重试；具体模型在 Agent / VLM / Summarize / STT 分组中选择。环境变量只在首次注册时写入设置，之后以设置页为准。",
             ),
             SettingsSpec(
                 key="llm.api_key",
                 label="LLM API Key",
                 type="secret",
-                default=_resolve_env("LLM_API_KEY", _ENV_API_KEY_KEYS, ""),
+                default="",
                 group="LLM",
-                description="API key for the LLM provider.",
-            ),
-            SettingsSpec(
-                key="llm.model",
-                label="Default Model",
-                type="string",
-                default=_DEFAULT_MODEL,
-                group="LLM",
-                description="Model name for agent/completion calls.",
-            ),
-            SettingsSpec(
-                key="llm.vlm_model",
-                label="VLM Model",
-                type="string",
-                default=_DEFAULT_VLM_MODEL,
-                group="LLM",
-                description="Model name for vision-language calls (overrides llm.model when profile=vlm).",
+                description="Agent / VLM / Summarize 共用的 API Key。",
+                env=_ENV_API_KEY_KEYS,
             ),
             SettingsSpec(
                 key="llm.temperature",
-                label="Temperature",
+                label="采样温度",
                 type="float",
                 default=_DEFAULT_TEMPERATURE,
                 group="LLM",
-                description="Sampling temperature (omit for model default).",
+                description="采样温度；留空使用模型默认。",
             ),
             SettingsSpec(
                 key="llm.max_tokens",
-                label="Max Tokens",
+                label="最大 Token 数",
                 type="int",
                 default=_DEFAULT_MAX_TOKENS,
                 group="LLM",
-                description="Maximum completion tokens (omit for model default).",
+                description="最大生成 Token 数；留空使用模型默认。",
             ),
             SettingsSpec(
                 key="llm.timeout",
-                label="Timeout (s)",
+                label="超时（秒）",
                 type="float",
                 default=_DEFAULT_TIMEOUT,
                 group="LLM",
-                description="HTTP request timeout in seconds.",
+                description="HTTP 请求超时秒数。",
             ),
             SettingsSpec(
                 key="llm.max_retries",
-                label="Max Retries",
+                label="最大重试次数",
                 type="int",
                 default=_DEFAULT_MAX_RETRIES,
                 group="LLM",
-                description="Automatic retry attempts for transient failures.",
+                description="瞬时错误自动重试次数。",
             ),
             SettingsSpec(
                 key="llm.extra_headers",
-                label="Extra Headers (JSON)",
+                label="额外请求头（JSON）",
                 type="json",
                 default={},
                 group="LLM",
-                description='Additional HTTP headers as JSON object, e.g. {"X-Custom": "val"}.',
+                description='附加 HTTP 头 JSON，例如 {"X-Custom": "val"}。',
             ),
             SettingsSpec(
                 key="llm.extra_body",
-                label="Extra Body (JSON)",
+                label="额外请求体（JSON）",
                 type="json",
                 default={},
                 group="LLM",
-                description='Extra JSON body fields merged into every request, e.g. {"thinking": "disabled"}.',
+                description='合并进每次请求的额外 JSON，例如 {"thinking": "disabled"}。',
             ),
         ]
         for spec in specs:
@@ -144,7 +129,6 @@ class LLMPlugin(Plugin):
             try:
                 base_url = settings.get("llm.base_url", _DEFAULT_BASE_URL)
                 api_key = settings.get("llm.api_key", "")
-                model = settings.get("llm.model", _DEFAULT_MODEL)
                 temperature = settings.get("llm.temperature", _DEFAULT_TEMPERATURE)
                 max_tokens = settings.get("llm.max_tokens", _DEFAULT_MAX_TOKENS)
                 timeout = settings.get("llm.timeout", _DEFAULT_TIMEOUT)
@@ -166,19 +150,20 @@ class LLMPlugin(Plugin):
                 logger.exception("failed to read settings for profile %s", profile)
                 return ProviderConfig()
 
-            if profile == "vlm":
-                vlm_model = settings.get("llm.vlm_model", "")
-                if vlm_model:
-                    model = vlm_model
-
             return ProviderConfig(
                 base_url=base_url or _DEFAULT_BASE_URL,
                 api_key=api_key,
-                model=model,
+                # Model selection belongs to the consuming plugin (Agent / VLM
+                # / Summarize / STT) and is passed per request.
+                model="",
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=float(timeout) if timeout else _DEFAULT_TIMEOUT,
-                max_retries=int(max_retries) if max_retries else _DEFAULT_MAX_RETRIES,
+                max_retries=(
+                    int(max_retries)
+                    if max_retries is not None
+                    else _DEFAULT_MAX_RETRIES
+                ),
                 extra_headers=dict(extra_headers),
                 extra_body=dict(extra_body),
             )

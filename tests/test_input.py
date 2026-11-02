@@ -468,12 +468,9 @@ class TestCatalogNoToken:
         with pytest.raises(InputError, match="token"):
             cat.list_courses()
 
-    def test_has_token_method(self, monkeypatch):
+    def test_has_token_method(self):
         from plugins.input.catalog import Catalog
 
-        # Ensure CANVAS_TOKEN is not set in the environment and the .env
-        # fallback is also suppressed, so has_token() only sees settings.
-        monkeypatch.delenv("CANVAS_TOKEN", raising=False)
         settings = FakeSettings()
         settings.register(
             __import__(
@@ -485,12 +482,8 @@ class TestCatalogNoToken:
                 default="",
             )
         )
-        with mock.patch(
-            "plugins.input.catalog.load_token_from_env",
-            return_value="",
-        ):
-            cat = Catalog(settings=settings)
-            assert not cat.has_token()
+        cat = Catalog(settings=settings)
+        assert not cat.has_token()
         settings.set("input.canvas_token", "fake123")
         assert cat.has_token()
 
@@ -508,33 +501,17 @@ class TestCatalogMapping:
         cat.close()
         cat.reset()
 
-    def test_has_token_falls_back_to_env(self, monkeypatch):
-        """has_token() reads from env when settings has no token."""
-        from integrations.sjtu_canvas import load_token_from_env
+    def test_has_token_ignores_env(self, monkeypatch):
+        """Settings are the single source of truth; env is seeded at startup."""
         from plugins.input.catalog import Catalog
 
-        monkeypatch.setenv("CANVAS_TOKEN", "")
+        monkeypatch.setenv("CANVAS_TOKEN", "env-token-123")
         settings = FakeSettings({"input.canvas_token": ""})
-        # env empty too → has_token False
         cat = Catalog(settings=settings)
         assert not cat.has_token()
 
-        # env has token → has_token True even though settings empty
-        monkeypatch.setenv("CANVAS_TOKEN", "env-token-123")
-        cat2 = Catalog(settings=settings)
-        assert cat2.has_token()
-
-    def test_cat_uses_env_fallback(self, monkeypatch):
-        """_cat() passes token=None to SJTUCatalog when settings token is empty,
-        allowing SJTUCatalog to fall back to env."""
-        from integrations.sjtu_canvas import load_token_from_env
-        from plugins.input.catalog import Catalog
-
-        monkeypatch.setenv("CANVAS_TOKEN", "env-fallback-token")
-        settings = FakeSettings({"input.canvas_token": "", "input.canvas_base_url": "http://localhost"})
-        cat = Catalog(settings=settings)
+        settings.set("input.canvas_token", "settings-token")
         assert cat.has_token()
-        cat.close()
 
     def test_list_courses_ttl_cache_hit(self):
         """Two list_courses calls within TTL only hit underlying SJTUCatalog once."""
@@ -835,7 +812,6 @@ class TestInputPluginUI:
             "input.playback_speed",
             "input.live_device",
             "input.reconnect",
-            "input.enabled",
         ):
             assert key in specs, f"setting {key} not registered"
 

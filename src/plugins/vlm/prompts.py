@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+from llm.types import ImagePart, TextPart
+
 SYSTEM_PROMPT = (
     "你是一个精确的大学数学板书转录专家。你的输出将直接用于生成课堂笔记，"
     "因此必须完整、准确、忠实于黑板内容。"
@@ -24,7 +26,7 @@ BOARD_RECOGNITION_PROMPT = """这是大学数学课堂在 {timestamp} 时的黑�
 
 【手绘示意图占位符规范（绝对严格）】：
 对黑板上的手绘示意图（如几何图形、闭合曲线围道、区域映射示意图、复平面图、图表等），必须使用 Markdown 图片语法占位符：
-![{{对图形的简短中文描述}}]()
+![{对图形的简短中文描述}]()
 例如黑板画了同心圆，必须写入：![同心圆区域示意图]()。
 严禁写成普通文字描述或括号备注（如严禁写成"（手绘示意图：…）"）。
 
@@ -47,7 +49,8 @@ def build_user_message(
     *,
     timestamp: str = "",
     image_data_url: str = "",
-) -> list[dict[str, str | dict[str, str]]]:
+    prompt_text: str | None = None,
+) -> list[TextPart | ImagePart]:
     """Build an OpenAI-style user message with text + image.
 
     Parameters
@@ -59,22 +62,15 @@ def build_user_message(
 
     Returns
     -------
-    list[dict]
-        A ``content`` list suitable for ``messages``.
+    list[TextPart | ImagePart]
+        A typed content list suitable for :class:`llm.types.Message`.
     """
-    prompt_text = BOARD_RECOGNITION_PROMPT.format(
-        timestamp=timestamp,
-    )
-    content: list[dict[str, str | dict[str, str]]] = [
-        {"type": "text", "text": prompt_text},
-    ]
+    if prompt_text is None:
+        prompt_text = BOARD_RECOGNITION_PROMPT
+    prompt_text = prompt_text.replace("{timestamp}", timestamp)
+    content: list[TextPart | ImagePart] = [TextPart(text=prompt_text)]
     if image_data_url:
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": image_data_url, "detail": "auto"},
-            }
-        )
+        content.append(ImagePart(url=image_data_url))
     return content
 
 

@@ -176,6 +176,25 @@
     return wrap;
   }
 
+  function renderRows(block) {
+    const wrap = el("div", { class: "row-list block" });
+    for (const item of block.items || []) {
+      const row = el("div", { class: `row-item ${item.active ? "active" : ""}` });
+      const main = el("div", { class: "row-main" }, [
+        el("div", { class: "row-title", text: item.title || item.text || "" }),
+        item.subtitle ? el("div", { class: "row-sub", text: item.subtitle }) : null,
+        item.meta ? el("div", { class: "row-meta", text: item.meta }) : null,
+      ]);
+      row.appendChild(main);
+      if (item.action) {
+        row.appendChild(actionButton(item.label || "打开", item.action, item.value, item.class || "btn btn-sm"));
+      }
+      wrap.appendChild(row);
+    }
+    if (!wrap.children.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    return wrap;
+  }
+
   function renderCards(block) {
     const wrap = el("div", { class: "cards" });
     for (const item of block.items || []) {
@@ -239,10 +258,13 @@
           class: "input", id, name: fieldName,
           type: type === "password" || field.secret ? "password" : (type === "number" || rawType === "int" || rawType === "float" ? "number" : "text"),
         });
-        if (field.value !== undefined && field.value !== null && field.value !== "******") {
+        if (field.value !== undefined && field.value !== null) {
           input.value = field.value;
         }
         if (field.placeholder) input.placeholder = field.placeholder;
+        if (field.secret && field.is_set) {
+          input.placeholder = "已配置；留空保存会清除";
+        }
         if (rawType === "int" || type === "number") input.step = "1";
         if (rawType === "float") input.step = "any";
       }
@@ -311,6 +333,7 @@
     }
     if (type === "table") return el("div", { class: "block" }, [renderTable(block)]);
     if (type === "cards") return el("div", { class: "block" }, [renderCards(block)]);
+    if (type === "rows") return renderRows(block);
     if (type === "list") {
       const list = el("div", { class: "block btn-row" });
       for (const item of block.items || []) {
@@ -393,12 +416,11 @@
         state.activeTab[side] = tab.id;
         localStorage.setItem(`lecture-agent.tab.${side}`, tab.id);
         renderSidebar(side);
-        // Tab-level page convention: settings -> settings:main.  Other tabs
-        // expose explicit buttons/actions instead of auto-navigation.
-        if (tab.id === "settings") {
-          const page = (state.ui.pages || []).find((p) => p.id === "settings:main");
-          if (page) openPage(page.id);
-        }
+        // Open the tab's primary page so switching tabs never leaves the
+        // previous page looking like part of the new tab.
+        const first = (tab.toolbox || [])[0];
+        const pageId = first ? findPageForItem(first) : null;
+        if (pageId && state.ui.active_page !== pageId) openPage(pageId);
       });
       tabsEl.appendChild(btn);
     }

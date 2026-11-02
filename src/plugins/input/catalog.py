@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Any, Callable, TypeVar
 
-from integrations.sjtu_canvas import SJTUCatalog, load_token_from_env
+from integrations.sjtu_canvas import SJTUCatalog
 
 _log = logging.getLogger("lecture_agent.plugins.input.catalog")
 T = TypeVar("T")
@@ -40,21 +40,20 @@ class Catalog:
 
     def _cat(self) -> SJTUCatalog:
         if self._sjt_cat is None:
-            token = self._settings.get("input.canvas_token", "")
-            base_url = self._settings.get(
-                "input.canvas_base_url", "https://oc.sjtu.edu.cn"
+            token = str(self._settings.get("input.canvas_token", "") or "")
+            base_url = str(
+                self._settings.get(
+                    "input.canvas_base_url", "https://oc.sjtu.edu.cn"
+                )
+                or "https://oc.sjtu.edu.cn"
             )
-            self._sjt_cat = SJTUCatalog(
-                token=token if token else None,
-                base_url=base_url,
-            )
+            # The settings service is the single source of truth; do not fall
+            # back to a hidden environment read here.
+            self._sjt_cat = SJTUCatalog(token=token, base_url=base_url)
         return self._sjt_cat
 
     def has_token(self) -> bool:
-        token = self._settings.get("input.canvas_token", "")
-        if token:
-            return True
-        return bool(load_token_from_env())
+        return bool(self._settings.get("input.canvas_token", ""))
 
     # -- Courses ----------------------------------------------------------
 

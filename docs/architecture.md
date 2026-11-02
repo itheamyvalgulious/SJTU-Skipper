@@ -385,9 +385,10 @@ class RetryPolicy:
 
 - `LLMService.chat(profile="agent" | "vlm" | "stt" | ..., ...)`。
 - Profile 从 settings 读取：
-  - `llm.base_url`, `llm.api_key`, `llm.model`, `llm.vlm_model`, `llm.timeout`, `llm.max_retries`, `llm.temperature`, `llm.max_tokens`。
+  - `llm.base_url`, `llm.api_key`, `llm.timeout`, `llm.max_retries`, `llm.temperature`, `llm.max_tokens`。
+  - 模型不放在 LLM 连接分组：Agent 使用 `agent.model`，VLM 使用 `vlm.model`，Summarize 使用 `summarize.model`，STT 使用 `stt.model`。
   - `llm.extra_headers` / `llm.extra_body`（JSON 字符串）。
-- 没有 settings 时回退环境变量：`LLM_BASE_URL`, `LLM_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`。
+- 环境变量 `LLM_BASE_URL` / `LLM_API_KEY` / `OPENAI_*` / `DEEPSEEK_API_KEY` 会在设置注册时写入 `settings.json`，UI 显示实际生效值（密钥掩码），运行时只读设置。
 - 每次请求读取一次配置，设置变更后无需重启。
 
 ## 6. UI 层
@@ -487,7 +488,7 @@ SettingsSpec(
 - 持久化到 `data_dir/settings.json`（原子写，权限 0600）。
 - `get(key)` 返回真实值；`public_all()` 对 secret 返回 `"******"` 并带 `is_set`。
 - 变更时发 `settings.changed`。
-- UI：右侧「设置」tab，toolbox 按 group 分组；page 渲染表单，action `settings.save`。
+- UI：右侧「设置」tab 只有一个入口；page 内按 group 分 tab 渲染表单，action `settings.save`。只有满足 `visible_when` 的字段才会出现。
 
 ### 7.2 llm（底层 LLM 插件）
 
@@ -529,7 +530,7 @@ SettingsSpec(
 ### 7.4 stt（语音识别插件）
 
 - 服务名：`stt`。
-- 设置项：provider (`none` / `openai` / `faster-whisper`)、model、language、chunk_seconds、overlap、min_seconds、enabled。
+- 设置项：provider (`none` / `openai` / `faster-whisper`)、model、language、chunk_seconds、overlap、min_seconds、enabled。provider=none 时只显示 enabled/provider，其余参数隐藏。
 - 工作线程：读 `audio`，按 `chunk_seconds` 切片，写临时 WAV，调用后端，追加 `transcript`。
 - 后端：
   - `OpenAITranscriptionBackend`：OpenAI 兼容 `/audio/transcriptions`。
@@ -542,7 +543,7 @@ SettingsSpec(
 ### 7.5 vlm（板书识别插件）
 
 - 服务名：`vlm`。
-- 设置项：enabled、model、window_seconds、fps、max_frames、fusion、dedupe_threshold、prompt。
+- 设置项：enabled（默认 true）、model、window_seconds、fps、max_frames（默认 12）、fusion、dedupe_threshold、完整提示词 prompt。VLM 连接与 API Key 复用 LLM 分组。
 - 工作线程：读 `video`，窗口内取帧 -> 融合 -> VLM -> 追加 `visual`。
 - 融合算法来自 `picture_parser`：
   1. 解码 JPEG -> 灰度（保持原始分辨率，不裁剪、不缩放）；

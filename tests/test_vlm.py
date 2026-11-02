@@ -25,6 +25,7 @@ from core import (
     UIManager,
     VideoFrame,
 )
+from llm.types import ImagePart, TextPart
 from plugins.vlm.fusion import fuse_frames
 from plugins.vlm.plugin import VlmPlugin, _fmt_time
 from plugins.vlm.prompts import (
@@ -172,37 +173,38 @@ class TestFusion:
 
 class TestPrompts:
     def test_prompt_contains_latex_rules(self):
-        prompt = BOARD_RECOGNITION_PROMPT.format(timestamp="00:00-01:00")
+        prompt = BOARD_RECOGNITION_PROMPT.replace("{timestamp}", "00:00-01:00")
         assert "$" in prompt
         assert "$$" in prompt
         assert "\\[" in prompt  # forbidden mention
         assert "\\]" in prompt
 
     def test_prompt_contains_diagram_placeholder(self):
-        prompt = BOARD_RECOGNITION_PROMPT.format(timestamp="00:00")
+        prompt = BOARD_RECOGNITION_PROMPT.replace("{timestamp}", "00:00")
         assert "![" in prompt
         assert "]()" in prompt
 
     def test_prompt_contains_blank_board_marker(self):
-        prompt = BOARD_RECOGNITION_PROMPT.format(timestamp="00:00")
+        prompt = BOARD_RECOGNITION_PROMPT.replace("{timestamp}", "00:00")
         assert BLANK_BOARD_MARKER in prompt
 
     def test_prompt_no_greeting(self):
-        prompt = BOARD_RECOGNITION_PROMPT.format(timestamp="00:00")
+        prompt = BOARD_RECOGNITION_PROMPT.replace("{timestamp}", "00:00")
         assert "寒暄" in prompt or "问候" in prompt  # instructs to avoid them
 
     def test_build_user_message_structure(self):
         content = build_user_message(timestamp="00:30", image_data_url="data:image/jpeg;base64,abc")
         assert isinstance(content, list)
         assert len(content) == 2
-        assert content[0]["type"] == "text"
-        assert content[1]["type"] == "image_url"
-        assert "00:30" in content[0]["text"]
+        assert isinstance(content[0], TextPart)
+        assert isinstance(content[1], ImagePart)
+        assert "00:30" in content[0].text
+        assert content[1].url == "data:image/jpeg;base64,abc"
 
     def test_build_user_message_no_image_url(self):
         content = build_user_message(timestamp="00:00", image_data_url="")
         assert len(content) == 1
-        assert content[0]["type"] == "text"
+        assert isinstance(content[0], TextPart)
 
 
 class TestTrivialBoardText:

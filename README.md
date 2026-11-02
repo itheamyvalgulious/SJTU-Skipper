@@ -40,7 +40,7 @@ python3.12 -m venv .venv
 
 打开页面后：
 
-1. 右侧「设置」填入 Canvas token、LLM API key / base URL / 模型。
+1. 右侧「设置」填入 Canvas Token、LLM API Key / Base URL；模型在 Agent / VLM 分组中设置。
 2. 左侧「课程」刷新课程列表。
 3. 选择录播或直播，开始一节课。
 4. 左侧「课堂」查看转写、板书、笔记。

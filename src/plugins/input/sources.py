@@ -547,6 +547,29 @@ class SourceManager:
         with self._lock:
             return self._state
 
+    def configure(
+        self,
+        *,
+        sample_rate: int | None = None,
+        video_fps: float | None = None,
+        video_width: int | None = None,
+        playback_speed: float | None = None,
+        reconnect: bool | None = None,
+    ) -> None:
+        """Apply live settings to the next source start."""
+
+        with self._lock:
+            if sample_rate is not None:
+                self._sample_rate = int(sample_rate)
+            if video_fps is not None:
+                self._video_fps = float(video_fps)
+            if video_width is not None:
+                self._video_width = int(video_width)
+            if playback_speed is not None:
+                self._playback_speed = float(playback_speed)
+            if reconnect is not None:
+                self._reconnect = bool(reconnect)
+
     def start(self, spec: SourceSpec) -> None:
         """Start a new source, stopping any existing one."""
         with self._lock:

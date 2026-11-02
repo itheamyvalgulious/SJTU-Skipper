@@ -882,8 +882,8 @@ def test_llm_plugin_setup_registers_settings_and_service() -> None:
     # Check settings were registered
     assert "llm.base_url" in fake_settings.specs_map
     assert "llm.api_key" in fake_settings.specs_map
-    assert "llm.model" in fake_settings.specs_map
-    assert "llm.vlm_model" in fake_settings.specs_map
+    assert "llm.model" not in fake_settings.specs_map
+    assert "llm.vlm_model" not in fake_settings.specs_map
     assert "llm.temperature" in fake_settings.specs_map
     assert "llm.max_tokens" in fake_settings.specs_map
     assert "llm.timeout" in fake_settings.specs_map

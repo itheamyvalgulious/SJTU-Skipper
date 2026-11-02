@@ -25,7 +25,13 @@ from core.streams import TextItem, VideoFrame
 from plugins.settings.spec import SettingsSpec
 
 from .fusion import fuse_frames
-from .prompts import BLANK_BOARD_MARKER, build_user_message, is_trivial_board_text
+from .prompts import (
+    BLANK_BOARD_MARKER,
+    BOARD_RECOGNITION_PROMPT,
+    SYSTEM_PROMPT,
+    build_user_message,
+    is_trivial_board_text,
+)
 
 logger = logging.getLogger("lecture_agent.plugin.vlm")
 
@@ -63,7 +69,7 @@ class VlmPlugin(Plugin):
         ctx.events.on("session.stopped", self._on_session_stopped, plugin_id=self.id)
         ctx.events.on("settings.changed", self._on_settings_changed, plugin_id=self.id)
 
-        enabled = self._setting("vlm.enabled", False)
+        enabled = self._setting("vlm.enabled", True)
         if enabled:
             self._start_worker()
 
@@ -85,9 +91,10 @@ class VlmPlugin(Plugin):
                 key="vlm.enabled",
                 label="启用板书识别",
                 type="bool",
-                default=False,
+                default=True,
                 group="VLM",
                 description="是否启动 VLM 板书识别工作线程",
+                group_note="VLM 复用「LLM」分组中的 Base URL / API Key；本组只配置板书识别模型与处理参数。",
             ),
             SettingsSpec(
                 key="vlm.model",
@@ -95,7 +102,7 @@ class VlmPlugin(Plugin):
                 type="string",
                 default="deepseek-flash",
                 group="VLM",
-                description="用于板书识别的视觉语言模型（需支持图片输入）",
+                description="视觉语言模型；连接与 API Key 使用「LLM」分组。",
             ),
             SettingsSpec(
                 key="vlm.window_seconds",
@@ -117,9 +124,9 @@ class VlmPlugin(Plugin):
                 key="vlm.max_frames",
                 label="最大帧数",
                 type="int",
-                default=0,
+                default=12,
                 group="VLM",
-                description="每窗口最多采样的帧数；0 表示不限制",
+                description="每窗口最多采样的帧数；0 表示不限制（全量帧很慢）",
             ),
             SettingsSpec(
                 key="vlm.fusion",
@@ -141,9 +148,9 @@ class VlmPlugin(Plugin):
                 key="vlm.prompt",
                 label="板书识别提示词",
                 type="text",
-                default="",
+                default=BOARD_RECOGNITION_PROMPT,
                 group="VLM",
-                description="额外追加到识别提示词的文本（可选）",
+                description="完整提示词，可编辑；`{timestamp}` 会替换为时间范围，留空会报错。",
             ),
         ]
         settings = self._ctx.service("settings")
@@ -278,24 +285,22 @@ class VlmPlugin(Plugin):
             return ""
         ctx = self._ctx
         data_url = "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode()
+        prompt_text = str(
+            self._setting("vlm.prompt", BOARD_RECOGNITION_PROMPT)
+        ).strip()
+        if not prompt_text:
+            raise ValueError("vlm.prompt 不能为空；请填写板书识别提示词")
         messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": (
-                    "你是一个精确的大学数学板书转录专家。"
-                    "你的输出将直接用于生成课堂笔记，因此必须完整、准确、忠实于黑板内容。"
-                ),
-            },
+            {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": build_user_message(
-                    timestamp=timestamp, image_data_url=data_url
+                    timestamp=timestamp,
+                    image_data_url=data_url,
+                    prompt_text=prompt_text,
                 ),
             },
         ]
-        extra_prompt = str(self._setting("vlm.prompt", "")).strip()
-        if extra_prompt:
-            messages.append({"role": "user", "content": extra_prompt})
         response = ctx.llm.chat(
             profile="vlm",
             model=str(self._setting("vlm.model", "") or "") or None,
@@ -379,7 +384,7 @@ class VlmPlugin(Plugin):
         cursor = self._cursor
         window = max(5.0, self._setting("vlm.window_seconds", 20.0))
         fps = self._setting("vlm.fps", 4.0)
-        max_frames_val = int(self._setting("vlm.max_frames", 0))
+        max_frames_val = int(self._setting("vlm.max_frames", 12))
 
         # How many frames to expect
         expected_frames = int(window * fps)

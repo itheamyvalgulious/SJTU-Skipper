@@ -119,6 +119,15 @@ class SettingsSpec:
     order: float = 0
     secret: bool = False
     placeholder: str = ""
+    # Environment variables used to seed this setting on first registration.
+    # Seeding writes the value into settings.json so the UI shows the effective
+    # value instead of silently reading a hidden fallback at use time.
+    env: tuple[str, ...] = ()
+    # Only show this field when another setting has one of the given values.
+    # Example: ("stt.provider", ("openai", "faster-whisper")).
+    visible_when: tuple[str, tuple[Any, ...]] | None = None
+    # Optional explanatory text shown above the group's form.
+    group_note: str = ""
 
     def __post_init__(self) -> None:
         if self.type not in VALID_TYPES:

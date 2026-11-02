@@ -100,7 +100,7 @@ ctx.events.emit("my.event", value=1)
 ```python
 service = ctx.require("settings")
 service.register(spec)
-service.get("llm.model")
+service.get("agent.model")
 
 ctx.register_service("my.service", my_object)
 other = ctx.require("summarize")
@@ -207,6 +207,9 @@ settings.set("my.api_key", "new")
 ```
 
 - secret 在 UI/公开输出中掩码；内部 `get` 返回真实值。
+- `env=("ENV_NAME",)`：首次注册时把环境变量写入 `settings.json`，之后以设置为准，避免隐藏回退。
+- `visible_when=("other.key", (value, ...))`：仅当另一个设置取指定值时显示该字段。
+- `group_note="..."`：显示在该设置分组表单上方。
 - 设置变化发 `settings.changed`。
 
 ## 8. Agent

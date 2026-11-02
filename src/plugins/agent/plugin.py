@@ -136,12 +136,14 @@ class AgentService:
         default_max_steps: int,
         default_max_tool_output: int,
         default_system_prompt: str,
+        settings_getter: Callable[[str, Any], Any] | None = None,
     ) -> None:
         self._ctx = ctx
         self._default_model = default_model
         self._default_max_steps = default_max_steps
         self._default_max_tool_output = default_max_tool_output
         self._default_system_prompt = default_system_prompt
+        self._settings_getter = settings_getter
         self._sessions: dict[str, AgentSession] = {}
         self._custom_tools: dict[str, ToolSpec] = {}
         self._prompt_contributors: list[Callable[[AgentSession], str]] = []
@@ -150,6 +152,16 @@ class AgentService:
     # ------------------------------------------------------------------
     # Session management
     # ------------------------------------------------------------------
+    def _setting(self, key: str, fallback: Any) -> Any:
+        """Read a live setting; fall back to the setup-time value."""
+
+        if self._settings_getter is None:
+            return fallback
+        try:
+            return self._settings_getter(key, fallback)
+        except Exception:  # noqa: BLE001 - settings must not break sessions
+            return fallback
+
     def create_session(
         self,
         name: str,
@@ -197,15 +209,23 @@ class AgentService:
             system_prompt=(
                 system_prompt
                 if system_prompt is not None
-                else self._default_system_prompt
+                else self._setting("agent.system_prompt", self._default_system_prompt)
             ),
             workspace=ws,
             tools={},
-            model=model if model is not None else self._default_model,
-            max_steps=(
-                max_steps if max_steps is not None else self._default_max_steps
+            model=(
+                model
+                if model is not None
+                else self._setting("agent.model", self._default_model)
             ),
-            max_tool_output=self._default_max_tool_output,
+            max_steps=(
+                max_steps
+                if max_steps is not None
+                else self._setting("agent.max_steps", self._default_max_steps)
+            ),
+            max_tool_output=self._setting(
+                "agent.max_tool_output", self._default_max_tool_output
+            ),
             extra_instructions=tuple(extra_instructions),
             parent_id=parent_id,
             meta=dict(meta or {}),
@@ -649,6 +669,7 @@ class AgentPlugin(Plugin):
         self._tab_added = False
         self._page_added = False
         self._actions: list[str] = []
+        self._current_session_id = ""
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -663,35 +684,35 @@ class AgentPlugin(Plugin):
         agent_specs = [
             SettingsSpec(
                 key="agent.model",
-                label="Agent Model",
+                label="Agent 模型",
                 type="string",
                 default="deepseek-chat",
                 group=_AGENT_SETTINGS_GROUP,
-                description="Model used by the Agent REPL loop.",
+                description="Agent 循环使用的模型；新建会话生效。",
             ),
             SettingsSpec(
                 key="agent.max_steps",
-                label="Max Steps",
+                label="最大步数",
                 type="int",
                 default=12,
                 group=_AGENT_SETTINGS_GROUP,
-                description="Maximum tool-use iterations per run.",
+                description="每次运行允许的最大工具调用轮数；新建会话生效。",
             ),
             SettingsSpec(
                 key="agent.max_tool_output",
-                label="Max Tool Output",
+                label="工具输出上限",
                 type="int",
                 default=8000,
                 group=_AGENT_SETTINGS_GROUP,
-                description="Tool output longer than this is truncated.",
+                description="超过此长度的工具输出会被截断；新建会话生效。",
             ),
             SettingsSpec(
                 key="agent.system_prompt",
-                label="System Prompt",
+                label="系统提示词",
                 type="text",
                 default=DEFAULT_SYSTEM_PROMPT,
                 group=_AGENT_SETTINGS_GROUP,
-                description="Default system prompt for new agent sessions.",
+                description="新建 Agent 会话的默认系统提示词。",
             ),
         ]
         for spec in agent_specs:
@@ -714,6 +735,7 @@ class AgentPlugin(Plugin):
             default_max_steps=default_max_steps,
             default_max_tool_output=default_max_tool_output,
             default_system_prompt=default_system_prompt,
+            settings_getter=settings.get,
         )
         ctx.register_service("agent", self.service)
 
@@ -812,11 +834,40 @@ class AgentPlugin(Plugin):
     # ------------------------------------------------------------------
     # UI renderers
     # ------------------------------------------------------------------
+    def _ui_sessions(self) -> list[dict[str, Any]]:
+        """User-facing sessions; hide summarize's internal worker sessions."""
+
+        service = self.service
+        if service is None:
+            return []
+        return [
+            s
+            for s in service.list_sessions()
+            if not str(s.get("name", "")).startswith("summarize-")
+        ]
+
+    def _current_session(self, sessions: list[dict[str, Any]]) -> str:
+        """Return the selected session id, falling back to the newest one."""
+
+        ids = {s["id"] for s in sessions}
+        if self._current_session_id in ids:
+            return self._current_session_id
+        preferred = next(
+            (
+                s
+                for s in reversed(sessions)
+                if not str(s.get("name", "")).startswith("summarize-")
+            ),
+            sessions[-1] if sessions else None,
+        )
+        self._current_session_id = preferred["id"] if preferred else ""
+        return self._current_session_id
+
     def _render_sessions(self) -> list[dict[str, Any]]:
         service = self.service
         if service is None:
             return [{"type": "text", "text": "服务未就绪"}]
-        sessions = service.list_sessions()
+        sessions = self._ui_sessions()
         if not sessions:
             return [
                 {
@@ -834,22 +885,26 @@ class AgentPlugin(Plugin):
                     ],
                 },
             ]
-        items: list[dict[str, Any]] = []
+        current_id = self._current_session(sessions)
+        items = []
         for s in sessions:
             items.append(
                 {
-                    "text": f"{s['name']} ({s['message_count']} 条消息)",
-                    "subtitle": (
-                        f"model={s['model']}  |  "
-                        f"{s['message_count']} messages"
-                    ),
+                    "title": s["name"],
+                    "subtitle": f"{s['message_count']} 条消息 · {s['model']}",
                     "action": "agent.select_session",
                     "value": {"session_id": s["id"]},
+                    "label": "打开",
+                    "class": (
+                        "btn btn-sm btn-primary"
+                        if s["id"] == current_id
+                        else "btn btn-sm"
+                    ),
+                    "active": s["id"] == current_id,
                 }
             )
-        blocks: list[dict[str, Any]] = [
-            {"type": "markdown", "text": "### 会话"},
-            {"type": "list", "items": items},
+        return [
+            {"type": "rows", "items": items},
             {
                 "type": "buttons",
                 "buttons": [
@@ -861,13 +916,12 @@ class AgentPlugin(Plugin):
                 ],
             },
         ]
-        return blocks
 
     def _render_chat(self) -> list[dict[str, Any]]:
         service = self.service
         if service is None:
             return [{"type": "text", "text": "服务未就绪"}]
-        sessions = service.list_sessions()
+        sessions = self._ui_sessions()
         if not sessions:
             return [
                 {
@@ -875,8 +929,10 @@ class AgentPlugin(Plugin):
                     "text": "### Agent\n\n暂无会话。请先创建会话。",
                 }
             ]
-        # Render the first session as current
-        current = sessions[0]
+        current_id = self._current_session(sessions)
+        current = next(
+            (s for s in sessions if s["id"] == current_id), sessions[0]
+        )
         session = service.get_session(current["id"])
         blocks: list[dict[str, Any]] = [
             {
@@ -934,11 +990,13 @@ class AgentPlugin(Plugin):
         if not message.strip():
             return {"ok": False, "message": "消息为空"}
 
-        sessions = service.list_sessions()
+        sessions = self._ui_sessions()
         if not sessions:
-            service.create_session("default")
-            sessions = service.list_sessions()
-        session_id = sessions[0]["id"]
+            session = service.create_session("default")
+            self._current_session_id = session.id
+            session_id = session.id
+        else:
+            session_id = self._current_session(sessions)
 
         service.run_async(session_id, message)
         return {"ok": True, "message": "Agent 正在处理…", "refresh": True}
@@ -948,19 +1006,44 @@ class AgentPlugin(Plugin):
         if service is None:
             return {"ok": False, "message": "服务未就绪"}
         name = str(payload.get("name", "") or "default")
-        service.create_session(name)
-        return {"ok": True, "message": f"已创建会话 {name!r}", "refresh": True, "open_page": _AGENT_PAGE_ID}
+        session = service.create_session(name)
+        self._current_session_id = session.id
+        return {
+            "ok": True,
+            "message": f"已创建会话 {name!r}",
+            "refresh": True,
+            "open_page": _AGENT_PAGE_ID,
+        }
 
     def _handle_select_session(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return {"ok": True, "message": "已选择会话", "refresh": True, "open_page": _AGENT_PAGE_ID}
+        service = self.service
+        if service is None:
+            return {"ok": False, "message": "服务未就绪"}
+        values = payload.get("values") if isinstance(payload.get("values"), dict) else {}
+        session_id = str(payload.get("session_id") or values.get("session_id") or "")
+        if not session_id:
+            return {"ok": False, "message": "缺少会话 ID"}
+        if service.get_session(session_id) is None:
+            return {"ok": False, "message": "会话不存在或已关闭"}
+        self._current_session_id = session_id
+        return {
+            "ok": True,
+            "message": "已切换会话",
+            "refresh": True,
+            "open_page": _AGENT_PAGE_ID,
+        }
 
     def _handle_reset(self, payload: dict[str, Any]) -> dict[str, Any]:
         service = self.service
         if service is None:
             return {"ok": False, "message": "服务未就绪"}
-        session_id = str(payload.get("session_id", ""))
-        if session_id:
-            service.reset(session_id)
+        values = payload.get("values") if isinstance(payload.get("values"), dict) else {}
+        session_id = str(payload.get("session_id") or values.get("session_id") or "")
+        if not session_id:
+            session_id = self._current_session(self._ui_sessions())
+        if not session_id:
+            return {"ok": False, "message": "没有可重置的会话"}
+        service.reset(session_id)
         return {"ok": True, "message": "已重置", "refresh": True}
 
 

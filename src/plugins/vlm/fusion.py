@@ -128,11 +128,18 @@ def _fuse_impl(
     cond_fresh_erase = is_chalk[0] & is_chalk[1] & is_chalk[2]
     valid_chalk = cond_persistent | cond_fresh_write | cond_fresh_erase
 
-    # --- 7. nanmedian fusion ---
+    # --- 7. robust median fusion ---
+    # np.nanmedian is very slow on full-resolution stacks; sorting once and
+    # taking the two middle valid values gives exactly the same result.
+    counts = np.sum(is_chalk, axis=0)
     chalk_vals = np.where(is_chalk, board_frames, np.nan)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        chalk_robust = np.nanmedian(chalk_vals, axis=0)
+    ordered = np.sort(chalk_vals, axis=0)
+    lo = np.maximum(0, (counts - 1) // 2)
+    hi = np.maximum(0, counts // 2)
+    low = np.take_along_axis(ordered, lo[None, ...], axis=0)[0]
+    high = np.take_along_axis(ordered, hi[None, ...], axis=0)[0]
+    chalk_robust = (low + high) / 2.0
+    chalk_robust = np.where(counts == 0, np.nan, chalk_robust)
     chalk_robust = np.where(np.isnan(chalk_robust), bg, chalk_robust)
 
     fused = np.where(valid_chalk, np.maximum(bg, chalk_robust), bg).astype(np.uint8)
@@ -178,26 +185,38 @@ def _resize_width(arr: np.ndarray, max_width: int) -> np.ndarray:
     return np.asarray(img, dtype=np.uint8)
 
 
-def _fft_align(frames: np.ndarray) -> np.ndarray:
+def _fft_align(frames: np.ndarray, *, estimate_width: int = 640) -> np.ndarray:
     """Register every frame to the middle frame via FFT phase correlation.
 
     ``frames``: (N, H, W) float32.
+
+    The displacement is estimated on a smaller copy (at most
+    ``estimate_width`` pixels wide) to keep real-time windows affordable; the
+    returned frames, and therefore the fused output, stay at the original
+    resolution.  This only affects motion estimation, not the image fed to the
+    VLM.
     """
     N, bh, bw = frames.shape
     ref_idx = N // 2
-    ref = frames[ref_idx].astype(np.float32)
-    win = np.outer(np.hanning(bh), np.hanning(bw)).astype(np.float32)
+    step = max(1, int(np.ceil(bw / max(1, estimate_width))))
+    if step > 1:
+        small = frames[:, ::step, ::step]
+    else:
+        small = frames
+    _n, ah, aw = small.shape
+    ref = small[ref_idx].astype(np.float32)
+    win = np.outer(np.hanning(ah), np.hanning(aw)).astype(np.float32)
     F_ref = np.fft.fft2(ref * win)
 
-    aligned = np.zeros_like(frames)
+    aligned = np.empty_like(frames)
     for i in range(N):
-        F_cur = np.fft.fft2(frames[i].astype(np.float32) * win)
+        F_cur = np.fft.fft2(small[i].astype(np.float32) * win)
         cp = (F_ref * np.conj(F_cur)) / (np.abs(F_ref * np.conj(F_cur)) + 1e-12)
         r = np.fft.ifft2(cp).real
         r = np.fft.fftshift(r)
         py, px = np.unravel_index(np.argmax(r), r.shape)
-        dy = py - bh // 2
-        dx = px - bw // 2
+        dy = int(round((py - ah // 2) * (bh / ah)))
+        dx = int(round((px - aw // 2) * (bw / aw)))
         aligned[i] = np.roll(frames[i], shift=(dy, dx), axis=(0, 1))
 
     return aligned

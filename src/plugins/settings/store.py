@@ -273,6 +273,21 @@ class SettingsService:
             raise TypeError("register() expects a SettingsSpec")
         with self._lock:
             self._specs[spec.key] = spec
+        # Seed explicitly declared environment-backed settings into the store
+        # once.  This keeps the settings page truthful: what the UI shows is
+        # exactly what the plugins read.
+        if spec.env and not self._store.has(spec.key):
+            for env_name in spec.env:
+                raw = os.environ.get(env_name)
+                if raw in (None, ""):
+                    continue
+                try:
+                    self._store.set(spec.key, spec.coerce(raw))
+                except (TypeError, ValueError):
+                    self.logger.warning(
+                        "ignoring invalid %s value from environment", spec.key
+                    )
+                break
         self._notify(f"register:{spec.key}")
         return spec
 

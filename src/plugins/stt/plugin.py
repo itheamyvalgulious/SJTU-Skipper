@@ -53,6 +53,7 @@ def _specs() -> tuple[SettingsSpec, ...]:
             default=True,
             group="STT",
             description="关闭后不再消费音频流，已转写内容保留。",
+            group_note="provider=none 时只接收音频流、不产生文字；其余参数仅在接入后端时显示。",
             order=10,
         ),
         SettingsSpec(
@@ -67,6 +68,7 @@ def _specs() -> tuple[SettingsSpec, ...]:
         ),
         SettingsSpec(
             key="stt.model",
+            visible_when=("stt.provider", ("openai", "faster-whisper")),
             label="模型",
             type="string",
             default="whisper-1",
@@ -76,6 +78,7 @@ def _specs() -> tuple[SettingsSpec, ...]:
         ),
         SettingsSpec(
             key="stt.language",
+            visible_when=("stt.provider", ("openai", "faster-whisper")),
             label="语言",
             type="string",
             default="zh",
@@ -85,6 +88,7 @@ def _specs() -> tuple[SettingsSpec, ...]:
         ),
         SettingsSpec(
             key="stt.chunk_seconds",
+            visible_when=("stt.provider", ("openai", "faster-whisper")),
             label="切片时长（秒）",
             type="float",
             default=30.0,
@@ -94,6 +98,7 @@ def _specs() -> tuple[SettingsSpec, ...]:
         ),
         SettingsSpec(
             key="stt.overlap",
+            visible_when=("stt.provider", ("openai", "faster-whisper")),
             label="重叠时长（秒）",
             type="float",
             default=0.5,
@@ -103,6 +108,7 @@ def _specs() -> tuple[SettingsSpec, ...]:
         ),
         SettingsSpec(
             key="stt.min_seconds",
+            visible_when=("stt.provider", ("openai", "faster-whisper")),
             label="最短转写时长（秒）",
             type="float",
             default=1.0,
@@ -112,6 +118,7 @@ def _specs() -> tuple[SettingsSpec, ...]:
         ),
         SettingsSpec(
             key="stt.base_url",
+            visible_when=("stt.provider", ("openai",)),
             label="转写 Base URL",
             type="string",
             default="",
@@ -122,6 +129,7 @@ def _specs() -> tuple[SettingsSpec, ...]:
         ),
         SettingsSpec(
             key="stt.api_key",
+            visible_when=("stt.provider", ("openai",)),
             label="转写 API Key",
             type="secret",
             default="",

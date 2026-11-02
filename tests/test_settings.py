@@ -292,17 +292,21 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         state = runtime.ui.state()
         tab = next(t for t in state["right_tabs"] if t["id"] == "settings")
         item_ids = [item["id"] for item in tab["toolbox"]]
-        assert "settings.group.llm" in item_ids
-        assert len(item_ids) == len({spec.group for spec in GROUPED})
-        llm_item = next(i for i in tab["toolbox"] if i["id"] == "settings.group.llm")
-        assert llm_item["title"] == "LLM"
-        assert any(block["type"] == "buttons" for block in llm_item["blocks"])
-        assert not any(block["type"] == "form" for block in llm_item["blocks"])
+        assert item_ids == ["settings.open"]
+        settings_item = tab["toolbox"][0]
+        assert any(block["type"] == "markdown" for block in settings_item["blocks"])
+        assert not any(block["type"] == "form" for block in settings_item["blocks"])
 
         runtime.ui.open_page("settings:main")
         blocks = runtime.ui.state()["page_content"]["settings:main"]
-        forms = [block for block in blocks if block["type"] == "form"]
-        assert len(forms) == 2
+        assert blocks[0]["type"] == "tabs"
+        forms = [
+            block
+            for group_tab in blocks[0]["tabs"]
+            for block in group_tab["blocks"]
+            if block["type"] == "form"
+        ]
+        assert len(forms) == len({spec.group for spec in GROUPED})
         fields = {field["name"]: field for form in forms for field in form["fields"]}
         assert set(fields) == {spec.key for spec in GROUPED}
         field = fields["llm.api_key"]
@@ -331,7 +335,7 @@ def test_action_save_converts_and_keeps_secret(tmp_path: Path) -> None:
             {
                 "values": {
                     "llm.model": "deepseek-reasoner",
-                    "llm.api_key": "",
+                    "llm.api_key": SECRET_MASK,
                     "input.playback_speed": "1.5",
                 }
             },
@@ -341,6 +345,12 @@ def test_action_save_converts_and_keeps_secret(tmp_path: Path) -> None:
         assert service.get("llm.model") == "deepseek-reasoner"
         assert service.get("llm.api_key") == "secret-value"
         assert service.get("input.playback_speed") == 1.5
+
+        cleared = runtime.ui.dispatch_action(
+            "settings.save", {"values": {"llm.api_key": ""}}
+        )
+        assert cleared.ok is True
+        assert service.get("llm.api_key") == ""
 
         bad = runtime.ui.dispatch_action(
             "settings.save",

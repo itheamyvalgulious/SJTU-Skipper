@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import re
 import threading
 from typing import Any, Mapping
 
@@ -18,7 +16,6 @@ logger = logging.getLogger("lecture_agent.plugins.settings")
 TAB_ID = "settings"
 PAGE_ID = "settings:main"
 SAVE_ACTION = "settings.save"
-GROUP_ITEM_PREFIX = "settings.group."
 
 _INPUT_KIND = {
     "string": "text",
@@ -30,15 +27,6 @@ _INPUT_KIND = {
     "secret": "password",
     "json": "textarea",
 }
-
-
-def group_slug(group: str) -> str:
-    """Turn a group title into a stable id fragment."""
-
-    cleaned = re.sub(r"[^a-z0-9]+", "-", group.lower()).strip("-")
-    if cleaned:
-        return cleaned
-    return "g" + hashlib.sha1(group.encode("utf-8")).hexdigest()[:8]
 
 
 class SettingsPlugin(Plugin):
@@ -94,7 +82,7 @@ class SettingsPlugin(Plugin):
         ui.register_action(SAVE_ACTION, self._handle_save, plugin_id=self.id)
         self._action_added = True
 
-        self._sync_groups()
+        self._ensure_sidebar_item()
         ctx.logger.debug("settings plugin ready: %s", self.store.path)
 
     def teardown(self) -> None:
@@ -115,6 +103,10 @@ class SettingsPlugin(Plugin):
                 except Exception:  # noqa: BLE001
                     pass
                 self._page_added = False
+            try:
+                ctx.ui.remove_toolbox_item("settings.open")
+            except Exception:  # noqa: BLE001
+                pass
             if self._tab_added:
                 try:
                     ctx.ui.remove_tab(TAB_ID)
@@ -125,13 +117,22 @@ class SettingsPlugin(Plugin):
             self._items.clear()
 
     # ------------------------------------------------------------------
-    # Group / toolbox bookkeeping
+    # Toolbox / grouping
     # ------------------------------------------------------------------
     def _on_settings_changed(self, reason: str) -> None:
-        self._sync_groups()
         ctx = self.ctx
         if ctx is not None:
             ctx.ui.refresh(f"settings:{reason}")
+
+    def _spec_visible(self, spec: SettingsSpec) -> bool:
+        """Resolve a spec's ``visible_when`` condition against live values."""
+
+        if spec.visible_when is None:
+            return True
+        key, allowed = spec.visible_when
+        service = self.service
+        current = service.get(key) if service is not None else None
+        return current in allowed
 
     def _grouped_specs(self) -> list[tuple[str, list[SettingsSpec]]]:
         service = self.service
@@ -139,59 +140,47 @@ class SettingsPlugin(Plugin):
             return []
         grouped: dict[str, list[SettingsSpec]] = {}
         for spec in service.specs():
+            if not self._spec_visible(spec):
+                continue
             grouped.setdefault(spec.group, []).append(spec)
         return list(grouped.items())
 
-    def _sync_groups(self) -> None:
-        """Keep one toolbox item per settings group, and drop stale ones."""
+    def _ensure_sidebar_item(self) -> None:
+        """One compact settings entry; the page owns all group editing."""
 
         ctx = self.ctx
         if ctx is None:
             return
-        groups = self._grouped_specs()
-        ordered = [(group_slug(group), group, specs) for group, specs in groups]
-        wanted = {slug: (group, specs) for slug, group, specs in ordered}
-        order_of = {slug: float(index) for index, (slug, _, _) in enumerate(ordered)}
         with self._lock:
-            stale = [slug for slug in self._items if slug not in wanted]
-            new = [slug for slug in wanted if slug not in self._items]
-        for slug in stale:
-            item_id = f"{GROUP_ITEM_PREFIX}{slug}"
-            with self._lock:
-                self._items.pop(slug, None)
-            try:
-                ctx.ui.remove_toolbox_item(item_id)
-            except Exception:  # noqa: BLE001 - best effort
-                ctx.logger.debug("failed to remove settings item %s", item_id)
-        for slug in new:
-            group, specs = wanted[slug]
-            title = group or "General"
-            item_id = f"{GROUP_ITEM_PREFIX}{slug}"
-            try:
-                ctx.ui.add_toolbox_item(
-                    TAB_ID,
-                    item_id,
-                    title,
-                    description=f"{len(specs)} 项设置",
-                    order=order_of.get(slug, 0.0),
-                    render=self._make_group_render(group),
-                    plugin_id=self.id,
-                )
-            except Exception:  # noqa: BLE001 - duplicate/UI gone
-                ctx.logger.exception("failed to add settings item %s", item_id)
-                continue
-            with self._lock:
-                self._items[slug] = item_id
+            if "open" in self._items:
+                return
+            self._items["open"] = "settings.open"
+        try:
+            ctx.ui.add_toolbox_item(
+                TAB_ID,
+                "settings.open",
+                "设置",
+                description="Canvas、LLM 连接、转写、板书与笔记",
+                order=0,
+                render=self._render_sidebar,
+                plugin_id=self.id,
+            )
+        except Exception:  # noqa: BLE001 - duplicate/UI gone
+            ctx.logger.exception("failed to add settings entry")
+
+    def _render_sidebar(self) -> list[dict[str, Any]]:
+        groups = self._grouped_specs()
+        total = sum(len(specs) for _group, specs in groups)
+        return [
+            {
+                "type": "markdown",
+                "text": f"按分组编辑设置，保存后立即生效。当前 {len(groups)} 组 / {total} 项。",
+            }
+        ]
 
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
-    def _make_group_render(self, group: str):
-        def render() -> list[dict[str, Any]]:
-            return self._render_group(group)
-
-        return render
-
     def _render_page(self) -> list[dict[str, Any]]:
         groups = self._grouped_specs()
         if not groups:
@@ -205,38 +194,15 @@ class SettingsPlugin(Plugin):
                     ),
                 }
             ]
-        blocks: list[dict[str, Any]] = []
+        tabs: list[dict[str, Any]] = []
         for group, specs in groups:
-            blocks.append({"type": "markdown", "text": f"### {group or 'General'}"})
+            blocks: list[dict[str, Any]] = []
+            note = next((spec.group_note for spec in specs if spec.group_note), "")
+            if note:
+                blocks.append({"type": "markdown", "text": note})
             blocks.extend(self._form_blocks(specs, group))
-        return blocks
-
-    def _render_group(self, group: str) -> list[dict[str, Any]]:
-        for name, specs in self._grouped_specs():
-            if name == group:
-                return [
-                    {
-                        "type": "keyvalue",
-                        "items": [
-                            ["分组", group or "General"],
-                            ["设置项", f"{len(specs)} 项"],
-                        ],
-                    },
-                    {
-                        "type": "buttons",
-                        "buttons": [
-                            {
-                                "label": "打开设置页编辑",
-                                "action": "ui.open_page",
-                                "value": {"page_id": PAGE_ID},
-                                "class": "btn btn-sm btn-primary",
-                            }
-                        ],
-                    },
-                ]
-        return [
-            {"type": "markdown", "text": f"### {group or 'General'}\n\n该分组暂无设置项。"}
-        ]
+            tabs.append({"title": group or "General", "blocks": blocks})
+        return [{"type": "tabs", "tabs": tabs}]
 
     def _form_blocks(
         self, specs: list[SettingsSpec], group: str
@@ -320,8 +286,16 @@ class SettingsPlugin(Plugin):
             if not isinstance(key, str):
                 continue
             spec = service.get_spec(key)
-            if spec is not None and spec.is_secret_value(value):
-                continue  # empty/masked secret means "keep the current value"
+            if spec is not None and spec.secret:
+                if value == SECRET_MASK:
+                    continue  # untouched masked secret -> keep current value
+                if value is None or value == "":
+                    # Clearing a secret removes the stored value instead of
+                    # silently keeping it.
+                    if service.get(key) not in (None, ""):
+                        service.reset(key)
+                        saved[key] = ""
+                    continue
             try:
                 saved[key] = service.set(key, value)
             except (ValueError, TypeError) as exc:
@@ -338,10 +312,8 @@ class SettingsPlugin(Plugin):
 
 
 __all__ = [
-    "GROUP_ITEM_PREFIX",
     "PAGE_ID",
     "SAVE_ACTION",
     "TAB_ID",
     "SettingsPlugin",
-    "group_slug",
 ]

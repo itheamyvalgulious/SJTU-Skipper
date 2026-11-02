@@ -70,13 +70,6 @@ def _build_course_page(
     title = course_name or f"课程 {course_id}"
     blocks: list[dict[str, Any]] = [
         {"type": "markdown", "text": f"## {title}"},
-        {
-            "type": "keyvalue",
-            "items": [
-                ["课程 ID", course_id],
-                ["内容", "录播回放"],
-            ],
-        },
         {"type": "markdown", "text": "### 📼 录播回放"},
     ]
 
@@ -263,6 +256,7 @@ class InputPlugin(Plugin):
         self._setup_ui(ctx)
         ctx.events.on("input.status", self._on_input_event, plugin_id=self.id)
         ctx.events.on("input.error", self._on_input_event, plugin_id=self.id)
+        ctx.events.on("settings.changed", self._on_settings_changed, plugin_id=self.id)
 
         ctx.logger.info("Input plugin ready")
 
@@ -281,6 +275,30 @@ class InputPlugin(Plugin):
                 if status == "playing":
                     self._last_error = ""
         self._ctx.ui.refresh(f"input:{event.type}")
+
+    def _on_settings_changed(self, event: Any) -> None:
+        key = str(event.get("key", ""))
+        if key in {"input.canvas_token", "input.canvas_base_url"}:
+            self._catalog.reset()
+        if key.startswith("input."):
+            self._apply_source_settings()
+            self._ctx.ui.refresh("input.settings")
+
+    def _apply_source_settings(self) -> None:
+        settings = self._ctx.require("settings")
+        self._sources.configure(
+            sample_rate=int(settings.get("input.audio_rate", 16000)),
+            video_fps=float(settings.get("input.video_fps", 4.0)),
+            video_width=int(settings.get("input.video_width", 0)),
+            playback_speed=float(settings.get("input.playback_speed", 1.0)),
+            reconnect=bool(settings.get("input.reconnect", True)),
+        )
+
+    def _start_source(self, spec: SourceSpec) -> None:
+        """Apply current playback settings, then start one source."""
+
+        self._apply_source_settings()
+        self._sources.start(spec)
 
     def _clear_pending(self) -> None:
         self._pending_message = ""
@@ -398,7 +416,7 @@ class InputPlugin(Plugin):
         ui.add_page(
             "input:courses",
             "课程录播",
-            render=self._render_courses_list,
+            render=self._render_courses_page,
             plugin_id=pid,
         )
         ui.add_page(
@@ -432,6 +450,72 @@ class InputPlugin(Plugin):
             return [
                 {
                     "type": "markdown",
+                    "text": "⚠️ **Canvas Token 未配置**\n\n请在设置 → **Canvas** 分组中填写 `input.canvas_token`。",
+                },
+                {
+                    "type": "buttons",
+                    "buttons": [
+                        {
+                            "label": "去设置",
+                            "action": "ui.open_page",
+                            "value": {"page_id": "settings:main"},
+                            "class": "btn btn-sm btn-primary",
+                        }
+                    ],
+                },
+            ]
+        try:
+            courses = catalog.list_courses()
+        except InputError as exc:
+            return [
+                {"type": "text", "text": f"⚠️ {exc}"},
+                {
+                    "type": "buttons",
+                    "buttons": [
+                        {
+                            "label": "🔄 重试",
+                            "action": "input.refresh_courses",
+                            "class": "btn btn-sm",
+                        }
+                    ],
+                },
+            ]
+        if not courses:
+            return [{"type": "text", "text": "没有找到课程。请确认 Canvas token。"}]
+        items = []
+        for c in courses:
+            name = str(c.get("name", "?"))
+            term = str(c.get("term", ""))
+            teacher = str(c.get("teacher", ""))
+            items.append(
+                {
+                    "title": name,
+                    "subtitle": " · ".join(part for part in (term, teacher) if part),
+                    "action": "input.open_course",
+                    "value": {"course": str(c.get("id", "")), "name": name},
+                    "label": "录播",
+                }
+            )
+        return [
+            {
+                "type": "buttons",
+                "buttons": [
+                    {
+                        "label": "🔄 刷新",
+                        "action": "input.refresh_courses",
+                        "class": "btn btn-sm",
+                    }
+                ],
+            },
+            {"type": "rows", "items": items},
+        ]
+
+    def _render_courses_page(self) -> list[dict[str, Any]]:
+        catalog = self._catalog
+        if not catalog.has_token():
+            return [
+                {
+                    "type": "markdown",
                     "text": (
                         "⚠️ **Canvas Token 未配置**\n\n"
                         "请在设置 → **Canvas** 分组中填写 `input.canvas_token`，"
@@ -451,22 +535,19 @@ class InputPlugin(Plugin):
                 },
             ]
 
-        blocks: list[dict[str, Any]] = []
-        blocks.append(
+        blocks: list[dict[str, Any]] = [
+            {"type": "markdown", "text": "### 📚 我的课程"},
             {
-                "type": "markdown",
-                "text": "### 📚 我的课程\n",
-            }
-        )
-        blocks.append(
-            {
-                "type": "html",
-                "html": (
-                    '<button class="btn btn-sm" '
-                    'data-action="input.refresh_courses">🔄 刷新</button>'
-                ),
-            }
-        )
+                "type": "buttons",
+                "buttons": [
+                    {
+                        "label": "🔄 刷新课程",
+                        "action": "input.refresh_courses",
+                        "class": "btn btn-sm",
+                    }
+                ],
+            },
+        ]
 
         try:
             courses = catalog.list_courses()
@@ -475,31 +556,40 @@ class InputPlugin(Plugin):
             return blocks
 
         if not courses:
-            blocks.append({"type": "text", "text": "没有找到课程。请确认 Canvas token 是否正确。"})
+            blocks.append(
+                {"type": "text", "text": "没有找到课程。请确认 Canvas token 是否正确。"}
+            )
             return blocks
 
-        cards: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for c in courses:
-            name = c.get("name", "?")
-            term = c.get("term", "")
-            teacher = c.get("teacher", "")
-            cid = c.get("id", "")
-            subtitle = " · ".join(part for part in (term, teacher) if part)
-            cards.append(
+            rows.append(
                 {
-                    "title": name,
-                    "subtitle": subtitle,
-                    "actions": [
-                        {
-                            "label": "📂 查看录播",
-                            "action": "input.open_course",
-                            "value": {"course": cid, "name": name},
-                            "class": "btn btn-sm",
-                        }
-                    ],
+                    "name": str(c.get("name", "?")),
+                    "term": str(c.get("term", "")),
+                    "teacher": str(c.get("teacher", "")),
+                    "course": str(c.get("id", "")),
                 }
             )
-        blocks.append({"type": "cards", "items": cards})
+        blocks.append(
+            {
+                "type": "table",
+                "columns": [
+                    {"key": "name", "label": "课程"},
+                    {"key": "term", "label": "学期"},
+                    {"key": "teacher", "label": "教师"},
+                ],
+                "rows": rows,
+                "row_actions": [
+                    {
+                        "label": "查看录播",
+                        "action": "input.open_course",
+                        "keys": ["course", "name"],
+                        "class": "btn btn-sm",
+                    }
+                ],
+            }
+        )
         return blocks
 
     def _render_live(self) -> list[dict[str, Any]]:
@@ -607,23 +697,18 @@ class InputPlugin(Plugin):
         ]
         if self._last_error:
             items.append(["错误", self._last_error])
-        return [
-            {
-                "type": "keyvalue",
-                "items": items,
-            },
-            {
-                "type": "buttons",
-                "buttons": [
-                    {
-                        "label": "打开播放控制",
-                        "action": "ui.open_page",
-                        "value": {"page_id": "input:session"},
-                        "class": "btn btn-sm btn-primary",
-                    }
-                ],
-            },
-        ]
+        if state in ("playing", "paused"):
+            buttons = [
+                {"label": "暂停", "action": "input.pause", "class": "btn btn-sm"},
+                {"label": "继续", "action": "input.resume", "class": "btn btn-sm btn-primary"},
+                {"label": "停止", "action": "input.stop", "class": "btn btn-sm btn-danger"},
+            ]
+        else:
+            buttons = []
+        blocks = [{"type": "keyvalue", "items": items}]
+        if buttons:
+            blocks.append({"type": "buttons", "buttons": buttons})
+        return blocks
 
     def _render_session(self) -> list[dict[str, Any]]:
         status = self._sources.status()
@@ -740,7 +825,7 @@ class InputPlugin(Plugin):
             )
             self._pending_message = ""
             try:
-                self._sources.start(spec)
+                self._start_source(spec)
             except Exception as exc:  # noqa: BLE001 - surface startup failures
                 self._pending_message = ""
                 self._ctx.events.emit(
@@ -805,7 +890,7 @@ class InputPlugin(Plugin):
             )
             self._pending_message = ""
             try:
-                self._sources.start(spec)
+                self._start_source(spec)
             except Exception as exc:  # noqa: BLE001 - surface startup failures
                 self._pending_message = ""
                 self._ctx.events.emit(
@@ -833,7 +918,7 @@ class InputPlugin(Plugin):
             title=title,
         )
         try:
-            self._sources.start(spec)
+            self._start_source(spec)
         except Exception as exc:  # noqa: BLE001 - surface startup failures
             self._ctx.events.emit(
                 "input.error",
@@ -869,10 +954,12 @@ _INPUT_SETTINGS: list[SettingsSpec] = [
         type="secret",
         default="",
         group="Canvas",
-        description="SJTU Canvas 访问令牌（Bearer Token）",
+        description="SJTU Canvas 访问令牌（Bearer Token）；留空表示未配置，修改后保存即可生效。",
         order=0,
         secret=True,
         placeholder="粘贴 Canvas 访问令牌…",
+        env=("CANVAS_TOKEN",),
+        group_note="Token 可来自根目录 `.env` 的 `CANVAS_TOKEN`；首次启动会把环境值写入设置（已配置时显示掩码），之后以设置页为准。",
     ),
     SettingsSpec(
         key="input.canvas_base_url",
@@ -882,6 +969,7 @@ _INPUT_SETTINGS: list[SettingsSpec] = [
         group="Canvas",
         description="Canvas 实例地址",
         order=1,
+        env=("CANVAS_BASE_URL",),
     ),
     SettingsSpec(
         key="input.video_fps",
@@ -889,7 +977,7 @@ _INPUT_SETTINGS: list[SettingsSpec] = [
         type="float",
         default=4.0,
         group="播放",
-        description="每秒提取的视频帧数（原管线为 4fps）",
+        description="每秒提取的视频帧数（原管线为 4fps）；下次播放生效。",
         order=10,
     ),
     SettingsSpec(
@@ -898,7 +986,7 @@ _INPUT_SETTINGS: list[SettingsSpec] = [
         type="int",
         default=0,
         group="播放",
-        description="视频输出宽度；0 表示保持原分辨率，不做缩放",
+        description="视频输出宽度；0 表示保持原分辨率，不做缩放；下次播放生效。",
         order=11,
     ),
     SettingsSpec(
@@ -907,7 +995,7 @@ _INPUT_SETTINGS: list[SettingsSpec] = [
         type="int",
         default=16000,
         group="播放",
-        description="音频采样率（Hz）",
+        description="音频采样率（Hz）；下次播放生效。",
         order=12,
     ),
     SettingsSpec(
@@ -916,7 +1004,7 @@ _INPUT_SETTINGS: list[SettingsSpec] = [
         type="float",
         default=1.0,
         group="播放",
-        description="播放速度倍率（1.0 = 正常）",
+        description="播放速度倍率（1.0 = 正常）；下次播放生效。",
         order=13,
     ),
     SettingsSpec(
@@ -935,16 +1023,7 @@ _INPUT_SETTINGS: list[SettingsSpec] = [
         type="bool",
         default=True,
         group="直播",
-        description="断线时自动重连",
+        description="断线时自动重连；下次播放生效。",
         order=21,
-    ),
-    SettingsSpec(
-        key="input.enabled",
-        label="启用输入插件",
-        type="bool",
-        default=True,
-        group="General",
-        description="是否在启动时加载输入插件",
-        order=0,
     ),
 ]

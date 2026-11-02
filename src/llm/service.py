@@ -16,9 +16,11 @@ from .provider import Provider, ProviderRegistry
 from .types import (
     ChatRequest,
     ChatResponse,
+    ImagePart,
     Message,
     ProviderConfig,
     StreamEvent,
+    TextPart,
     ToolDef,
 )
 
@@ -39,6 +41,25 @@ def _coerce_message(msg: MessageInput) -> Message:
     if isinstance(msg, dict):
         role = msg.get("role", "user")
         content = msg.get("content", "")
+        if isinstance(content, list):
+            parts: list[TextPart | ImagePart] = []
+            for part in content:
+                if isinstance(part, TextPart | ImagePart):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    kind = part.get("type")
+                    if kind == "text":
+                        parts.append(TextPart(text=str(part.get("text", ""))))
+                    elif kind == "image_url":
+                        image = part.get("image_url")
+                        url = image.get("url") if isinstance(image, dict) else image
+                        if url:
+                            parts.append(ImagePart(url=str(url)))
+                    else:
+                        parts.append(TextPart(text=str(part)))
+                else:
+                    parts.append(TextPart(text=str(part)))
+            content = parts
         name = msg.get("name")
         tool_calls_raw = msg.get("tool_calls", [])
         from .types import ToolCall as TC
@@ -256,7 +277,7 @@ class LLMService:
             timeout=base.timeout or _DEFAULT_CONFIG.timeout,
             max_retries=(
                 base.max_retries
-                if base.max_retries > 0
+                if base.max_retries is not None
                 else _DEFAULT_CONFIG.max_retries
             ),
             extra_headers=dict(base.extra_headers),

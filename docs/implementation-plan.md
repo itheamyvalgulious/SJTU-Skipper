@@ -20,8 +20,8 @@
 - Python 的 `len(stream)` 必须是 `int`，因此 `len` 返回整秒，亚秒精度用 `stream.duration`。
 - 输入插件默认只列 `active_only=True` 的 Canvas 课程（实测 13 门）；历史学期可通过底层 catalog 扩展。
 - STT 默认 `none`：只接入音频流、不输出文字；真实使用需选择 `openai` 或安装可选 `faster-whisper` 并配置模型/密钥。
-- VLM 默认关闭（`vlm.enabled=false`），在设置里打开后会动态启动 worker；需配置视觉模型（如 `deepseek-flash`）。
-- VLM 融合固定使用整帧原始分辨率（`crop=(0,0,1,1)`、`max_width=0`），不裁剪、不缩放、不切面板。
+- VLM 默认开启（`vlm.enabled=true`），启动即运行 worker；视觉模型默认 `deepseek-flash`，连接与 API Key 复用 LLM 分组。
+- VLM 融合固定使用整帧原始分辨率输出（`crop=(0,0,1,1)`、`max_width=0`），不裁剪、不缩放、不切面板；FFT 位移估计在缩略图上完成以控制延迟，默认每窗最多 12 帧。
 - 直播设备默认取第 0 个（老师机位），可在 `input.live_device` 切换；URL 自带签名，必要时可扩展 headers。
 - 旧 `legacy/blackboard_lecture_agent.py` 与旧 `legacy/sjtu-canvas-assistant` 均已移入 git-ignored 的 `legacy/`；输入模块使用 vendored 客户端。
 

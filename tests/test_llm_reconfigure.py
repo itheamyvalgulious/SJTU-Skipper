@@ -20,9 +20,10 @@ def test_provider_reconfigures_without_restart(tmp_path: Path) -> None:
         settings = runtime.services.require("settings")
 
         settings.set("llm.base_url", "http://127.0.0.1:9/v1")
-        settings.set("llm.model", "test-model")
+        settings.set("llm.temperature", 0.25)
         service._provider_for(service.config_for("agent"))  # noqa: SLF001
         assert str(provider._client.base_url).rstrip("/").endswith(":9/v1")  # noqa: SLF001
-        assert provider.config.model == "test-model"
+        assert provider.config.model == ""
+        assert provider.config.temperature == 0.25
     finally:
         runtime.stop()
