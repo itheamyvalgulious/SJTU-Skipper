@@ -388,6 +388,7 @@ class RetryPolicy:
   - 模型不放在 LLM 连接分组：Agent 使用 `agent.model`，VLM 使用 `vlm.model`，Summarize 使用 `summarize.model`。
   - `llm.extra_headers` / `llm.extra_body`（JSON 字符串）。
 - 环境变量 `LLM_BASE_URL` / `LLM_API_KEY` / `OPENAI_*` / `DEEPSEEK_API_KEY` 会在设置注册时写入 `settings.json`，UI 显示实际生效值（密钥掩码），运行时只读设置。
+- OpenCode Go：`llm.base_url=https://opencode.ai/zen/go/v1` 时，`integrations/opencode_go.py` 从本机 OpenCode credential 数据库读取 OAuth token，自动刷新并写回，并附加 `x-opencode-org-id` / `x-opencode-session` 请求头。
 - 每次请求读取一次配置，设置变更后无需重启。
 
 ## 6. UI 层
@@ -682,6 +683,7 @@ src/                       # 新架构直接位于 src 下，不再有 lecture_a
 │   ├── agent/
 │   ├── summarize/
 ├── integrations/
+│   ├── opencode_go.py     # OpenCode Go OAuth 凭据读取/刷新
 │   ├── sjtu_canvas.py     # 客户端池 + 目录封装
 │   └── sjtu_canvas_assistant/  # vendored SJTU Canvas/视频客户端
 ├── ui/

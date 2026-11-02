@@ -387,7 +387,7 @@ class OpenAICompatibleProvider:
                         yield StreamEvent(type="text", text=text)
 
                     # tool calls (incremental)
-                    for tc_delta in delta.get("tool_calls", []):
+                    for tc_delta in (delta.get("tool_calls") or []):
                         idx = tc_delta.get("index", 0)
                         acc = tool_call_acc.setdefault(idx, {
                             "id": "",
@@ -506,7 +506,7 @@ def _parse_non_streaming_response(body: dict[str, Any]) -> ChatResponse:
     finish_reason = choice.get("finish_reason")
     content = message.get("content") or ""
     tool_calls: list[ToolCall] = []
-    for tc_raw in message.get("tool_calls", []):
+    for tc_raw in (message.get("tool_calls") or []):
         func = tc_raw.get("function", {})
         args_str = func.get("arguments", "{}")
         try:

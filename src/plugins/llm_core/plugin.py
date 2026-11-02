@@ -12,6 +12,11 @@ import os
 from typing import Any
 
 from core.plugin import Plugin, PluginContext
+from integrations.opencode_go import (
+    OpenCodeGoError,
+    is_opencode_go_url,
+    resolve_go_credentials,
+)
 from llm.errors import LLMError
 from llm.openai_compat import OpenAICompatibleProvider
 from llm.provider import ProviderRegistry
@@ -58,7 +63,7 @@ class LLMPlugin(Plugin):
                 group="LLM",
                 description="OpenAI 兼容 Base URL；缺少 /v1 时会自动补全。",
                 env=_ENV_BASE_URL_KEYS,
-                group_note="这里只配置连接、鉴权与重试；具体模型在 Agent / VLM / Summarize / STT 分组中选择。环境变量只在首次注册时写入设置，之后以设置页为准。",
+                group_note="这里只配置连接、鉴权与重试；具体模型在 Agent / VLM / Summarize 分组中选择。环境变量只在首次注册时写入设置，之后以设置页为准。OpenCode Go 模式会自动读取并刷新本机 OpenCode 凭据。",
             ),
             SettingsSpec(
                 key="llm.api_key",
@@ -150,6 +155,14 @@ class LLMPlugin(Plugin):
                 logger.exception("failed to read settings for profile %s", profile)
                 return ProviderConfig()
 
+            # OpenCode Go is OAuth-based: read and refresh its local credential
+            # instead of trusting a possibly stale API key in settings.
+            if is_opencode_go_url(base_url):
+                go = resolve_go_credentials()
+                base_url = go.base_url
+                api_key = go.access_token
+                extra_headers = {**dict(extra_headers), **go.headers}
+
             return ProviderConfig(
                 base_url=base_url or _DEFAULT_BASE_URL,
                 api_key=api_key,
@@ -175,7 +188,13 @@ class LLMPlugin(Plugin):
         )
 
         # --- register the OpenAI provider ---
-        config = _config_provider("agent")
+        try:
+            config = _config_provider("agent")
+        except OpenCodeGoError as exc:
+            # Keep the runtime/UI alive; individual LLM calls will surface the
+            # credential error until OpenCode is logged in.
+            logger.error("OpenCode Go credentials unavailable at startup: %s", exc)
+            config = ProviderConfig()
         openai_provider = OpenAICompatibleProvider(config=config)
         service.register_provider("openai", openai_provider)
         service.register_provider("openai-compatible", openai_provider)

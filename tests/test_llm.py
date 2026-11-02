@@ -928,6 +928,28 @@ def test_llm_plugin_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert key == "env-key"
 
 
+
+
+def test_parse_response_with_null_tool_calls() -> None:
+    """OpenCode Go may return ``tool_calls: null``; parsing must not crash."""
+    from llm.openai_compat import _parse_non_streaming_response
+
+    response = _parse_non_streaming_response(
+        {
+            "model": "deepseek-v4.1-flash",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "ok", "tool_calls": None},
+                }
+            ],
+            "usage": {},
+        }
+    )
+    assert response.content == "ok"
+    assert response.tool_calls == []
+
+
 # ---------------------------------------------------------------------------
 # error hierarchy
 # ---------------------------------------------------------------------------
