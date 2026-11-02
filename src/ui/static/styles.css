@@ -209,6 +209,9 @@ code {
 .textarea { min-height: 84px; resize: vertical; font-family: "JetBrains Mono", ui-monospace, monospace; }
 .input:focus, .textarea:focus, .select:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,.12); }
 .form-actions { display: flex; gap: 8px; align-items: center; }
+.form-inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.form-status { font-size: 11px; color: var(--muted); }
+.form-status.ok { color: var(--ok); }
 .checkbox { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
 
 .tabs { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }

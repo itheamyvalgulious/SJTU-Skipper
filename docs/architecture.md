@@ -485,7 +485,7 @@ SettingsSpec(
 
 - 类型：`string`, `text`, `int`, `float`, `bool`, `select`, `secret`, `json`。
 - 持久化到 `data_dir/settings.json`（原子写，权限 0600）。
-- `get(key)` 返回真实值；`public_all()` 对 secret 返回 `"******"` 并带 `is_set`。
+- `get(key)` 返回真实值；前端表单不会收到 secret 真实值，只显示「已配置（N 字符）」；清除走 `settings.clear_secret`。`public_all()` 对 secret 返回 `"******"` 并带 `is_set`。
 - 变更时发 `settings.changed`。
 - UI：右侧「设置」tab 只有一个入口；page 内按 group 分 tab 渲染表单，action `settings.save`。只有满足 `visible_when` 的字段才会出现。
 

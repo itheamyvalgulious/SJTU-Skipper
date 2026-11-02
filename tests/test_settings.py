@@ -314,7 +314,8 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         assert field["secret"] is True
         assert field["label"] == "API Key"
         assert field["type"] == "secret"
-        assert field["value"] == SECRET_MASK
+        assert field["value"] == ""
+        assert field["secret_length"] == len("secret-value")
         assert field["is_set"] is True
         assert field["placeholder"] == "key..."
         assert fields["llm.model"]["value"] == "deepseek-chat"
@@ -347,8 +348,15 @@ def test_action_save_converts_and_keeps_secret(tmp_path: Path) -> None:
         assert service.get("llm.api_key") == "secret-value"
         assert service.get("input.playback_speed") == 1.5
 
-        cleared = runtime.ui.dispatch_action(
+        # An empty secret means "keep existing", not "clear".
+        kept = runtime.ui.dispatch_action(
             "settings.save", {"values": {"llm.api_key": ""}}
+        )
+        assert kept.ok is True
+        assert service.get("llm.api_key") == "secret-value"
+
+        cleared = runtime.ui.dispatch_action(
+            "settings.clear_secret", {"values": {"key": "llm.api_key"}}
         )
         assert cleared.ok is True
         assert service.get("llm.api_key") == ""

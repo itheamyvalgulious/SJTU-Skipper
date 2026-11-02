@@ -16,6 +16,7 @@ logger = logging.getLogger("lecture_agent.plugins.settings")
 TAB_ID = "settings"
 PAGE_ID = "settings:main"
 SAVE_ACTION = "settings.save"
+CLEAR_SECRET_ACTION = "settings.clear_secret"
 
 _INPUT_KIND = {
     "string": "text",
@@ -46,6 +47,7 @@ class SettingsPlugin(Plugin):
         self._tab_added = False
         self._page_added = False
         self._action_added = False
+        self._clear_action_added = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -81,6 +83,10 @@ class SettingsPlugin(Plugin):
         self._page_added = True
         ui.register_action(SAVE_ACTION, self._handle_save, plugin_id=self.id)
         self._action_added = True
+        ui.register_action(
+            CLEAR_SECRET_ACTION, self._handle_clear_secret, plugin_id=self.id
+        )
+        self._clear_action_added = True
 
         self._ensure_sidebar_item()
         ctx.logger.debug("settings plugin ready: %s", self.store.path)
@@ -97,6 +103,12 @@ class SettingsPlugin(Plugin):
                 except Exception:  # noqa: BLE001 - UI may already be gone
                     pass
                 self._action_added = False
+            if self._clear_action_added:
+                try:
+                    ctx.ui.unregister_action(CLEAR_SECRET_ACTION)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._clear_action_added = False
             if self._page_added:
                 try:
                     ctx.ui.remove_page(PAGE_ID)
@@ -220,6 +232,7 @@ class SettingsPlugin(Plugin):
         service = self.service
         raw = service.get(spec.key) if service is not None else spec.default
         value = self._form_value(spec, raw)
+        configured = raw not in (None, "")
         options = [option for option, _label in spec.option_pairs()]
         return {
             "name": spec.key,
@@ -227,7 +240,12 @@ class SettingsPlugin(Plugin):
             "label": spec.label,
             "type": spec.type,
             "input": _INPUT_KIND.get(spec.type, "text"),
-            "value": value,
+            # Secrets are write-only: never send the real value or a fake
+            # six-character mask to the browser.
+            "value": "" if spec.secret else value,
+            "secret_length": (
+                len(str(raw)) if spec.secret and configured else 0
+            ),
             "options": options,
             "option_items": [
                 {"value": option, "label": label}
@@ -236,7 +254,7 @@ class SettingsPlugin(Plugin):
             "placeholder": spec.placeholder,
             "description": spec.description,
             "secret": bool(spec.secret),
-            "is_set": raw not in (None, ""),
+            "is_set": configured,
             "order": spec.order,
         }
 
@@ -244,7 +262,7 @@ class SettingsPlugin(Plugin):
         """Serialize a value for the form (secrets masked, JSON as text)."""
 
         if spec.secret:
-            return SECRET_MASK if raw not in (None, "") else ""
+            return ""
         if spec.type == "json":
             if raw is None:
                 return ""
@@ -259,6 +277,27 @@ class SettingsPlugin(Plugin):
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
+    def _handle_clear_secret(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Explicitly remove one configured secret."""
+
+        service = self.service
+        if service is None:
+            return {"ok": False, "message": "设置服务尚未就绪", "refresh": True}
+        values = payload.get("values")
+        nested = values if isinstance(values, Mapping) else {}
+        key = str(payload.get("key") or nested.get("key") or "")
+        spec = service.get_spec(key)
+        if not key or spec is None or not spec.secret:
+            return {"ok": False, "message": "不是可清除的密钥设置", "refresh": True}
+        if service.get(key) in (None, ""):
+            return {"ok": True, "message": f"{spec.label} 未配置", "refresh": True}
+        service.reset(key)
+        return {
+            "ok": True,
+            "message": f"已清除 {spec.label}",
+            "refresh": True,
+        }
+
     def _handle_save(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         service = self.service
         if service is None:
@@ -287,14 +326,9 @@ class SettingsPlugin(Plugin):
                 continue
             spec = service.get_spec(key)
             if spec is not None and spec.secret:
-                if value == SECRET_MASK:
-                    continue  # untouched masked secret -> keep current value
-                if value is None or value == "":
-                    # Clearing a secret removes the stored value instead of
-                    # silently keeping it.
-                    if service.get(key) not in (None, ""):
-                        service.reset(key)
-                        saved[key] = ""
+                # Secrets are write-only and empty means "keep existing".
+                # Removal is an explicit settings.clear_secret action.
+                if value is None or value == "" or value == SECRET_MASK:
                     continue
             try:
                 saved[key] = service.set(key, value)
@@ -312,6 +346,7 @@ class SettingsPlugin(Plugin):
 
 
 __all__ = [
+    "CLEAR_SECRET_ACTION",
     "PAGE_ID",
     "SAVE_ACTION",
     "TAB_ID",

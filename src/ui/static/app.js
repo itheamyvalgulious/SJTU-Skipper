@@ -259,18 +259,36 @@
           class: "input", id, name: fieldName,
           type: type === "password" || field.secret ? "password" : (type === "number" || rawType === "int" || rawType === "float" ? "number" : "text"),
         });
-        if (field.value !== undefined && field.value !== null) {
+        if (!field.secret && field.value !== undefined && field.value !== null) {
           input.value = field.value;
         }
-        if (field.placeholder) input.placeholder = field.placeholder;
-        if (field.secret && field.is_set) {
-          input.placeholder = "已配置；留空保存会清除";
+        if (field.secret) {
+          input.placeholder = field.is_set
+            ? `已配置（${field.secret_length || "?"} 字符）；留空保持不变`
+            : "未配置；粘贴新值";
+        } else if (field.placeholder) {
+          input.placeholder = field.placeholder;
         }
         if (rawType === "int" || type === "number") input.step = "1";
         if (rawType === "float") input.step = "any";
       }
       input.dataset.fieldType = rawType;
       row.appendChild(input);
+      if (field.secret) {
+        const status = el("div", {
+          class: `form-status ${field.is_set ? "ok" : ""}`,
+          text: field.is_set
+            ? `已配置 · ${field.secret_length || "?"} 字符；真实值不会回传前端`
+            : "未配置",
+        });
+        const line = el("div", { class: "form-inline" }, [status]);
+        if (field.is_set) {
+          line.appendChild(
+            actionButton("清除", "settings.clear_secret", { key: fieldName }, "btn btn-sm btn-danger")
+          );
+        }
+        row.appendChild(line);
+      }
       if (field.description) row.appendChild(el("div", { class: "hint", text: field.description }));
       form.appendChild(row);
     }
