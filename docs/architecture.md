@@ -215,7 +215,6 @@ class EventBus:
 | `ui.changed` | UI 状态变化（节流） |
 | `llm.request` / `llm.response` / `llm.error` | LLM 层观测 |
 | `agent.run.started` / `agent.message` / `agent.tool_call` / `agent.tool_result` / `agent.run.finished` / `agent.error` | Agent 运行 |
-| `stt.segment` / `stt.error` | STT |
 | `vlm.segment` / `vlm.error` | VLM |
 | `summarize.triggered` / `summarize.updated` / `summarize.error` | 总结插件 |
 | `input.status` / `input.error` | 输入源 |
@@ -291,7 +290,7 @@ llm-agent
 summarize
 ```
 
-拓扑序由 `requires` 决定，不依赖注册顺序。`llm-agent` 依赖 `llm` + `settings`；`summarize` 依赖 `llm-agent`；`stt`/`vlm` 依赖 `llm`（复用 provider 配置）。
+拓扑序由 `requires` 决定，不依赖注册顺序。`llm-agent` 依赖 `llm` + `settings`；`summarize` 依赖 `llm-agent`；`vlm` 依赖 `llm` + `settings`；`stt` 当前独立，没有内置后端。
 
 ## 5. LLM 层
 
@@ -383,10 +382,10 @@ class RetryPolicy:
 
 ### 5.4 Profile 与配置
 
-- `LLMService.chat(profile="agent" | "vlm" | "stt" | ..., ...)`。
+- `LLMService.chat(profile="agent" | "vlm" | ..., ...)`。
 - Profile 从 settings 读取：
   - `llm.base_url`, `llm.api_key`, `llm.timeout`, `llm.max_retries`, `llm.temperature`, `llm.max_tokens`。
-  - 模型不放在 LLM 连接分组：Agent 使用 `agent.model`，VLM 使用 `vlm.model`，Summarize 使用 `summarize.model`，STT 使用 `stt.model`。
+  - 模型不放在 LLM 连接分组：Agent 使用 `agent.model`，VLM 使用 `vlm.model`，Summarize 使用 `summarize.model`。
   - `llm.extra_headers` / `llm.extra_body`（JSON 字符串）。
 - 环境变量 `LLM_BASE_URL` / `LLM_API_KEY` / `OPENAI_*` / `DEEPSEEK_API_KEY` 会在设置注册时写入 `settings.json`，UI 显示实际生效值（密钥掩码），运行时只读设置。
 - 每次请求读取一次配置，设置变更后无需重启。
@@ -530,15 +529,9 @@ SettingsSpec(
 ### 7.4 stt（语音识别插件）
 
 - 服务名：`stt`。
-- 设置项：provider (`none` / `openai` / `faster-whisper`)、model、language、chunk_seconds、overlap、min_seconds、enabled。provider=none 时只显示 enabled/provider，其余参数隐藏。
-- 工作线程：读 `audio`，按 `chunk_seconds` 切片，写临时 WAV，调用后端，追加 `transcript`。
-- 后端：
-  - `OpenAITranscriptionBackend`：OpenAI 兼容 `/audio/transcriptions`。
-  - `FasterWhisperBackend`：可选依赖，本地推理。
-  - `none`：只接入音频流，不输出任何文字。
-- 重叠去重：保留 0.3–0.5 s 重叠，结果做最长公共前后缀裁剪。
-- 事件：`stt.segment`、`stt.error`。
-- UI：左侧 tab「课堂」下的 toolbox「转写」；page 显示实时文字流和状态。
+- 当前**没有内置任何转写后端**，也不注册 `stt.*` 设置项，更没有 `transcribe_once` 之类未实现的 API。
+- 插件保留音频流接口、状态和 UI：音频正常播放，但不会产生文字。
+- UI：左侧 tab「课堂」下的 toolbox「转写」；page 显示「未接入 STT 后端」和音频状态。
 
 ### 7.5 vlm（板书识别插件）
 

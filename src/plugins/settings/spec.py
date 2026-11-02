@@ -124,7 +124,7 @@ class SettingsSpec:
     # value instead of silently reading a hidden fallback at use time.
     env: tuple[str, ...] = ()
     # Only show this field when another setting has one of the given values.
-    # Example: ("stt.provider", ("openai", "faster-whisper")).
+    # Example: ("input.mode", ("advanced",)).
     visible_when: tuple[str, tuple[Any, ...]] | None = None
     # Optional explanatory text shown above the group's form.
     group_note: str = ""

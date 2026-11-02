@@ -90,7 +90,6 @@ ctx.events.emit("my.event", value=1)
 - `ui.changed`
 - `llm.request` / `llm.response` / `llm.error`
 - `agent.run.started` / `agent.message` / `agent.tool_call` / `agent.tool_result` / `agent.run.finished` / `agent.error`
-- `stt.segment` / `stt.error`
 - `vlm.segment` / `vlm.error`
 - `summarize.triggered` / `summarize.updated` / `summarize.error`
 - `input.status` / `input.error`

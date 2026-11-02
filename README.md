@@ -93,7 +93,7 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 | settings | `settings` | 设置注册、持久化、设置页 |
 | llm | `llm` | Provider 注册、统一 LLM 调用 |
 | input | `input` | Canvas/SJTU 录播、直播、ffmpeg 源 |
-| stt | `stt` | 音频流 -> 文字流 |
+| stt | `stt` | 音频流接口占位；当前未内置转写后端 |
 | vlm | `vlm` | 视频流 -> 融合板书 -> 文字流 |
 | llm-agent | `llm-agent` | 多会话 REPL Agent，info/read/replace/append |
 | summarize | `summarize` | 按 N 字符/秒触发，写 knowledge/gossip/notice |
