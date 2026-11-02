@@ -483,7 +483,7 @@
         el("div", { class: "welcome-mark", text: "∮" }),
         el("h2", { text: "开始一节课" }),
         el("p", { text: "左侧「课程」里选择录播或直播；设置里填入 Canvas token 与模型 API key。" }),
-        el("p", { class: "muted", text: "也可以运行 lecture-agent demo 查看完整链路。" }),
+        el("p", { class: "muted", text: "也可以运行 sjtu-skipper demo 查看完整链路。" }),
       ]));
       return;
     }

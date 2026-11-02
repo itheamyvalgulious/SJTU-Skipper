@@ -1,4 +1,4 @@
-"""Deterministic in-process LLM used by ``lecture-agent demo``.
+"""Deterministic in-process LLM used by ``sjtu-skipper demo``.
 
 No network, no API key.  It understands the marker prefixes in the demo
 script and emits real tool calls, so the actual agent / summarize / file

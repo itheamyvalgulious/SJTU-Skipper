@@ -162,7 +162,7 @@ class FFmpegSource:
         is_http = self.spec.url.startswith(("http://", "https://"))
         headers = dict(self.spec.headers) if is_http else {}
         if is_http:
-            headers.setdefault("User-Agent", "lecture-agent/0.1")
+            headers.setdefault("User-Agent", "sjtu-skipper/0.1")
 
         audio_cmd = build_audio_cmd(
             self.spec.url,

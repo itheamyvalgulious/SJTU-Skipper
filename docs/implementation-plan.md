@@ -333,9 +333,9 @@
 
 ## 5. 真实冒烟清单
 
-1. `lecture-agent check`：拓扑顺序、插件加载、无异常。
-2. `lecture-agent demo`：无网络，UI 可打开，合成内容 -> 三文件。
-3. `lecture-agent serve` + 真实 settings：
+1. `sjtu-skipper check`：拓扑顺序、插件加载、无异常。
+2. `sjtu-skipper demo`：无网络，UI 可打开，合成内容 -> 三文件。
+3. `sjtu-skipper serve` + 真实 settings：
    - `input.courses` 能列出 13 门 Canvas 课程。
    - 打开「代数拓扑」页，能列出录播。
    - 选择一条录播，`FFmpegSource` 能持续追加音频/视频；STT/VLM 状态正常（无 API key 时显示错误但不崩）。
@@ -364,4 +364,4 @@
 - `tests/` 测试套件。
 - `docs/architecture.md`、`docs/implementation-plan.md`、`docs/plugin-api.md`、`README.md` 更新。
 - `pyproject.toml`、`.gitignore` 更新。
-- 可运行的 `lecture-agent serve` / `check` / `demo`。
+- 可运行的 `sjtu-skipper serve` / `check` / `demo`。

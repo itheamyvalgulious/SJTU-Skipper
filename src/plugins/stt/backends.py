@@ -249,7 +249,7 @@ def _import_faster_whisper() -> Any:
     except ImportError as exc:  # pragma: no cover - dependency is optional
         raise STTUnavailableError(
             "未安装 faster-whisper，无法本地转写；请执行 "
-            "`.venv/bin/pip install 'lecture-agent[stt]'` 或把 stt.provider 改为 mock/openai"
+            "`.venv/bin/pip install 'sjtu-skipper[stt]'` 或把 stt.provider 改为 mock/openai"
         ) from exc
     return faster_whisper
 

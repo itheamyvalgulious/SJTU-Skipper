@@ -730,8 +730,8 @@ docs/
 ## 15. 验收标准
 
 - `pytest` 全绿；核心模块单测覆盖流、事件、插件、设置、LLM 重试、Agent 工具、总结、UI、VLM 融合。
-- `lecture-agent check` 输出正确的拓扑加载顺序。
-- `lecture-agent demo` 在无外网、无 token 的情况下启动 UI，合成课堂内容，自动触发 summarize 并写出三个 Markdown 文件。
-- `lecture-agent serve` 能加载真实 settings；输入插件能列出 Canvas 课程与 SJTU 录播/直播（有 token 时）。
+- `sjtu-skipper check` 输出正确的拓扑加载顺序。
+- `sjtu-skipper demo` 在无外网、无 token 的情况下启动 UI，合成课堂内容，自动触发 summarize 并写出三个 Markdown 文件。
+- `sjtu-skipper serve` 能加载真实 settings；输入插件能列出 Canvas 课程与 SJTU 录播/直播（有 token 时）。
 - 输入、STT、VLM 三个模块除流接口外没有互相 import；行为插件没有 import 输入/STT/VLM 实现。
 - 所有 LLM 请求（Agent、VLM、Summary）都经过 `LLMService`，无插件直连 HTTP。

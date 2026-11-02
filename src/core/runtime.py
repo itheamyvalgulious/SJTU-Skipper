@@ -200,7 +200,7 @@ def build_runtime(
             "date": now.strftime("%Y-%m-%d"),
             "time": now.strftime("%H:%M:%S"),
             "timezone": now.tzname() or "",
-            "app": "lecture-agent",
+            "app": "sjtu-skipper",
         }
 
     meta.register("runtime", _runtime_meta, plugin_id="runtime")

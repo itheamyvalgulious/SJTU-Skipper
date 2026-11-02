@@ -1,6 +1,6 @@
-# picture_parser / 课堂总 Agent
+# SJTU-Skipper / 课堂总 Agent
 
-本仓库包含两条相关但独立的能力：
+SJTU-Skipper 仓库包含两条相关但独立的能力：
 
 1. **旧的板书批处理流水线**：`legacy/blackboard_lecture_agent.py`，从课堂录像采样、配准、融合黑板帧，经 VLM 转录后合成 LaTeX 板书笔记。
 2. **新的课堂总 Agent 架构**：`src/`，把音频/视频输入、STT、VLM、LLM、行为插件和 Web UI 拆成可独立演进的层；行为层只通过 append-only 流、事件和服务接口与底层交互。
@@ -34,8 +34,9 @@ python3.12 -m venv .venv
 ### 2. 离线演示（无需 token / 网络）
 
 ```bash
-.venv/bin/lecture-agent demo
+.venv/bin/sjtu-skipper demo
 # 打开 http://127.0.0.1:8765
+# 兼容别名：.venv/bin/lecture-agent
 ```
 
 点击左侧「演示」→「开始演示」：系统会合成一段复分析课堂内容，自动触发 summarize Agent，把内容分类写入 `knowledge.md`、`gossip.md`、`notice.md`。
@@ -43,8 +44,8 @@ python3.12 -m venv .venv
 ### 3. 真实运行
 
 ```bash
-.venv/bin/lecture-agent check   # 检查插件拓扑加载
-.venv/bin/lecture-agent serve   # 启动 Web UI
+.venv/bin/sjtu-skipper check   # 检查插件拓扑加载
+.venv/bin/sjtu-skipper serve   # 启动 Web UI
 ```
 
 打开页面后：
@@ -69,9 +70,11 @@ LLM_MODEL=...
 ### 4. 命令行
 
 ```bash
-lecture-agent serve [--host 0.0.0.0] [--port 8765] [--data-dir PATH]
-lecture-agent demo
-lecture-agent check
+sjtu-skipper serve [--host 0.0.0.0] [--port 8765] [--data-dir PATH]
+sjtu-skipper demo
+sjtu-skipper check
+
+# 兼容旧命令：lecture-agent <同上>
 ```
 
 ## 新架构一览

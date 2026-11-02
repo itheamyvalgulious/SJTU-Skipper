@@ -90,7 +90,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="lecture-agent", description="课堂总 Agent")
+    parser = argparse.ArgumentParser(prog="sjtu-skipper", description="课堂总 Agent")
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="start the web UI with all plugins")
