@@ -564,7 +564,7 @@ class SummarizePlugin(Plugin):
 
 
 def _split_markdown(text: str, max_chars: int = 4000) -> list[str]:
-    """Split a note into paragraph-aligned chunks for progressive MathJax."""
+    """Split a note into paragraph-aligned chunks for KaTeX rendering."""
 
     paragraphs = text.split("\n\n")
     chunks: list[str] = []

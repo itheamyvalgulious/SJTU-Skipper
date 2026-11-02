@@ -432,7 +432,7 @@ class UIManager:
 ```
 
 - `render` 回调返回 block 列表（或 `PageContent`）。
-- Markdown 在服务端用 `markdown-it-py` 渲染；`$...$` / `$$...$$` 保留给前端 MathJax。
+- Markdown 在服务端用 `markdown-it-py` 渲染；`$...$` / `$$...$$` 保留给前端 KaTeX。
 - 前端不执行插件代码；只处理 `action`。
 
 ### 6.3 Action 协议
@@ -548,7 +548,7 @@ SettingsSpec(
 - Prompt 继承原管线：严格 LaTeX、示意图占位符 `![描述]()`、空黑板回复 `【黑板暂无板书】`。
 - 去重：与上一条 visual 文本相似度高则跳过（`difflib.SequenceMatcher`，阈值默认 0.92）；输出后处理会折叠连续重复的公式块。
 - 保存融合图到 `data_dir/sessions/<session>/vlm/`，UI 可预览。
-- UI 按窗口/段落返回 markdown 块，MathJax 逐块渐进渲染，避免整页卡死。
+- UI 按窗口/段落返回 markdown 块，KaTeX 逐块渲染，避免整页卡死。
 - 事件：`vlm.segment`、`vlm.error`。
 
 ### 7.6 llm-agent

@@ -263,7 +263,7 @@ class VlmPlugin(Plugin):
         items = visual.items_since(max(0, len(visual) - 20))
         visual_items = [i for i in items if i.source == "vlm"]
         if visual_items:
-            # One markdown block per window: MathJax can render them
+            # One markdown block per window: KaTeX can render them
             # progressively instead of blocking on one huge document.
             for item in visual_items:
                 ts = ""

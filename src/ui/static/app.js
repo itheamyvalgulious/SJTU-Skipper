@@ -96,61 +96,29 @@
     pill.className = `pill ${ok ? "pill-ok" : "pill-err"}`;
   }
 
-  let typesetRun = 0;
-  let typesetRetry = null;
-  let typesetPending = null;
-  let typesetAttempts = 0;
-
   function typeset(node = $("#page-content")) {
-    if (!node) return;
-    if (!node.textContent.includes("$") && !node.textContent.includes("\\(")) {
+    if (!node || !window.renderMathInElement) return;
+    if (
+      !node.textContent.includes("$") &&
+      !node.textContent.includes("\\(") &&
+      !node.textContent.includes("\\[")
+    ) {
       return;
     }
-    typesetPending = node;
-
-    if (!window.MathJax || !window.MathJax.typesetPromise) {
-      if (typesetRetry) return;
-      typesetAttempts = 0;
-      typesetRetry = setInterval(() => {
-        typesetAttempts += 1;
-        if (!window.MathJax || !window.MathJax.typesetPromise) {
-          if (typesetAttempts > 100) {
-            clearInterval(typesetRetry);
-            typesetRetry = null;
-          }
-          return;
-        }
-        clearInterval(typesetRetry);
-        typesetRetry = null;
-        const pending = typesetPending;
-        typesetPending = null;
-        if (pending && pending.isConnected) typeset(pending);
-      }, 100);
-      return;
+    try {
+      window.renderMathInElement(node, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\[", right: "\\]", display: true },
+          { left: "$", right: "$", display: false },
+          { left: "\\(", right: "\\)", display: false },
+        ],
+        throwOnError: false,
+        strict: false,
+      });
+    } catch (_) {
+      /* one malformed formula must not stop the page */
     }
-
-    const run = ++typesetRun;
-    const blocks = Array.from(node.children || []).filter(
-      (el) =>
-        el.classList?.contains("block") &&
-        (el.textContent.includes("$") || el.textContent.includes("\\("))
-    );
-    const targets = blocks.length ? blocks : [node];
-    // Typeset one block at a time and yield between blocks.  A single
-    // typesetPromise over a 50KB board/notes page blocks the main thread for
-    // several seconds and makes page switching feel frozen.
-    (async () => {
-      for (const target of targets) {
-        if (run !== typesetRun) return;
-        if (!target.isConnected) return;
-        try {
-          await window.MathJax.typesetPromise([target]);
-        } catch (_) {
-          /* keep going; one bad formula must not stop the rest */
-        }
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-    })();
   }
 
   // ------------------------------------------------------------------
@@ -583,7 +551,7 @@
     const key = active ? `${active}\u0000${JSON.stringify(blocks || [])}` : "__welcome__";
     const samePage = container.dataset.pageId === active;
     // Page content is polled every few seconds; never re-render or re-run
-    // MathJax when the payload is identical.  This is what made the board and
+    // KaTeX when the payload is identical.  This is what made the board and
     // notes pages feel like they were reloading constantly.
     if (samePage && state.pageKey === key) return false;
     const scrollTop = samePage ? container.scrollTop : 0;

@@ -265,7 +265,7 @@
 
 - FastAPI app factory 接收 Runtime；lifespan 启停。
 - 路由：`/`、`/api/ui/state`、`/api/ui/action`、`/api/artifacts/{path}`、`/ws`。
-- 静态前端：左右多 tab + toolbox + 中间 pages；block 渲染；action 提交；WebSocket 刷新；MathJax。
+- 静态前端：左右多 tab + toolbox + 中间 pages；block 渲染；action 提交；WebSocket 刷新；KaTeX。
 - CLI：`serve`、`check`。
 - 测试：TestClient 取 state、action、artifact 越界拒绝、WebSocket 可选。
 
