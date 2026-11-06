@@ -91,7 +91,9 @@ ctx.events.emit("my.event", value=1)
 - `llm.request` / `llm.response` / `llm.error`
 - `agent.run.started` / `agent.message` / `agent.tool_call` / `agent.tool_result` / `agent.run.finished` / `agent.error`
 - `vlm.segment` / `vlm.error`
-- `summarize.triggered` / `summarize.updated` / `summarize.error`
+- `stt.segment` / `stt.error`
+- `summarize.started` / `summarize.finished` / `summarize.error`
+- `instant-summarize.triggered` / `instant-summarize.updated` / `instant-summarize.error`
 - `input.status` / `input.error`
 
 ## 4. 服务互调
@@ -108,7 +110,8 @@ ctx.services.call("summarize", "trigger_now", reason="manual")
 
 约定：
 
-- 服务名点号命名：`settings`, `llm`, `agent`, `input`, `stt`, `vlm`, `summarize`。
+- 服务名点号命名：`settings`, `llm`, `agent`, `input`, `stt`, `vlm`, `summarize`, `instant-summarize`。
+- `stt` 服务：`status()` 返回 state/error/backend/model/location/session/audio/cursor/segments/chars；`transcribe(start=None, end=None)` 立即转写当前音频流的一段（`start` 缺省为工作线程游标，`end` 缺省为游标 + 分块时长；不推进工作线程游标，仅供诊断/手动调用）。
 - 插件之间不 import 实现；通过服务方法调用。
 - `requires` 只保证 setup 顺序，调用时仍要处理服务缺失。
 
@@ -133,6 +136,7 @@ for event in ctx.llm.stream(profile="agent", messages=[...]):
 ```
 
 - 所有 LLM 请求必须走 `ctx.llm`；不要自己 `httpx.post`。
+- `stt` 例外地直连 Google Speech-to-Text v2 REST（独立云 API，非 LLM）；v2 不支持 API Key，使用 OAuth（service account / ADC）。
 - 重试/超时/流式解析由 LLM 层负责。
 - 配置由 settings 插件持久化，profile 在每次请求时解析。
 
@@ -140,9 +144,11 @@ for event in ctx.llm.stream(profile="agent", messages=[...]):
 
 ```python
 tab = ctx.ui.add_tab("left", "courses", "课程", icon="▤", order=10)
-item = ctx.ui.add_toolbox_item("courses", "courses.list", "我的课程", render=render_list)
+item = ctx.ui.add_toolbox_item("courses", "courses.list", "我的课程", render=render_list,
+                               page_id="input:course:123")
 page = ctx.ui.add_page("input:course:123", "课程详情", render=render_page, closable=True)
 page.open()
+ctx.ui.register_command("input.manual", "手动播放", category="调试", page_id="input:manual")
 ctx.ui.refresh("reason")
 ```
 
@@ -162,8 +168,22 @@ Block：
 ], "action": "input.play_url", "submit_label": "开始"}
 {"type": "log", "lines": [{"time": "12:00", "text": "..."}]}
 {"type": "image", "src": "/api/artifacts/<session>/vlm/000030-000060.jpg"}
-{"type": "tabs", "tabs": [{"title": "知识", "blocks": [...]}]}
+{"type": "tabs", "tabs": [{"title": "知识", "active": True, "blocks": [...]}]}
 {"type": "progress", "value": 0.42, "label": "处理进度"}
+# player：两路视频（m3u8 走 hls.js，flv 走 mpegts.js，其余原生播放）
+{"type": "player", "sources": [{"key": "main", "label": "课堂", "src": "https://.../main.m3u8"},
+                              {"key": "screen", "label": "屏幕", "src": "...", "muted": True}],
+ "live": False, "processing": False, "finished": False, "part": 1, "parts": 2,
+ "start_action": "input.start_processing", "pause_action": "input.pause_processing"}
+{"type": "tree", "nodes": [
+    {"label": "高等数学", "subtitle": "2026 秋 · 张三", "expanded": True, "live": True,
+     "toggle": {"action": "input.toggle_course", "value": {"course": "1"}},
+     "children": [
+         {"label": "11-05 08:00–09:35", "badge": "直播中", "badge_class": "live",
+          "active": True,
+          "action": {"action": "input.open_class", "value": {"kind": "live"}}},
+     ]},
+]}
 ```
 
 Action：
@@ -223,8 +243,9 @@ session = agent.create_session(
     name="my-agent",
     system_prompt="你是课堂助手。",
     files={"notes.md": "/path/notes.md"},
-    tools=["info", "read", "replace", "append"],
+    tools=["info", "read", "replace", "append", "write"],  # write 为可选：整文件覆盖
     max_steps=8,
+    max_tool_output=24000,  # 单次 read 输出上限，整篇重写时需要更大
     extra_instructions=["只修改 notes.md"],
 )
 

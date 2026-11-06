@@ -34,15 +34,27 @@ python3.12 -m venv .venv
 ### 2. 真实运行
 
 ```bash
-.venv/bin/sjtu-skipper check   # 检查插件拓扑加载
-.venv/bin/sjtu-skipper serve   # 启动 Web UI
+./start.sh check   # 检查插件拓扑加载（直接运行最新源码，不需要重新安装）
+./start.sh         # 启动 Web UI（等价于 serve）
+./start.sh --port 9000
+```
+
+`start.sh` 只是设置 `PYTHONPATH=src` 并调用 `.venv/bin/python -m src`，所以改完源码直接重启即可，不需要 `pip install -e` 或任何构建步骤。
+
+服务必须**在前台跑**才收得到 Ctrl+C：直接在终端里执行上面的命令，不要加 `&`、`nohup`、`setsid`，也不要丢进后台 shell——退到后台的进程已经脱离终端，按 Ctrl+C 不会有任何信号发过去。前台运行时 Ctrl+C 会在 5 秒内退出（`SHUTDOWN_TIMEOUT`，见 `src/config.py`）；真卡住了再按一次是强制退出，或者用 `pkill -f "sjtu-skipper serve"`。
+
+也可以继续使用安装后的命令行：
+
+```bash
+.venv/bin/sjtu-skipper check
+.venv/bin/sjtu-skipper serve
 ```
 
 打开页面后：
 
-1. 右侧「设置」填入 Canvas Token、LLM API Key / Base URL；模型在 Agent / VLM 分组中设置。
+1. 右侧「设置」填入 Canvas Token、LLM API Key / Base URL；模型在 Agent / VLM 分组中设置。语音转写在「STT」分组粘贴 Google 服务账号 JSON（或填写凭据文件路径），然后选择 v2 模型与区域。
 2. LLM 连接方式二选一：OpenAI 兼容接口（Base URL + API Key），或在设置里点「关联 OpenCode 套餐」完成设备授权。OpenCode 凭据独立保存在本应用，不依赖本机 OpenCode。
-3. 左侧「课程」刷新课程列表。
+3. 左侧课程树中展开课程（可点「刷新」重新拉取）。
 4. 选择录播或直播，开始一节课。
 5. 左侧「课堂」查看转写、板书、笔记。
 
@@ -54,6 +66,8 @@ DEEPSEEK_API_KEY=...
 LLM_BASE_URL=http://127.0.0.1:3000/v1
 LLM_API_KEY=...
 LLM_MODEL=...
+# 语音转写（Google Cloud Speech-to-Text v2，OAuth；也可在设置页粘贴服务账号 JSON）
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
 设置会持久化到 `data/agent/settings.json`（权限 0600）。
@@ -75,14 +89,14 @@ sjtu-skipper check
         ├──────────────► STT 插件 ──► TextStream(transcript)
         └──────────────► VLM 插件 ──► TextStream(visual)
                                       │
-行为层（llm-agent / summarize / 自定义插件）
+行为层（llm-agent / summarize / instant-summarize / 自定义插件）
   事件总线 · 时钟 · 服务注册 · UI · LLM 统一接口
                                       │
 Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 ```
 
 - **流**：音频是 PCM s16le；视频是 JPEG 帧；文字是不断增长的 `TextItem` 列表。`len(stream)` 是整秒/片段数，精确时长用 `stream.duration`。
-- **事件**：`clock.tick`、`session.*`、`stream.appended`、`settings.changed`、`agent.*`、`stt.*`、`vlm.*`、`summarize.*`、`input.*`。
+- **事件**：`clock.tick`、`session.*`、`stream.appended`、`settings.changed`、`agent.*`、`stt.*`、`vlm.*`、`summarize.*`、`instant-summarize.*`、`input.*`。
 - **插件**：`id` + `requires` 组成 DAG，拓扑序加载；插件之间只通过 `ctx.services` 调用。
 - **LLM 层**：统一 `ChatRequest/ChatResponse/StreamEvent`，OpenAI 兼容 provider，流式/非流式、工具调用、图片、重试/超时。
 - **UI**：声明式 block + action；插件不写前端代码。
@@ -94,10 +108,12 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 | settings | `settings` | 设置注册、持久化、设置页 |
 | llm | `llm` | Provider 注册、统一 LLM 调用 |
 | input | `input` | Canvas/SJTU 录播、直播、ffmpeg 源 |
-| stt | `stt` | 音频流接口占位；当前未内置转写后端 |
+| stt | `stt` | Google Cloud Speech-to-Text **v2**（OAuth / chirp_3）音频流 -> 转写文字流 |
 | vlm | `vlm` | 视频流 -> 融合板书 -> 文字流 |
-| llm-agent | `llm-agent` | 多会话 REPL Agent，info/read/replace/append |
-| summarize | `summarize` | 按 N 字符/秒触发，写 knowledge/gossip/notice |
+| llm-agent | `llm-agent` | 多会话 REPL Agent，info/read/replace/append（+ 可选 write） |
+| summarize | `summarize` | 非即时：课后/手动一次性整理整堂课，写 note_*.md 结构完整讲义 |
+| reader | `reader` | 通用 Markdown 阅读页，summarize/instant 共用 |
+| instant-summarize | `instant-summarize` | 即时：按 N 字符/秒增量合并，写 instant_note_*.md |
 
 ## 旧板书流水线
 
@@ -119,7 +135,7 @@ src/                              # 新总 Agent（直接位于 src 下）
 ├── applog.py
 ├── core/                         # 流、事件、插件、服务、UI、runtime
 ├── llm/                          # 协议无关 LLM 层
-├── plugins/                      # settings/llm/input/stt/vlm/agent/summarize
+├── plugins/                      # settings/llm/input/stt/vlm/agent/summarize/instant_summarize
 ├── integrations/                 # vendored SJTU Canvas/视频客户端
 └── ui/                           # FastAPI + 静态前端
 legacy/                           # 旧脚本与旧子模块，git-ignored，仅本地保留

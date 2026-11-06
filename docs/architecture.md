@@ -47,7 +47,7 @@
 3. **流前缀不可变**。任何消费者只能追加、读取，不能修改已有片段。
 4. **服务按名字发现**。插件之间不互相 import 实现，只通过 `services` 注册/调用。
 5. **UI 是声明式的**。插件返回 block 列表和 action id，前端只负责渲染与回传，不执行插件代码。
-6. **所有 LLM 请求走 LLM 层**。STT/VLM/Agent/Summarize 不允许各自直连 HTTP。
+6. **所有 LLM 请求走 LLM 层**。VLM/Agent/Summarize 不允许各自直连 LLM HTTP；STT 的 Google Speech-to-Text v2 是独立云 API（非 LLM），由 STT 插件用 OAuth 凭据直接调用。
 
 ## 2. 流数据平面
 
@@ -216,7 +216,8 @@ class EventBus:
 | `llm.request` / `llm.response` / `llm.error` | LLM 层观测 |
 | `agent.run.started` / `agent.message` / `agent.tool_call` / `agent.tool_result` / `agent.run.finished` / `agent.error` | Agent 运行 |
 | `vlm.segment` / `vlm.error` | VLM |
-| `summarize.triggered` / `summarize.updated` / `summarize.error` | 总结插件 |
+| `summarize.started` / `summarize.finished` / `summarize.error` | 整堂课总结插件 |
+| `instant-summarize.triggered` / `instant-summarize.updated` / `instant-summarize.error` | 增量总结插件 |
 | `input.status` / `input.error` | 输入源 |
 
 插件可以 `define()` 自己的事件类型（仅用于文档/校验），然后 `emit`。
@@ -274,7 +275,7 @@ class ServiceRegistry:
     def names(self) -> list[str]: ...
 ```
 
-- 服务名用点号命名空间：`settings`, `agent`, `input.catalog`, `stt`, `vlm`, `summarize`。
+- 服务名用点号命名空间：`settings`, `agent`, `input.catalog`, `stt`, `vlm`, `summarize`, `instant-summarize`。
 - 插件声明 `requires` 保证加载顺序；运行时调用前仍应处理服务不存在的情况。
 - 服务对象的方法就是插件公开的 API；不要跨插件访问私有字段。
 
@@ -290,7 +291,7 @@ llm-agent
 summarize
 ```
 
-拓扑序由 `requires` 决定，不依赖注册顺序。`llm-agent` 依赖 `llm` + `settings`；`summarize` 依赖 `llm-agent`；`vlm` 依赖 `llm` + `settings`；`stt` 当前独立，没有内置后端。
+拓扑序由 `requires` 决定，不依赖注册顺序。`llm-agent` 依赖 `llm` + `settings`；`summarize` 与 `instant-summarize` 依赖 `llm-agent`；`vlm` 依赖 `llm` + `settings`；`stt` 依赖 `settings`（注册 `stt.*` 设置项），后端为 Google Cloud Speech-to-Text。
 
 ## 5. LLM 层
 
@@ -385,7 +386,7 @@ class RetryPolicy:
 - `LLMService.chat(profile="agent" | "vlm" | ..., ...)`。
 - Profile 从 settings 读取：
   - `llm.base_url`, `llm.api_key`, `llm.timeout`, `llm.max_retries`, `llm.temperature`, `llm.max_tokens`。
-  - 模型不放在 LLM 连接分组：Agent 使用 `agent.model`，VLM 使用 `vlm.model`，Summarize 使用 `summarize.model`。
+  - 模型不放在 LLM 连接分组：Agent 使用 `agent.model`，VLM 使用 `vlm.model`，Summarize 使用 `summarize.model`，Instant Summarize 使用 `instant-summarize.model`。
   - `llm.extra_headers` / `llm.extra_body`（JSON 字符串）。
 - 环境变量 `LLM_BASE_URL` / `LLM_API_KEY` / `OPENAI_*` / `DEEPSEEK_API_KEY` 会在设置注册时写入 `settings.json`，UI 显示实际生效值（密钥掩码），运行时只读设置。
 - `llm.mode` 提供两种独立配置：
@@ -490,7 +491,7 @@ SettingsSpec(
 - 持久化到 `data_dir/settings.json`（原子写，权限 0600）。
 - `get(key)` 返回真实值；前端表单不会收到 secret 真实值，只显示「已配置（N 字符）」；清除走 `settings.clear_secret`。`public_all()` 对 secret 返回 `"******"` 并带 `is_set`。
 - 变更时发 `settings.changed`。
-- UI：右侧「设置」tab 只有一个入口；page 内按 group 分 tab 渲染表单，action `settings.save`。只有满足 `visible_when` 的字段才会出现。
+- UI：没有侧边栏 tab，只有一个设置 page（`settings:main`），从菜单栏 / 命令面板（Ctrl+P）打开；page 内按 group 分 tab 渲染表单，action `settings.save`。只有满足 `visible_when` 的字段才会出现。
 
 ### 7.2 llm（底层 LLM 插件）
 
@@ -519,22 +520,32 @@ SettingsSpec(
   - 解析 JPEG SOI/EOI 边界，逐帧 `append_frame`。
 - 一个 `SourceManager` 保证同一时刻最多一个源；支持 pause/resume/stop/seek（seek 仅录播/本地文件）。
 - UI：
-  - 左侧 tab「课程」：toolbox「课程录播」「我的课程」。
-  - 左侧 tab「直播」：toolbox「今日直播」「手动播放 URL」。
-  - 右侧 tab「播放控制」：toolbox「当前播放」。
-  - 页面 `input:courses`：课程卡片与录播入口；`input:course:<id>`：只展示该课程的录播表。
-  - 页面 `input:live`：只展示今日正在/即将开始的直播表。
-  - 页面 `input:session`：播放状态、音频/视频时长、暂停/继续/停止。
-  - 页面 `input:manual`：手动 URL 表单。
-  - 录播与直播完全分离，不再把直播表嵌入课程录播页。
+  - 左侧只有一个可折叠的**课程树**（`tree` block）：课程 → 某次课（录播与直播同一条路径）。
+    - 相邻的连续 2–3 节录播自动合并成一节，节点上标注「2 节」；
+    - 正在直播的课程/节次带 `直播中` 徽章并默认展开，一键进入直播；
+    - 展开状态保存在插件内存，`input.toggle_course` 切换。
+  - 右侧 tab「本节课」：toolbox「处理控制」。
+  - 页面 `input:session`（标题「课堂」）：`player` block 并排播放两路视频——「课堂」（`viewNum=1`，黑板/讲台）与「屏幕」（`viewNum=2`，大屏共享）；没有第二路时显示占位。
+    - 前端按 URL 后缀选择播放器：`.m3u8` → hls.js（Safari 用原生 HLS），`.flv` → mpegts.js，其余交给原生 `<video>`。
+    - 屏幕流默认静音，避免两路音频叠加。
+  - 点击「课程 → 某次课」只**选中并加载**视频地址（`input.open_class`），不创建会话、不启动 ffmpeg、不自动播放。
+  - 「继续处理」按钮（`input.start_processing`）才开始 ffmpeg 摄取与会话；默认暂停。
+  - 「暂停处理」（`input.pause_processing`）：录播暂停摄取并暂停页面视频；直播停止摄取但页面继续播放直播画面，恢复时从直播边缘继续（`continue_session`）。
+  - 录播自然播完由 `input.ended` 驱动：合并节自动切到下一节（浏览器收到新地址自动续播），最后一节结束后 `end_session("playback finished")`，触发课后讲义。
+  - 页面 `input:manual`：手动 URL（调试，仅从命令面板打开）。
 - 行为层只看到 `hub.current.audio/video`，看不到 Canvas/SJTU/ffmpeg 对象。
 
 ### 7.4 stt（语音识别插件）
 
-- 服务名：`stt`。
-- 当前**没有内置任何转写后端**，也不注册 `stt.*` 设置项，更没有 `transcribe_once` 之类未实现的 API。
-- 插件保留音频流接口、状态和 UI：音频正常播放，但不会产生文字。
-- UI：左侧 tab「课堂」下的 toolbox「转写」；page 显示「未接入 STT 后端」和音频状态。
+- 服务名：`stt`；依赖 `settings`。
+- 后端：Google Cloud Speech-to-Text **v2** REST 同步接口 `POST https://{location}-speech.googleapis.com/v2/projects/{project}/locations/{location}/recognizers/_:recognize`（`location=global` 时用 `speech.googleapis.com`）。
+- 认证：**OAuth**（v2 明确拒绝 API Key）。支持粘贴 service-account JSON、authorized-user JSON（gcloud ADC 形状）或凭据文件；都不配置时回退 `GOOGLE_APPLICATION_CREDENTIALS` / ADC。`google-auth` 负责签名与刷新 token，HTTP 走 `httpx`。
+- 设置项（分组「STT」）：`stt.enabled`（默认 true）、`stt.credentials_json`（secret）、`stt.credentials_file`（可用 `GOOGLE_APPLICATION_CREDENTIALS` 种子）、`stt.project_id`（留空取凭据中的 project）、`stt.location`（默认 `us`；chirp_3 支持 `us`/`eu`/`asia-northeast1`/`asia-southeast1`）、`stt.model`（默认 `chirp_3`，另有 `chirp_2`/`long`/`short`/`telephony`/`telephony_short`）、`stt.language_code`（默认 `cmn-Hans-CN`）、`stt.chunk_seconds`（默认 20，限制 1–55 秒；v2 Recognize 硬上限 60 秒 / 10 MB）、`stt.enable_punctuation`、`stt.timeout`。
+- **不使用「模型自适应」**（Model adaptation）：不上传 phrase sets / custom classes 预制名词；只使用 `stt.model` 指定的模型。
+- 音频以 WAV 容器 + `autoDecodingConfig` 发送（chirp 模型首选），`results[*].resultEndOffset` 换算为片段起止时间，追加到 `transcript`（`source="stt"`，`meta` 含 model/confidence/languageCode）。
+- 会话结束或进程退出时 flush 剩余音频（≥1 秒）；失败保留游标并指数退避重试同一块（上限 10 秒），不跳过、不静默丢弃。
+- 事件：`stt.segment`、`stt.error`。
+- UI：仅调试 page（`stt:*`），不出现在侧边栏，只能从命令面板（调试 → 语音转写）打开；page 显示状态、模型、音频时长、已转写段数/字数与最近转写文本。
 
 ### 7.5 vlm（板书识别插件）
 
@@ -574,29 +585,51 @@ SettingsSpec(
   - `run(session_id, input, on_event=...)` 同步；`run_async` 后台线程。
 - REPL 循环：messages -> LLM -> tool calls -> tool results -> LLM -> ... -> final。
 - 事件：`agent.run.started`、`agent.message`、`agent.tool_call`、`agent.tool_result`、`agent.run.finished`、`agent.error`。
-- UI：右侧 tab「Agent」；page 显示会话列表、对话记录、输入框；action `agent.chat` 后台执行。
+- UI：没有侧边栏 tab，只有 Agent page（`agent:chat`），从菜单栏 / 命令面板打开；page 显示会话列表、对话记录、输入框；action `agent.chat` 后台执行。
 
-### 7.7 summarize
+### 7.7 summarize（非即时，整堂课）
 
 - 依赖：`settings`、`llm-agent`。
-- 设置项：`trigger_chars`（默认 600）、`trigger_audio_seconds`（默认 120）、`min_chars`（默认 80）、`max_steps`、`model`、`notes_dir`、系统提示词。
+- 设置项：`max_steps`（默认 16）、`max_tool_output`（默认 24000）、`chunk_chars`（默认 6000）、`model`、`notes_dir`、`system_prompt`、`retry_max`、`auto_on_stop`。
 - 每个会话创建三个文件：
-  - `knowledge.md`：课程知识性内容；
-  - `gossip.md`：与课程知识无关的内容（世界局势、生活趣事、对学生的期待、AI 对数学的冲击等）；
-  - `notice.md`：作业、考试、考核等通知。
+  - `note_knowledge.md`：课程知识；
+  - `note_gossip.md`：与课程知识无关的内容（世界局势、生活趣事、对学生的期待、AI 对数学的冲击等）；
+  - `note_notice.md`：作业、考试、考核等通知。
+- 触发：不在课堂中运行。`session.stopped`（`auto_on_stop=true`）或 UI action `summarize.full` 手动触发。
+- 执行：
+  - 取整堂课的**全部** transcript + visual（不设水位），按 `chunk_chars` 切成顺序批次；
+  - 每批创建子会话，工具为 `info/read/replace/append/write`，文件始终是同一套三个笔记；
+  - 提示词要求：清晰大纲（`##`/`###` 分章节，按知识逻辑排序）、允许用 `write` 整篇重写、禁止压缩细节、禁止时间戳；
+  - 每批结束后若文件未变化，用更严格的提示词重试一次；最后一批追加"全篇整理"指令。
+- 失败发 `summarize.error`；完成后发 `summarize.finished`。
+- UI：右侧「笔记」tab 的 toolbox「课堂讲义」；三个按钮（知识 / 闲话 / 通知）通过 reader 服务打开 `note_*.md`；「生成完整讲义」触发 `summarize.full`。
+
+### 7.8 instant-summarize（即时，增量）
+
+- 依赖：`settings`、`llm-agent`。
+- 设置项：`trigger_chars`（默认 600）、`trigger_audio_seconds`（默认 120）、`min_chars`（默认 80）、`max_steps`（默认 12）、`max_tool_output`（默认 24000）、`model`、`notes_dir`、`system_prompt`、`retry_max`。
+- 每个会话创建三个文件：`instant_note_knowledge.md`、`instant_note_gossip.md`、`instant_note_notice.md`（与 summarize 共用 `notes/` 目录，互不覆盖）。
 - 触发：
   - 监听 `stream.appended`（transcript / visual / audio）；
   - 文字增量达到 `trigger_chars`，或音频增量达到 `trigger_audio_seconds` 且已有足够文字；
   - 串行执行；运行中到达的增量在下一轮处理。
 - 执行：
-  - 取上次水位之后的文字（语音 + 板书），构造中文提示；
-  - 创建子会话，工具限定为 `info/read/replace/append`，文件为三个笔记；
-  - 要求 Markdown、`$...$` / `$$...$$`、每条带时间；
-  - 要求先 `read` 再 `append`/`replace`，避免重复。
-- 成功后推进水位；失败保留水位，指数退避重试；连续失败发 `summarize.error`。
-- UI：左侧 tab「课堂」下的 toolbox「笔记」；page 三个 tab 展示文件，支持「立即总结」。
+  - 取上次水位之后的文字（语音 + 板书，不注入时间戳），构造中文提示；
+  - 创建子会话，工具为 `info/read/replace/append/write`；
+  - 要求把新内容**合并进既有大纲**：已有章节就补充，新主题插到合适位置，需要重排就 `write` 整篇重写；
+  - 明确禁止压缩细节、禁止时间戳。
+- 成功后推进水位；失败保留水位，指数退避重试；连续失败发 `instant-summarize.error`。
+- UI：右侧「笔记」tab 的 toolbox「实时笔记」；按钮通过 reader 服务打开 `instant_note_*.md`，支持「立即总结」。
 
-## 8. 数据与持久化
+### 7.9 reader（文稿阅读）
+
+- 依赖：无（内置插件，始终加载）。
+- 服务：`reader.show(title, docs=[{key,label,path}], active=...)`。
+- 页面：`reader:main`，按文档分 tab 渲染 Markdown（`split_markdown` 分块 + KaTeX）。
+- 实时刷新：agent 每次 `write` / `append` / `replace` 成功后都会 `ui.refresh`，前端通过 WebSocket 立刻重取状态，正在阅读的笔记随写随更新。
+- summarize / instant-summarize 的「笔记」工具箱按钮调用各自 action → `reader.show(...)`，不再各自维护阅读页。
+
+
 
 ```text
 data/agent/
@@ -683,7 +716,8 @@ src/                       # 新架构直接位于 src 下，不再有 lecture_a
 │   ├── stt/
 │   ├── vlm/
 │   ├── agent/
-│   ├── summarize/
+│   ├── summarize/          # 非即时：整堂课一次性整理
+│   ├── instant_summarize/  # 即时：增量合并
 ├── integrations/
 │   ├── opencode_go.py     # OpenCode 套餐 OAuth device flow / token 刷新
 │   ├── sjtu_canvas.py     # 客户端池 + 目录封装
@@ -705,7 +739,7 @@ docs/
 3. **P2 行为基础**：settings / llm-core / llm-agent（含工具与会话）/ tests。
 4. **P3 总结**：summarize + scripted LLM 集成测试。
 5. **P4 输入**：SJTU catalog（VOD + live）/ ffmpeg source / UI pages / tests。
-6. **P5 STT/VLM**：后端、worker、picture_parser 融合、prompt、tests。
+6. **P5 STT/VLM**：STT 后端（Google Speech-to-Text v2，OAuth）、worker；VLM picture_parser 融合、prompt、tests。
 7. **P6 UI**：FastAPI + 静态前端 + WebSocket + 端到端演示。
 8. **P7 收尾**：README、架构文档、真实 Canvas 冒烟、代码审查。
 
@@ -724,4 +758,4 @@ docs/
 - `sjtu-skipper check` 输出正确的拓扑加载顺序。
 - `sjtu-skipper serve` 能加载真实 settings；输入插件能列出 Canvas 课程与 SJTU 录播/直播（有 token 时）。
 - 输入、STT、VLM 三个模块除流接口外没有互相 import；行为插件没有 import 输入/STT/VLM 实现。
-- 所有 LLM 请求（Agent、VLM、Summary）都经过 `LLMService`，无插件直连 HTTP。
+- 所有 LLM 请求（Agent、VLM、Summary）都经过 `LLMService`，无插件直连 LLM HTTP；STT 只直连 Google Speech-to-Text v2（非 LLM，OAuth）。

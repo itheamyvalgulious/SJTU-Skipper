@@ -1,3 +1,5 @@
+> 本文是历史设计/实施记录，界面细节可能已过时；现行 UI 布局见 `docs/architecture.md` §6。
+
 # 实施计划与并行任务分解
 
 > 依据 `docs/architecture.md`。先冻结接口，再并行开发；接口变更必须同步更新本文件和 `docs/architecture.md`。
@@ -10,7 +12,7 @@
 - P3 llm-agent：完成；多会话、REPL、info/read/replace/append、扩展点。
 - P4 summarize：完成；文字/音频触发、水位、重试、三文件分类。
 - P5 input：完成；Canvas 13 门活跃课程、SJTU 新版录播/直播、ffmpeg 双流、UI。
-- P6 STT：占位；当前没有内置转写后端，只保留音频流接口、状态与 UI。
+- P6 STT：完成；Google Cloud Speech-to-Text v2（OAuth，chirp_3）分块转写，音频流 -> 文字流。
 - P7 VLM：完成；picture_parser 融合算法适配、实时窗口、prompt、去重、UI。
 - P8 Web UI：完成；FastAPI + 左右多 tab + toolbox + pages + WebSocket + action。
 - 全量测试通过；真实 Canvas/SJTU 录播/直播、真实 DeepSeek 文本/视觉调用均已冒烟。
@@ -19,7 +21,7 @@
 
 - Python 的 `len(stream)` 必须是 `int`，因此 `len` 返回整秒，亚秒精度用 `stream.duration`。
 - 输入插件默认只列 `active_only=True` 的 Canvas 课程（实测 13 门）；历史学期可通过底层 catalog 扩展。
-- STT 当前没有内置后端、没有设置项、没有转写 API：音频流正常播放但不产生文字。
+- STT 默认开启（`stt.enabled=true`）但需要先在「设置 → STT」粘贴 Google 服务账号 JSON（或配置 ADC）；v2 不接受 API Key。模型固定为用户选择；不启用「模型自适应」（Model adaptation：上传 phrase sets / custom classes 预制名词）。
 - VLM 默认开启（`vlm.enabled=true`），启动即运行 worker；视觉模型默认 `deepseek-flash`，连接与 API Key 复用 LLM 分组。
 - VLM 融合固定使用整帧原始分辨率输出（`crop=(0,0,1,1)`、`max_width=0`），不裁剪、不缩放、不切面板；FFT 位移估计在缩略图上完成以控制延迟，默认每窗最多 12 帧。
 - 直播设备默认取第 0 个（老师机位），可在 `input.live_device` 切换；URL 自带签名，必要时可扩展 headers。
@@ -215,15 +217,20 @@
 
 - `src/plugins/stt/__init__.py`
 - `src/plugins/stt/plugin.py`
+- `src/plugins/stt/google_cloud.py`
+- `src/plugins/stt/credentials.py`
+- `src/plugins/stt/errors.py`
 - `tests/test_stt.py`
 
 要求：
 
-- 不依赖 `settings` / `llm`；不注册任何 `stt.*` 设置项。
-- 当前不实现任何转写后端，也不内置任何 provider 或 mock。
-- 保留音频流接口、状态和 UI：音频正常播放，但不产生文字。
-- 不产生 `stt.segment` / `stt.error`；UI 页 `stt:transcript` 显示未接入状态。
-- 测试：服务状态、无文字输出、不注册设置项。
+- 依赖 `settings`，注册分组「STT」的设置项。
+- 后端：Google Cloud Speech-to-Text **v2** REST `recognizers.recognize`，OAuth（service-account / authorized_user / ADC）；不使用 API Key。
+- 设置：`stt.enabled`、`stt.credentials_json`（secret）、`stt.credentials_file`、`stt.project_id`、`stt.location`、`stt.model`（默认 `chirp_3`）、`stt.language_code`、`stt.chunk_seconds`、`stt.enable_punctuation`、`stt.timeout`。
+- 读 `audio` 固定长度块，封装为 WAV（1–55 秒；v2 Recognize 上限 60 秒 / 10 MB）→ 请求 → 按 `resultEndOffset` 追加 `transcript`（`source="stt"`）。
+- 失败保留游标并指数退避重试；会话结束/退出 flush 剩余音频。
+- 事件 `stt.segment` / `stt.error`；UI 页 `stt:transcript` 显示状态与最近转写。
+- 测试：OAuth token/项目解析、v2 请求体、分段偏移、错误映射、分块转写、设置项、无凭据状态、UI；全部用 `httpx.MockTransport`，不访问网络。
 
 ### P7 VLM 插件（并行任务 G）
 
@@ -285,7 +292,7 @@
 - 日志用标准 `logging`；不要 print（CLI 除外）。
 - 测试不访问网络；LLM 用 `httpx.MockTransport`；Canvas/SJTU 用 fake client。
 - 所有新增 public 函数/类写 docstring。
-- 不引入任何 STT 运行时依赖；没有内置转写后端。
+- 不引入 google-cloud-speech SDK：STT 只用 `google-auth` 获取 OAuth token，用 `httpx` 直接调用 v2 REST；生产代码不含 mock 转写后端。
 - 所有文件 UTF-8，LF。
 
 ## 4. 测试矩阵
@@ -301,7 +308,7 @@
 | agent | tools read/replace/append/info, multi-session, subsession, max steps |
 | summarize | trigger chars/audio, watermark, failure retry, three files |
 | input | JPEG parse, source mutex, catalog mapping, live devices, no token |
-| stt | WAV, chunk/overlap, session switch, fake backend |
+| stt | OAuth token/项目解析、v2 请求体、resultEndOffset 解析、错误映射、分块转写、设置项、无凭据状态、UI（httpx.MockTransport） |
 | vlm | fusion synthetic, prompt, dedupe, fake LLM |
 | server | state/action/artifact path/websocket |
 
@@ -329,7 +336,7 @@
 | 插件循环依赖 | 加载时检测并报错；`requires` 只写直接依赖 |
 | Agent 长任务阻塞 UI | action 后台线程；会话锁；UI 事件刷新 |
 | LLM 流式中断 | 首包前重试；首包后抛错并记录，调用方决定重试 |
-| STT/VLM 无可用模型 | STT 无内置后端，只保留音频流接口；UI 明确提示；不阻塞其他插件 |
+| STT/VLM 无可用模型/凭据 | STT 无凭据时状态显示 `needs_credentials` 并在 UI 提示，不阻塞其他插件；VLM 复用 LLM 分组 |
 
 ## 7. 交付物
 
