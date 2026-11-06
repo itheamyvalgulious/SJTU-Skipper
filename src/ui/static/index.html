@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>课堂总 Agent</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2358a6ff'/%3E%3Ctext x='16' y='24' text-anchor='middle' font-size='22' fill='%230b1220'%3E%E2%88%91%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/styles.css?v=4">
-  <link rel="stylesheet" href="/static/vendor/katex/katex.min.css?v=4">
+  <link rel="stylesheet" href="/static/styles.css?v=5">
+  <link rel="stylesheet" href="/static/vendor/katex/katex.min.css?v=5">
 </head>
 <body>
 <div id="app">
@@ -15,10 +15,14 @@
       <div class="brand-mark">∑</div>
       <div>
         <h1>课堂总 Agent</h1>
-        <p class="brand-sub">流 · 转写 · 板书 · 行为 · 笔记</p>
+        <p class="brand-sub">课程 · 课堂 · 笔记</p>
       </div>
     </div>
+    <nav id="menubar" class="menubar" aria-label="菜单"></nav>
     <div class="topbar-right">
+      <button id="palette-btn" class="btn btn-sm btn-ghost" type="button" title="Ctrl+P">
+        命令 <kbd>Ctrl P</kbd>
+      </button>
       <span id="connection" class="pill pill-muted">连接中</span>
       <span id="session-pill" class="pill pill-muted">无会话</span>
     </div>
@@ -35,8 +39,8 @@
       <div id="page-content" class="page-content">
         <div class="welcome">
           <div class="welcome-mark">∮</div>
-          <h2>开始一节课</h2>
-          <p>左侧「课程」里选择录播或直播；设置里填入 Canvas token 与模型 API key。</p>
+          <h2>选择一节课</h2>
+          <p>左侧课程树里展开课程，选择录播或直播。</p>
         </div>
       </div>
     </main>
@@ -53,8 +57,18 @@
 </div>
 
 <div id="toast" class="toast" role="status"></div>
-<script src="/static/vendor/katex/katex.min.js?v=4"></script>
-<script src="/static/vendor/katex/contrib/auto-render.min.js?v=4"></script>
-<script src="/static/app.js?v=4"></script>
+
+<div id="palette" class="palette" hidden>
+  <div class="palette-box">
+    <input id="palette-input" class="palette-input" type="text" placeholder="输入命令，例如：设置 / Agent / 转写" autocomplete="off">
+    <div id="palette-list" class="palette-list" role="listbox"></div>
+  </div>
+</div>
+
+<script src="/static/vendor/hls/hls.min.js?v=5"></script>
+<script src="/static/vendor/mpegts/mpegts.min.js?v=5"></script>
+<script src="/static/vendor/katex/katex.min.js?v=5"></script>
+<script src="/static/vendor/katex/contrib/auto-render.min.js?v=5"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>

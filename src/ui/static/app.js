@@ -6,6 +6,9 @@
     activeTab: { left: null, right: null },
     blockTabs: {},
     pageKey: null,
+    playerCache: {},
+    paletteItems: [],
+    paletteIndex: 0,
     loading: false,
     lastLoad: 0,
     ws: null,
@@ -197,8 +200,62 @@
     return wrap;
   }
 
-  function renderRows(block) {
-    const wrap = el("div", { class: "row-list block" });
+  function renderTree(block) {
+    const wrap = el("div", { class: "tree" });
+    const nodes = Array.isArray(block.nodes) ? block.nodes : [];
+    if (!nodes.length) {
+      wrap.appendChild(el("div", { class: "tree-empty", text: block.empty_text || "暂无内容" }));
+      return wrap;
+    }
+    for (const node of nodes) wrap.appendChild(renderTreeNode(node));
+    return wrap;
+  }
+
+  function renderTreeNode(node) {
+    const box = el("div", { class: "tree-node" });
+    const children = Array.isArray(node.children) ? node.children : [];
+    const hasChildren = children.length > 0;
+    const row = el("div", {
+      class: `tree-row ${node.active ? "active" : ""} ${node.live ? "live" : ""}`,
+    });
+    const caret = el("button", {
+      class: `tree-caret ${hasChildren ? "" : "leaf"}`,
+      type: "button",
+      text: node.expanded ? "▾" : "▸",
+      title: hasChildren ? (node.expanded ? "折叠" : "展开") : "",
+    });
+    caret.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (hasChildren) runNodeAction(node.toggle);
+    });
+    row.appendChild(caret);
+    if (node.icon) row.appendChild(el("span", { class: "tree-icon", text: node.icon }));
+    row.appendChild(el("span", { class: "tree-label", text: node.label || node.id || "" }));
+    if (node.subtitle) row.appendChild(el("span", { class: "tree-sub", text: node.subtitle }));
+    if (node.badge) {
+      row.appendChild(
+        el("span", { class: `tree-badge ${node.badge_class || ""}`, text: node.badge })
+      );
+    }
+    row.addEventListener("click", () => {
+      if (node.action) runNodeAction(node.action);
+      else if (hasChildren) runNodeAction(node.toggle);
+    });
+    box.appendChild(row);
+    if (hasChildren && node.expanded) {
+      const kids = el("div", { class: "tree-children" });
+      for (const child of children) kids.appendChild(renderTreeNode(child));
+      box.appendChild(kids);
+    }
+    return box;
+  }
+
+  function runNodeAction(spec) {
+    if (!spec || !spec.action) return;
+    postAction(spec.action, spec.value || {});
+  }
+
+  function renderRows(block) {    const wrap = el("div", { class: "row-list block" });
     for (const item of block.items || []) {
       const row = el("div", { class: `row-item ${item.active ? "active" : ""}` });
       const main = el("div", { class: "row-main" }, [
@@ -346,7 +403,10 @@
     const tabs = block.tabs || [];
     const key = block.id || block.key || `tabs:${tabs.map((t) => t.title || "").join("\u0001")}`;
     const savedTitle = state.blockTabs[key];
+    // A client-side selection wins over the server hint so that periodic
+    // refreshes do not yank the reader back to the document it opened with.
     let active = tabs.findIndex((t) => (t.title || "") === savedTitle);
+    if (active < 0) active = tabs.findIndex((t) => t.active);
     if (active < 0) active = 0;
     const show = (index, remember = true) => {
       active = index;
@@ -368,6 +428,161 @@
     return wrap;
   }
 
+  // ------------------------------------------------------------------
+  // Video player (class page)
+  // ------------------------------------------------------------------
+  function playerKey(block) {
+    return block.id || "player";
+  }
+
+  function attachStream(video, source, startAt) {
+    const src = String(source.src || "");
+    if (!src) return;
+    if (src.includes(".flv") && window.mpegts && window.mpegts.isSupported()) {
+      const player = window.mpegts.createPlayer({ type: "flv", isLive: true, url: src });
+      player.attachMediaElement(video);
+      player.load();
+      video._mpegts = player;
+      return;
+    }
+    const isHls = src.includes(".m3u8");
+    const nativeHls = video.canPlayType("application/vnd.apple.mpegurl");
+    if (isHls && !nativeHls && window.Hls && window.Hls.isSupported()) {
+      const hls = new window.Hls({
+        startPosition: startAt > 1 ? startAt : -1,
+        lowLatencyMode: true,
+        maxBufferLength: 30,
+      });
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      video._hls = hls;
+      return;
+    }
+    video.src = src;
+    if (startAt > 1) {
+      video.addEventListener(
+        "loadedmetadata",
+        () => { try { video.currentTime = startAt; } catch (_) {} },
+        { once: true }
+      );
+    }
+  }
+
+  function renderPlayer(block) {
+    const key = playerKey(block);
+    const cache = state.playerCache[key] || {};
+    const wrap = el("div", { class: "player" });
+    const grid = el("div", { class: "player-grid" });
+    const videos = [];
+    const sources = Array.isArray(block.sources) ? block.sources : [];
+
+    for (const source of sources) {
+      const saved = block.live ? {} : cache[source.key] || {};
+      const pane = el("div", { class: "player-pane" });
+      pane.appendChild(
+        el("div", { class: "player-label", text: source.label || source.key || "" })
+      );
+      const video = el("video", {
+        class: "player-video",
+        controls: "controls",
+        playsinline: "",
+        preload: "metadata",
+      });
+      video.muted = Boolean(source.muted);
+      video.dataset.srcKey = source.key || "";
+      attachStream(video, source, Number(saved.t || 0));
+      const remember = () => {
+        state.playerCache[key] = state.playerCache[key] || {};
+        state.playerCache[key][source.key] = {
+          t: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+        };
+      };
+      video.addEventListener("timeupdate", remember);
+      video.addEventListener("pause", remember);
+      video.addEventListener("seeked", remember);
+      videos.push(video);
+      pane.appendChild(video);
+      grid.appendChild(pane);
+    }
+
+    if (block.screen_missing) {
+      grid.appendChild(
+        el("div", { class: "player-pane player-empty", text: "该课程没有屏幕流" })
+      );
+    }
+    wrap.appendChild(grid);
+
+    const bar = el("div", { class: "player-actions" });
+    const finished = Boolean(block.finished);
+    const live = Boolean(block.live);
+    let processing = Boolean(block.processing);
+
+    const stateText = () => {
+      if (finished) return "已结束";
+      if (live) return processing ? "直播 · 处理中" : "直播 · 已暂停处理";
+      return processing ? "处理中" : "已暂停";
+    };
+    const stateEl = el("span", { class: "player-state", text: stateText() });
+    const toggle = el("button", {
+      class: "btn btn-sm btn-primary",
+      type: "button",
+      text: finished ? "已结束" : processing ? "暂停处理" : "继续处理",
+    });
+    toggle.disabled = finished;
+
+    const playAll = () => {
+      for (const video of videos) {
+        if (video.dataset.srcKey === "screen") video.muted = true;
+        const tryPlay = () => {
+          const p = video.play();
+          if (p && p.catch) p.catch(() => {});
+        };
+        video.addEventListener("canplay", tryPlay, { once: true });
+        tryPlay();
+      }
+    };
+    const pauseAll = () => {
+      for (const video of videos) {
+        try { video.pause(); } catch (_) {}
+      }
+    };
+
+    if (!finished) {
+      toggle.addEventListener("click", async () => {
+        const action = processing ? block.pause_action : block.start_action;
+        const result = await postAction(action, {});
+        if (!result || result.ok === false) return;
+        if (!processing && String(result.message || "").includes("准备")) {
+          // Streams are still resolving; the server starts processing as soon
+          // as they are ready and the page re-renders in the running state.
+          stateEl.textContent = "准备中…";
+          return;
+        }
+        processing = !processing;
+        toggle.textContent = processing ? "暂停处理" : "继续处理";
+        stateEl.textContent = stateText();
+        if (processing) playAll();
+        else if (!live) pauseAll();
+      });
+    }
+
+    // Live video keeps playing while processing is paused; recordings only
+    // play while processing is running.
+    if (!finished && (live || processing)) {
+      playAll();
+    }
+
+    bar.appendChild(stateEl);
+    bar.appendChild(toggle);
+    if (block.part && block.parts && block.parts > 1) {
+      bar.appendChild(
+        el("span", { class: "player-meta", text: `第 ${block.part}/${block.parts} 节` })
+      );
+    }
+    wrap.appendChild(bar);
+    return wrap;
+  }
+
   function renderBlocks(blocks) {
     const frag = document.createDocumentFragment();
     for (const block of blocks || []) {
@@ -375,6 +590,20 @@
       if (node) frag.appendChild(node);
     }
     return frag;
+  }
+
+  function destroyPlayers(root) {
+    if (!root) return;
+    for (const video of $$("video", root)) {
+      if (video._hls) {
+        try { video._hls.destroy(); } catch (_) {}
+        video._hls = null;
+      }
+      if (video._mpegts) {
+        try { video._mpegts.destroy(); } catch (_) {}
+        video._mpegts = null;
+      }
+    }
   }
 
   function renderBlock(block) {
@@ -397,6 +626,7 @@
     if (type === "table") return el("div", { class: "block" }, [renderTable(block)]);
     if (type === "cards") return el("div", { class: "block" }, [renderCards(block)]);
     if (type === "rows") return renderRows(block);
+    if (type === "tree") return el("div", { class: "block" }, [renderTree(block)]);
     if (type === "list") {
       const list = el("div", { class: "block btn-row" });
       for (const item of block.items || []) {
@@ -423,6 +653,7 @@
       return el("div", { class: "block" }, [video]);
     }
     if (type === "tabs") return el("div", { class: "block" }, [renderTabs(block)]);
+    if (type === "player") return renderPlayer(block);
     if (type === "progress") {
       const value = Number(block.value ?? 0);
       const pct = value <= 1 ? value * 100 : value;
@@ -443,12 +674,192 @@
   // ------------------------------------------------------------------
   function renderAll() {
     if (!state.ui) return;
+    renderMenubar();
     renderSidebar("left");
     renderSidebar("right");
     renderPageTabs();
     const pageChanged = renderPageContent();
     renderStatus();
     if (pageChanged) typeset();
+  }
+
+  // ------------------------------------------------------------------
+  // Menubar + command palette
+  // ------------------------------------------------------------------
+  function commands() {
+    return state.ui?.commands || [];
+  }
+
+  function closeMenus() {
+    $$(".menu-wrap.open").forEach((wrap) => {
+      wrap.classList.remove("open");
+      const drop = $(".menu-drop", wrap);
+      if (drop) drop.remove();
+      const btn = $(".menu-btn", wrap);
+      if (btn) btn.classList.remove("open");
+    });
+  }
+
+  function runCommand(cmd) {
+    closeMenus();
+    closePalette();
+    if (cmd.page) return openPage(cmd.page);
+    if (cmd.action) return postAction(cmd.action, {});
+    return null;
+  }
+
+  function renderMenubar() {
+    const bar = $("#menubar");
+    if (!bar) return;
+    bar.replaceChildren();
+    const groups = new Map();
+    for (const cmd of commands()) {
+      const name = cmd.category || "其他";
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(cmd);
+    }
+    for (const [name, items] of groups) {
+      const wrap = el("div", { class: "menu-wrap" });
+      const btn = el("button", { class: "menu-btn", type: "button", text: name });
+      btn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const wasOpen = wrap.classList.contains("open");
+        closeMenus();
+        if (wasOpen) return;
+        wrap.classList.add("open");
+        btn.classList.add("open");
+        const drop = el("div", { class: "menu-drop" });
+        for (const cmd of items) {
+          const item = el("button", { class: "menu-item", type: "button" }, [
+            el("span", { text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}` }),
+            cmd.subtitle ? el("span", { class: "sub", text: cmd.subtitle }) : null,
+          ]);
+          item.addEventListener("click", (event) => {
+            event.stopPropagation();
+            runCommand(cmd);
+          });
+          drop.appendChild(item);
+        }
+        wrap.appendChild(drop);
+      });
+      wrap.appendChild(btn);
+      bar.appendChild(wrap);
+    }
+  }
+
+  function paletteMatches(query) {
+    const q = String(query || "").trim().toLowerCase();
+    const items = commands();
+    if (!q) return items;
+    return items.filter((cmd) => {
+      const hay = `${cmd.title} ${cmd.subtitle || ""} ${cmd.category || ""} ${cmd.keywords || ""}`.toLowerCase();
+      return q.split(/\s+/).every((part) => hay.includes(part));
+    });
+  }
+
+  function renderPalette(query) {
+    const list = $("#palette-list");
+    if (!list) return;
+    list.replaceChildren();
+    const items = paletteMatches(query);
+    state.paletteItems = items;
+    if (state.paletteIndex >= items.length) state.paletteIndex = 0;
+    if (!items.length) {
+      list.appendChild(el("div", { class: "palette-empty", text: "没有匹配的命令" }));
+      return;
+    }
+    items.forEach((cmd, index) => {
+      const row = el("button", {
+        class: `palette-item ${index === state.paletteIndex ? "active" : ""}`,
+        type: "button",
+      }, [
+        cmd.category ? el("span", { class: "cat", text: cmd.category }) : null,
+        el("span", { text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}` }),
+        cmd.subtitle ? el("span", { class: "sub", text: cmd.subtitle }) : null,
+      ]);
+      row.addEventListener("click", () => runCommand(cmd));
+      row.addEventListener("mouseenter", () => {
+        state.paletteIndex = index;
+        $$(".palette-item", list).forEach((node, i) => node.classList.toggle("active", i === index));
+      });
+      list.appendChild(row);
+    });
+  }
+
+  function openPalette() {
+    const palette = $("#palette");
+    if (!palette) return;
+    palette.hidden = false;
+    const input = $("#palette-input");
+    input.value = "";
+    state.paletteIndex = 0;
+    renderPalette("");
+    input.focus();
+  }
+
+  function closePalette() {
+    const palette = $("#palette");
+    if (palette) palette.hidden = true;
+    state.paletteIndex = 0;
+  }
+
+  function paletteOpen() {
+    const palette = $("#palette");
+    return palette && !palette.hidden;
+  }
+
+  document.addEventListener("keydown", (event) => {
+    const key = event.key.toLowerCase();
+    if ((event.ctrlKey || event.metaKey) && key === "p") {
+      event.preventDefault();
+      if (paletteOpen()) closePalette();
+      else openPalette();
+      return;
+    }
+    if (!paletteOpen()) return;
+    const items = state.paletteItems || [];
+    if (key === "escape") {
+      event.preventDefault();
+      closePalette();
+    } else if (key === "arrowdown") {
+      event.preventDefault();
+      state.paletteIndex = Math.min(items.length - 1, state.paletteIndex + 1);
+      renderPalette($("#palette-input").value);
+      const active = $(".palette-item.active");
+      if (active) active.scrollIntoView({ block: "nearest" });
+    } else if (key === "arrowup") {
+      event.preventDefault();
+      state.paletteIndex = Math.max(0, state.paletteIndex - 1);
+      renderPalette($("#palette-input").value);
+      const active = $(".palette-item.active");
+      if (active) active.scrollIntoView({ block: "nearest" });
+    } else if (key === "enter") {
+      event.preventDefault();
+      const cmd = items[state.paletteIndex];
+      if (cmd) runCommand(cmd);
+    }
+  });
+
+  document.addEventListener("input", (event) => {
+    if (event.target && event.target.id === "palette-input") {
+      state.paletteIndex = 0;
+      renderPalette(event.target.value);
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("#menubar")) closeMenus();
+  });
+
+  function bindPaletteTrigger() {
+    const btn = $("#palette-btn");
+    if (btn) btn.addEventListener("click", () => openPalette());
+    const palette = $("#palette");
+    if (palette) {
+      palette.addEventListener("click", (event) => {
+        if (event.target === palette) closePalette();
+      });
+    }
   }
 
   function pickTab(tabs, side) {
@@ -464,6 +875,8 @@
     const tabsEl = $(`#${side}-tabs`);
     const toolboxEl = $(`#${side}-toolbox`);
     tabsEl.replaceChildren();
+    // A single tab needs no tab strip: the left sidebar is just the course tree.
+    tabsEl.hidden = (tabs || []).length <= 1;
     const active = pickTab(tabs || [], side);
     state.activeTab[side] = active;
     if (active) localStorage.setItem(`lecture-agent.tab.${side}`, active);
@@ -482,7 +895,7 @@
         // Open the tab's primary page so switching tabs never leaves the
         // previous page looking like part of the new tab.
         const first = (tab.toolbox || [])[0];
-        const pageId = first ? findPageForItem(first) : null;
+        const pageId = first ? first.page || null : null;
         if (pageId && state.ui.active_page !== pageId) openPage(pageId);
       });
       tabsEl.appendChild(btn);
@@ -494,18 +907,20 @@
       return;
     }
     for (const item of current.toolbox) {
-      const panel = el("section", { class: "toolbox-item" });
-      const pageId = findPageForItem(item);
-      const head = el("div", { class: "toolbox-head" }, [
-        el("div", { class: "toolbox-title", text: item.title || item.id }),
-        item.description ? el("div", { class: "toolbox-desc", text: item.description }) : null,
-      ]);
-      if (pageId) {
-        const open = actionButton("打开页面", "ui.open_page", { page_id: pageId }, "btn btn-sm btn-ghost");
-        open.style.float = "right";
-        head.appendChild(open);
+      const panel = el("section", { class: `toolbox-item ${item.title || item.description ? "" : "bare"}` });
+      const pageId = item.page || null;
+      if (item.title || item.description) {
+        const head = el("div", { class: "toolbox-head" }, [
+          el("div", { class: "toolbox-title", text: item.title || item.id }),
+          item.description ? el("div", { class: "toolbox-desc", text: item.description }) : null,
+        ]);
+        if (pageId) {
+          const open = actionButton("打开页面", "ui.open_page", { page_id: pageId }, "btn btn-sm btn-ghost");
+          open.style.float = "right";
+          head.appendChild(open);
+        }
+        panel.appendChild(head);
       }
-      panel.appendChild(head);
       const body = el("div", { class: "toolbox-body" });
       if (item.blocks && item.blocks.length) {
         body.appendChild(renderBlocks(item.blocks));
@@ -515,22 +930,6 @@
       panel.appendChild(body);
       toolboxEl.appendChild(panel);
     }
-  }
-
-  function findPageForItem(item) {
-    const pages = state.ui?.pages || [];
-    const id = item.id || "";
-    const ns = id.split(".")[0];
-    if (!ns) return null;
-    const exact = `${ns}:${id.split(".").slice(1).join(".")}`;
-    if (pages.some((p) => p.id === exact)) return exact;
-    const candidates = pages.filter((p) => p.id.startsWith(`${ns}:`));
-    if (candidates.length === 1) return candidates[0].id;
-    for (const suffix of ["main", "chat", "session", "transcript", "notes", "board"]) {
-      const wanted = `${ns}:${suffix}`;
-      if (pages.some((p) => p.id === wanted)) return wanted;
-    }
-    return candidates[0]?.id || null;
   }
 
   function renderPageTabs() {
@@ -579,14 +978,15 @@
       container.contains(focused) &&
       ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName);
     if (editing) return false; // don't wipe out a form the user is typing in
+    destroyPlayers(container);
     container.replaceChildren();
     container.dataset.pageId = active;
     state.pageKey = key;
     if (!active || !blocks) {
       container.appendChild(el("div", { class: "welcome" }, [
         el("div", { class: "welcome-mark", text: "∮" }),
-        el("h2", { text: "开始一节课" }),
-        el("p", { text: "左侧「课程」里选择录播或直播；设置里填入 Canvas token 与模型 API key。" }),
+        el("h2", { text: "选择一节课" }),
+        el("p", { text: "左侧课程树里展开课程，选择录播或直播。按 Ctrl+P 打开命令面板。" }),
       ]));
       container.scrollTop = 0;
       return true;
@@ -753,6 +1153,7 @@
   }
 
   function boot() {
+    bindPaletteTrigger();
     loadState();
     connectWs();
     setInterval(() => {

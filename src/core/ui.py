@@ -1,4 +1,4 @@
-"""Declarative UI model: tabs, toolboxes, pages, blocks and actions."""
+"""Declarative UI model: tabs, toolboxes, pages, blocks, actions and commands."""
 
 from __future__ import annotations
 
@@ -12,6 +12,10 @@ from typing import Any, Callable, Iterable, Literal
 from markdown_it import MarkdownIt
 
 logger = logging.getLogger("lecture_agent.ui")
+
+# Menu bar category order (unknown categories fall between 视图 and 调试).
+_CATEGORY_ORDER = {"课程": 0, "视图": 10, "调试": 90}
+_DEFAULT_CATEGORY_ORDER = 50
 
 Side = Literal["left", "right"]
 Renderer = Callable[[], Any]
@@ -133,6 +137,7 @@ class _Item:
     order: float
     render: Renderer | None
     plugin_id: str
+    page_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -153,6 +158,20 @@ class _Action:
     plugin_id: str
 
 
+@dataclass(slots=True)
+class _Command:
+    id: str
+    title: str
+    subtitle: str
+    category: str
+    icon: str | None
+    order: float
+    page_id: str | None
+    action: str | None
+    keywords: str
+    plugin_id: str
+
+
 class UIManager:
     """Thread-safe declarative UI registry.
 
@@ -168,6 +187,7 @@ class UIManager:
         self._items: dict[str, _Item] = {}
         self._pages: dict[str, _Page] = {}
         self._actions: dict[str, _Action] = {}
+        self._commands: dict[str, _Command] = {}
         self._open_pages: list[str] = []
         self._active_page: str | None = None
         self._version = 0
@@ -219,6 +239,7 @@ class UIManager:
         order: float = 0,
         render: Renderer | None = None,
         plugin_id: str = "",
+        page_id: str | None = None,
     ) -> ItemHandle:
         with self._lock:
             if tab_id not in self._tabs:
@@ -233,6 +254,7 @@ class UIManager:
                 order=float(order),
                 render=render,
                 plugin_id=plugin_id,
+                page_id=page_id,
             )
         return ItemHandle(self, id)
 
@@ -332,6 +354,75 @@ class UIManager:
         with self._lock:
             self._actions.pop(action_id, None)
 
+    # ------------------------------------------------------------------
+    # Commands (command palette / menu bar)
+    # ------------------------------------------------------------------
+    def register_command(
+        self,
+        command_id: str,
+        title: str,
+        *,
+        subtitle: str = "",
+        category: str = "",
+        icon: str | None = None,
+        order: float = 0,
+        page_id: str | None = None,
+        action: str | None = None,
+        keywords: str = "",
+        plugin_id: str = "",
+    ) -> None:
+        """Register a palette/menu entry that opens a page or runs an action."""
+
+        if not page_id and not action:
+            raise ValueError("command needs a page_id or an action")
+        with self._lock:
+            self._commands[command_id] = _Command(
+                id=command_id,
+                title=title,
+                subtitle=subtitle,
+                category=category,
+                icon=icon,
+                order=float(order),
+                page_id=page_id,
+                action=action,
+                keywords=keywords,
+                plugin_id=plugin_id,
+            )
+
+    def unregister_command(self, command_id: str) -> None:
+        with self._lock:
+            self._commands.pop(command_id, None)
+
+    def remove_plugin_commands(self, plugin_id: str) -> None:
+        with self._lock:
+            for command_id, command in list(self._commands.items()):
+                if command.plugin_id == plugin_id:
+                    self._commands.pop(command_id, None)
+
+    def list_commands(self) -> list[dict[str, Any]]:
+        with self._lock:
+            commands = sorted(
+                self._commands.values(),
+                key=lambda c: (
+                    _CATEGORY_ORDER.get(c.category, _DEFAULT_CATEGORY_ORDER),
+                    c.order,
+                    c.id,
+                ),
+            )
+        return [
+            {
+                "id": c.id,
+                "title": c.title,
+                "subtitle": c.subtitle,
+                "category": c.category,
+                "icon": c.icon,
+                "page": c.page_id,
+                "action": c.action,
+                "keywords": c.keywords,
+            }
+            for c in commands
+        ]
+
     def dispatch_action(
         self,
         action_id: str,
@@ -422,6 +513,8 @@ class UIManager:
             block["tabs"] = tabs
         elif btype == "form":
             block.setdefault("fields", [])
+        elif btype == "tree":
+            block["nodes"] = _normalize_tree_nodes(block.get("nodes", []))
         return [block]
 
     def state(self) -> dict[str, Any]:
@@ -451,6 +544,7 @@ class UIManager:
                             "title": item.title,
                             "description": item.description,
                             "order": item.order,
+                            "page": item.page_id,
                             "blocks": self._render(item.render, f"item:{item.id}"),
                         }
                     )
@@ -498,6 +592,7 @@ class UIManager:
             "open_pages": open_pages,
             "active_page": active,
             "page_content": page_content,
+            "commands": self.list_commands(),
             "status": status,
         }
 
@@ -510,9 +605,27 @@ class UIManager:
                 "items": {i.id: i.tab_id for i in self._items.values()},
                 "pages": {p.id: p.title for p in self._pages.values()},
                 "actions": sorted(self._actions),
+                "commands": sorted(self._commands),
                 "open_pages": list(self._open_pages),
                 "active_page": self._active_page,
             }
+
+
+def _normalize_tree_nodes(nodes: Iterable[Any], depth: int = 0) -> list[dict[str, Any]]:
+    """Normalise tree nodes recursively (``nodes`` → ``children``)."""
+
+    out: list[dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        item = dict(node)
+        item["depth"] = depth
+        item.setdefault("label", str(item.get("title", "") or ""))
+        item["children"] = _normalize_tree_nodes(
+            item.get("children", []) or [], depth + 1
+        )
+        out.append(item)
+    return out
 
 
 def _escape(text: str) -> str:

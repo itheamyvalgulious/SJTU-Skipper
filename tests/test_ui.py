@@ -98,3 +98,74 @@ def test_status_provider() -> None:
     ui = UIManager()
     ui.set_status_provider(lambda: {"session": {"id": "x"}})
     assert ui.state()["status"]["session"]["id"] == "x"
+
+
+def test_tree_block_is_normalized_recursively() -> None:
+    ui = UIManager()
+    ui.add_page(
+        "p",
+        "P",
+        render=lambda: [
+            {
+                "type": "tree",
+                "id": "courses",
+                "nodes": [
+                    {
+                        "id": "c1",
+                        "label": "高等数学",
+                        "expanded": True,
+                        "toggle": {"action": "t", "value": {"course": "1"}},
+                        "children": [
+                            {"id": "k1", "label": "11-05 08:00", "action": {"action": "open"}},
+                        ],
+                    }
+                ],
+            }
+        ],
+    )
+    ui.open_page("p")
+    block = ui.state()["page_content"]["p"][0]
+    assert block["type"] == "tree"
+    node = block["nodes"][0]
+    assert node["depth"] == 0
+    assert node["children"][0]["depth"] == 1
+    assert node["children"][0]["children"] == []
+
+
+def test_commands_registry_and_state() -> None:
+    ui = UIManager()
+    ui.add_page("settings:main", "设置")
+    ui.register_command(
+        "settings.open",
+        "设置",
+        category="视图",
+        order=10,
+        page_id="settings:main",
+        keywords="config",
+        plugin_id="settings",
+    )
+    ui.register_command(
+        "input.refresh",
+        "刷新课程",
+        category="课程",
+        order=0,
+        action="input.refresh_courses",
+        plugin_id="input",
+    )
+    commands = ui.state()["commands"]
+    assert [c["id"] for c in commands] == ["input.refresh", "settings.open"]
+    assert commands[1]["page"] == "settings:main"
+    assert commands[0]["action"] == "input.refresh_courses"
+    assert "settings.open" in ui.snapshot()["commands"]
+
+    ui.unregister_command("input.refresh")
+    assert [c["id"] for c in ui.state()["commands"]] == ["settings.open"]
+
+    ui.remove_plugin_commands("settings")
+    assert ui.state()["commands"] == []
+
+
+def test_command_requires_page_or_action() -> None:
+    ui = UIManager()
+    with pytest.raises(ValueError):
+        ui.register_command("bad", "Bad")
