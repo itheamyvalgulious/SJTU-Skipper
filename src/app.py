@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from config import AppConfig, load_config
+from config import AppConfig, SHUTDOWN_TIMEOUT, load_config
 from core.runtime import Runtime, build_runtime
 from plugins.builtin import builtin_plugins
 
@@ -42,6 +42,7 @@ def run_server(
         host=config.host,
         port=config.port,
         log_level=config.log_level.lower(),
+        timeout_graceful_shutdown=SHUTDOWN_TIMEOUT,
     )
 
 

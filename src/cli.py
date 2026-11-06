@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from config import load_config
+from config import SHUTDOWN_TIMEOUT, load_config
 from applog import setup_logging
 
 
@@ -54,7 +54,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if args.plugin:
         runtime.add_plugins(_load_extra_plugins(args.plugin))
     app = create_app(runtime)
-    uvicorn.run(app, host=cfg.host, port=cfg.port, log_level=cfg.log_level.lower())
+    uvicorn.run(
+        app,
+        host=cfg.host,
+        port=cfg.port,
+        log_level=cfg.log_level.lower(),
+        timeout_graceful_shutdown=SHUTDOWN_TIMEOUT,
+    )
     return 0
 
 

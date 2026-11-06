@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from config import SHUTDOWN_TIMEOUT
 from core.runtime import Runtime
 
 logger = logging.getLogger("lecture_agent.server")
@@ -84,6 +85,29 @@ def _safe_artifact(root: Path, session_id: str, subpath: str) -> Path:
     return candidate
 
 
+def _stop_runtime(runtime: Runtime, timeout: float = SHUTDOWN_TIMEOUT) -> None:
+    """Tear the runtime down, but never let a wedged plugin block Ctrl+C.
+
+    ``runtime.stop()`` talks to the network (STT/LLM teardown), so it can block
+    for a long time. Running it on a daemon thread means the interpreter can
+    still exit once ``timeout`` expires.
+    """
+
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            runtime.stop()
+        except Exception:  # noqa: BLE001 - shutdown must not raise
+            logger.exception("runtime stop failed")
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name="runtime-stop", daemon=True).start()
+    if not done.wait(timeout):
+        logger.warning("runtime stop still running after %ss; abandoning it", timeout)
+
+
 def create_app(runtime: Runtime) -> FastAPI:
     broadcaster = _Broadcaster()
 
@@ -105,7 +129,7 @@ def create_app(runtime: Runtime) -> FastAPI:
         finally:
             subscription.cancel()
             if owns_runtime:
-                runtime.stop()
+                _stop_runtime(runtime)
 
     app = FastAPI(title="Lecture Agent", version="0.1.0", lifespan=lifespan)
     if STATIC_DIR.exists():
