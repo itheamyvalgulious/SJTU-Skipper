@@ -11,4 +11,5 @@ enable_input = true
 enable_stt = true
 enable_vlm = true
 enable_summarize = true
+enable_instant_summarize = true
 # plugins = ["my_package.my_module:MyPlugin"]

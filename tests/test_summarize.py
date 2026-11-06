@@ -1,7 +1,8 @@
-"""Tests for the P4 Summarize plugin."""
+"""Tests for the (non-instant) whole-lecture summarize plugin."""
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,9 +13,14 @@ import pytest
 from config import load_config
 from core.plugin import Plugin, PluginContext
 from core.runtime import build_runtime
-from plugins.settings.spec import SettingsSpec
+from plugins.reader import ReaderPlugin
 from plugins.summarize import SummarizePlugin
-from plugins.summarize.plugin import NOTES_HEADERS, NOTE_FILES
+from plugins.summarize.plugin import (
+    NOTE_FILES,
+    NOTE_HEADERS,
+    _chunk_blocks,
+    _collect_blocks,
+)
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -24,23 +30,32 @@ from plugins.summarize.plugin import NOTES_HEADERS, NOTE_FILES
 class FakeAgentService:
     """Scriptable fake agent service.
 
-    Parameters
-    ----------
-    noop_runs : int
-        Number of initial ``run()`` calls that return successfully without
-        writing any file content (used to test "no change → retry" path).
-    fail_runs : int
-        Number of initial ``run()`` calls that raise RuntimeError.
+    ``noop_runs`` makes the first N runs succeed without writing anything,
+    ``fail_runs`` makes the first N runs raise, ``block`` makes every run wait
+    for :meth:`release` so concurrency guards can be tested.
     """
 
-    def __init__(self, *, noop_runs: int = 0, fail_runs: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        noop_runs: int = 0,
+        fail_runs: int = 0,
+        block: bool = False,
+    ) -> None:
         self._noop_runs = noop_runs
         self._fail_runs = fail_runs
         self._run_count = 0
         self._next_id = 0
+        self._gate = threading.Event()
+        self._gate.set()
+        if block:
+            self._gate.clear()
         self.sessions: dict[str, SimpleNamespace] = {}
         self.create_calls: list[dict[str, Any]] = []
         self.run_calls: list[dict[str, Any]] = []
+
+    def release(self) -> None:
+        self._gate.set()
 
     # -- agent service contract -------------------------------------------
 
@@ -52,6 +67,7 @@ class FakeAgentService:
         tools: list[str],
         model: str | None = None,
         max_steps: int = 8,
+        max_tool_output: int | None = None,
         extra_instructions: list[str] | None = None,
         parent_id: str | None = None,
     ) -> SimpleNamespace:
@@ -65,6 +81,7 @@ class FakeAgentService:
                 tools=list(tools),
                 model=model,
                 max_steps=max_steps,
+                max_tool_output=max_tool_output,
             )
         )
         return session
@@ -75,34 +92,30 @@ class FakeAgentService:
         user_input: str,
         on_event: Any = None,
     ) -> SimpleNamespace:
+        self._gate.wait(timeout=5.0)
         self._run_count += 1
         try:
             if self._run_count <= self._fail_runs:
                 raise RuntimeError(f"fake agent failure #{self._run_count}")
 
             if self._run_count <= self._fail_runs + self._noop_runs:
-                return SimpleNamespace(
-                    content="done (noop)", finish_reason="stop"
-                )
+                return SimpleNamespace(content="done (noop)", finish_reason="stop")
 
-            # Write test content to each file.
             session = self.sessions.get(session_id)
             if session is not None:
                 for filename, path in sorted(session.files.items()):
                     p = Path(path)
                     existing = p.read_text("utf-8") if p.exists() else ""
-                    tag = f"**[00:{(self._run_count * 5):02d}:00]**"
                     p.write_text(
                         existing
-                        + f"\n{tag} Fake summary line for {filename}. Run #{self._run_count}.\n"
+                        + f"\n## 章节（第 {self._run_count} 次运行）\n\n"
+                        + f"Fake summary line for {filename}.\n"
                     )
 
             return SimpleNamespace(
                 content=f"done run #{self._run_count}", finish_reason="stop"
             )
         finally:
-            # Record only after the files are written so wait_for_runs() is a
-            # reliable synchronization point for tests.
             self.run_calls.append(
                 dict(session_id=session_id, user_input=user_input)
             )
@@ -110,12 +123,11 @@ class FakeAgentService:
     # -- test helpers -----------------------------------------------------
 
     def wait_for_runs(self, count: int, timeout: float = 5.0) -> bool:
-        """Block until at least *count* calls to ``run()`` have been made."""
         deadline = time.monotonic() + timeout
         while len(self.run_calls) < count:
             if time.monotonic() >= deadline:
                 return False
-            time.sleep(0.05)
+            time.sleep(0.02)
         return True
 
 
@@ -156,20 +168,25 @@ class _StubAgentPlugin(Plugin):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def harness(tmp_path: Path) -> tuple[Any, Any, FakeAgentService]:
-    """Return ``(runtime, settings_service, agent_service)`` after startup."""
-    agent = FakeAgentService()
+def _build(tmp_path: Path, agent: FakeAgentService) -> Any:
     cfg = load_config(data_dir=tmp_path)
     runtime = build_runtime(
         cfg,
         plugins=[
             _StubSettingsPlugin(),
             _StubAgentPlugin(agent),
+            ReaderPlugin(),
             SummarizePlugin(),
         ],
     )
     runtime.start()
+    return runtime
+
+
+@pytest.fixture
+def harness(tmp_path: Path) -> tuple[Any, Any, FakeAgentService]:
+    agent = FakeAgentService()
+    runtime = _build(tmp_path, agent)
     settings = runtime.services.get("settings")
     assert settings is not None
     yield runtime, settings, agent
@@ -177,539 +194,337 @@ def harness(tmp_path: Path) -> tuple[Any, Any, FakeAgentService]:
 
 
 def _start_session(runtime: Any, meta: dict[str, Any] | None = None) -> str:
-    """Start a new session, flush events, return session_id."""
     ss = runtime.hub.start_session(meta=meta)
     runtime.bus.flush(2.0)
     return ss.session_id
 
 
-def _wait_for_agent_runs(agent: FakeAgentService, count: int) -> bool:
-    """Wait for the fake agent's ``run()`` to be called *count* times."""
-    return agent.wait_for_runs(count, timeout=5.0)
-
-
-# ---------------------------------------------------------------------------
-# 1. Text trigger
-# ---------------------------------------------------------------------------
-
-
-def test_text_trigger(harness: tuple) -> None:
-    runtime, settings, agent = harness
-    sid = _start_session(runtime)
-
-    streams = runtime.hub.current
-    # Append ~600+ chars of transcript text (4*30=600).
-    big = "今天我们来讨论代数拓扑。" * 60  # 11*60 = 660 chars
-    streams.transcript.append(big)
-    runtime.bus.flush(2.0)
-
-    # Summary should have been triggered.
-    assert _wait_for_agent_runs(agent, 1), "agent.run was not called"
-
-    # Files should contain content written by the fake agent.  ``run()`` is
-    # recorded before the fake writes its files, so wait for the write too.
-    notes_dir = runtime.data_dir / "sessions" / sid / "notes"
-    deadline = time.monotonic() + 5.0
+def _wait_for(predicate: Any, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if all(
-            (notes_dir / fname).exists()
-            and "Fake summary" in (notes_dir / fname).read_text("utf-8")
-            for fname in NOTE_FILES
-        ):
-            break
-        time.sleep(0.05)
-    for fname in NOTE_FILES:
-        path = notes_dir / fname
-        assert path.exists(), f"{fname} missing"
-        content = path.read_text("utf-8")
-        assert NOTES_HEADERS[fname].strip() in content
-        assert "Fake summary" in content
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
 
 
 # ---------------------------------------------------------------------------
-# 2. Audio trigger
+# 1. Files are created on session start
 # ---------------------------------------------------------------------------
 
 
-def test_audio_trigger(harness: tuple) -> None:
-    runtime, settings, agent = harness
-    sid = _start_session(runtime)
-
-    streams = runtime.hub.current
-
-    # Append some text (>= min_chars=80).
-    streams.transcript.append("我们来讨论 Riemann 曲面。" * 10)  # ~130 chars
-    runtime.bus.flush(0.5)
-
-    # Append enough audio to trigger (>= 120s).
-    pcm = b"\x00" * (16000 * 2 * 120)  # 120 seconds of silence
-    streams.audio.append(pcm)
-    runtime.bus.flush(2.0)
-
-    assert _wait_for_agent_runs(agent, 1), (
-        f"agent.run was not called (runs={len(agent.run_calls)})"
-    )
-
-    notes_dir = runtime.data_dir / "sessions" / sid / "notes"
-    assert (notes_dir / "knowledge.md").exists()
-
-
-# ---------------------------------------------------------------------------
-# 3. Watermark – repeated events do not trigger duplicate summaries
-# ---------------------------------------------------------------------------
-
-
-def test_watermark_no_duplicate(harness: tuple) -> None:
-    runtime, settings, agent = harness
-    _start_session(runtime)
-
-    streams = runtime.hub.current
-    # First batch: enough to trigger.
-    streams.transcript.append("A" * 600)
-    runtime.bus.flush(2.0)
-    assert _wait_for_agent_runs(agent, 1)
-
-    # Second batch: not enough to trigger again.
-    streams.transcript.append("B" * 200)
-    runtime.bus.flush(2.0)
-    # Wait a bit – no new run should happen.
-    time.sleep(0.3)
-    runtime.bus.flush(1.0)
-    assert len(agent.run_calls) == 1
-
-
-# ---------------------------------------------------------------------------
-# 4. Watermark – enough content → second summary with only new content
-# ---------------------------------------------------------------------------
-
-
-def test_watermark_second_trigger(harness: tuple) -> None:
-    runtime, settings, agent = harness
-    _start_session(runtime)
-
-    streams = runtime.hub.current
-    # First trigger.
-    streams.transcript.append("A" * 600)
-    runtime.bus.flush(2.0)
-    assert _wait_for_agent_runs(agent, 1)
-
-    # Second trigger.
-    streams.transcript.append("B" * 600)
-    runtime.bus.flush(2.0)
-    assert _wait_for_agent_runs(agent, 2)
-
-    # Verify two separate runs.
-    assert len(agent.run_calls) == 2
-    # Second run should only see the new "B" content, not "A".
-    second_input = agent.run_calls[1]["user_input"]
-    assert "B" * 10 in second_input
-    # "A" may or may not appear depending on watermark.
-    # But the second run's session should be different from first.
-    assert agent.run_calls[0]["session_id"] != agent.run_calls[1]["session_id"]
-
-
-# ---------------------------------------------------------------------------
-# 5. Busy while triggered – pending content processed in next round
-# ---------------------------------------------------------------------------
-
-
-def test_busy_pending_processed_next_round(harness: tuple) -> None:
-    runtime, settings, agent = harness
-    _start_session(runtime)
-
-    streams = runtime.hub.current
-
-    # First trigger.
-    streams.transcript.append("X" * 600)
-    runtime.bus.flush(2.0)
-    # Do NOT wait for completion yet – immediately append more.
-    streams.transcript.append("Y" * 600)
-    runtime.bus.flush(2.0)
-
-    # Wait for both runs.
-    assert _wait_for_agent_runs(agent, 2), (
-        f"expected 2 runs, got {len(agent.run_calls)}"
-    )
-
-    # Both summaries should have happened.
-    assert len(agent.run_calls) >= 2
-
-
-# ---------------------------------------------------------------------------
-# 6. Failure retry with backoff
-# ---------------------------------------------------------------------------
-
-
-def test_failure_retry(harness: tuple) -> None:
-    # Agent that fails once then succeeds – use a fresh runtime.
-    import shutil
-    import tempfile
-
-    agent2 = FakeAgentService(fail_runs=1)
-    d = tempfile.mkdtemp()
-    try:
-        cfg2 = load_config(data_dir=d)
-        rt = build_runtime(
-            cfg2,
-            plugins=[
-                _StubSettingsPlugin(),
-                _StubAgentPlugin(agent2),
-                SummarizePlugin(),
-            ],
-        )
-        rt.start()
-        try:
-            _start_session(rt)
-
-            streams = rt.hub.current
-            streams.transcript.append("Z" * 600)
-            rt.bus.flush(2.0)
-
-            # Should fail once, retry, then succeed on second attempt.
-            assert agent2.wait_for_runs(2, timeout=5.0), (
-                f"expected 2 runs (1 fail + 1 retry), got {len(agent2.run_calls)}"
-            )
-            # Small delay to ensure file writes complete.
-            time.sleep(0.2)
-
-            # After retry, files should be written.
-            sid = rt.hub.current.session_id
-            notes_dir = rt.data_dir / "sessions" / sid / "notes"
-            content = (notes_dir / "knowledge.md").read_text("utf-8")
-            assert "Fake summary" in content
-        finally:
-            rt.stop()
-    finally:
-        import shutil
-
-        shutil.rmtree(d, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# 7. File headers
-# ---------------------------------------------------------------------------
-
-
-def test_file_headers(harness: tuple) -> None:
-    runtime, settings, agent = harness
+def test_session_start_creates_note_files(harness: tuple) -> None:
+    runtime, _settings, _agent = harness
     sid = _start_session(runtime)
 
     notes_dir = runtime.data_dir / "sessions" / sid / "notes"
     for fname in NOTE_FILES:
         path = notes_dir / fname
         assert path.exists(), f"{fname} should exist after session start"
-        content = path.read_text("utf-8")
-        # Header text should be present.
-        header = NOTES_HEADERS[fname]
-        assert header.strip() in content, (
-            f"header missing in {fname}: {content[:200]}"
-        )
+        assert NOTE_HEADERS[fname].strip() in path.read_text("utf-8")
+        # The instant plugin's files must not collide with these.
+        assert fname.startswith("note_")
 
 
 # ---------------------------------------------------------------------------
-# 8. File content after summary
+# 2. Manual action processes the *whole* lecture, not only the newest tail
 # ---------------------------------------------------------------------------
 
 
-def test_file_content_after_summary(harness: tuple) -> None:
-    runtime, settings, agent = harness
+def test_manual_action_uses_whole_lecture(harness: tuple) -> None:
+    runtime, _settings, agent = harness
     sid = _start_session(runtime)
 
     streams = runtime.hub.current
-    streams.transcript.append("今天讲同调论。" * 100)
-    runtime.bus.flush(2.0)
-    assert _wait_for_agent_runs(agent, 1)
+    streams.transcript.append("第一段：柯西积分公式。" * 10)
+    streams.transcript.append("最后一段：留数定理的应用。" * 10)
+    runtime.bus.flush(1.0)
+
+    result = runtime.ui.dispatch_action("summarize.full", {})
+    assert result.ok
+    assert "讲义" in result.message
+    assert agent.wait_for_runs(1)
+
+    prompt = agent.run_calls[0]["user_input"]
+    assert "柯西积分公式" in prompt, "whole lecture must be summarized, not just the tail"
+    assert "留数定理" in prompt
+    assert "第 1 / 1 批" in prompt
 
     notes_dir = runtime.data_dir / "sessions" / sid / "notes"
-    for fname in NOTE_FILES:
-        content = (notes_dir / fname).read_text("utf-8")
-        assert "Fake summary line for" in content, (
-            f"no fake content in {fname}: {content[:200]}"
+    assert _wait_for(
+        lambda: all(
+            "Fake summary" in (notes_dir / f).read_text("utf-8") for f in NOTE_FILES
         )
-
-
-# ---------------------------------------------------------------------------
-# 9. UI state
-# ---------------------------------------------------------------------------
-
-
-def test_ui_state(harness: tuple) -> None:
-    runtime, settings, agent = harness
-    _start_session(runtime)
-
-    snap = runtime.ui.snapshot()
-
-    # Tab.
-    assert "classroom" in snap["tabs"], f"tabs: {snap['tabs']}"
-    assert snap["tabs"]["classroom"] == "left"
-
-    # Toolbox item.
-    assert "summarize.notes" in snap["items"], f"items: {snap['items']}"
-    assert snap["items"]["summarize.notes"] == "classroom"
-
-    # Page.
-    assert "summarize:notes" in snap["pages"], f"pages: {snap['pages']}"
-    assert "课堂笔记" in snap["pages"]["summarize:notes"]
-
-    # Action.
-    assert "summarize.now" in snap["actions"]
-
-    # Toolbox item must render non-empty blocks.
-    state = runtime.ui.state()
-    toolbox_blocks = None
-    for tab in state.get("left_tabs", []):
-        if tab.get("id") == "classroom":
-            for item in tab.get("toolbox", []):
-                if item.get("id") == "summarize.notes":
-                    toolbox_blocks = item.get("blocks", [])
-    assert toolbox_blocks is not None, "toolbox item blocks missing"
-    assert len(toolbox_blocks) >= 1, f"toolbox blocks empty: {toolbox_blocks}"
-
-    # Open page and verify it renders tabs.
-    runtime.ui.open_page("summarize:notes")
-    state2 = runtime.ui.state()
-    page_content = state2.get("page_content", {}).get("summarize:notes", [])
-    has_tabs = any(b.get("type") == "tabs" for b in page_content)
-    assert has_tabs, f"page should contain tabs block: {page_content}"
-    has_button = any(
-        b.get("type") == "buttons"
-        and any(btn.get("action") == "summarize.now" for btn in b.get("buttons", []))
-        for b in page_content
     )
-    assert has_button, f"page should contain summarize.now button: {page_content}"
 
 
 # ---------------------------------------------------------------------------
-# 10. summarize.now action
+# 3. Long lectures are processed in sequential batches against one outline
 # ---------------------------------------------------------------------------
 
 
-def test_summarize_now_action(harness: tuple) -> None:
+def test_long_lecture_is_batched(harness: tuple) -> None:
     runtime, settings, agent = harness
-    _start_session(runtime)
+    settings.set("summarize.chunk_chars", 500)
+    sid = _start_session(runtime)
 
     streams = runtime.hub.current
-    # Append content below trigger threshold.
-    streams.transcript.append("短文本。" * 10)  # ~40 chars, < trigger
-    runtime.bus.flush(2.0)
+    for index in range(6):
+        streams.transcript.append(f"第{index}段内容。" * 40)
+    runtime.bus.flush(1.0)
 
-    # summarize.now should force a summary.
-    result = runtime.ui.dispatch_action("summarize.now", {})
+    result = runtime.ui.dispatch_action("summarize.full", {})
     assert result.ok
-    assert "总结" in result.message
+    assert agent.wait_for_runs(1), "the handout job never started"
+    plugin = runtime.services.get("summarize")
+    assert _wait_for(lambda: not plugin.busy, timeout=5.0), "job did not finish"
 
-    assert _wait_for_agent_runs(agent, 1), (
-        f"summarize.now should trigger agent; runs={len(agent.run_calls)}"
-    )
+    parts = len(agent.run_calls)
+    assert parts >= 3, f"expected >=3 batches, got {parts}"
+    assert all(f"第 {i + 1} / {parts} 批" in call["user_input"] for i, call in enumerate(agent.run_calls))
+    assert "最后一批的额外要求" in agent.run_calls[-1]["user_input"]
+    assert "最后一批的额外要求" not in agent.run_calls[0]["user_input"]
+
+    # Every batch writes into the same three files (one coherent handout).
+    note_paths = set()
+    for session in agent.sessions.values():
+        note_paths.add(tuple(sorted(session.files.items())))
+    assert len(note_paths) == 1, "all batches must share the same note files"
+
+
+def test_chunk_blocks_offsets() -> None:
+    blocks = ["a" * 600, "b" * 600, "c" * 600]
+    chunks = _chunk_blocks(blocks, 1000)
+    assert len(chunks) == 3
+    assert [start for _blocks, start, _end in chunks] == [0, 602, 1204]
+    assert [end for _blocks, _start, end in chunks][-1] == 1806
 
 
 # ---------------------------------------------------------------------------
-# 11. summarize.now with empty streams
+# 4. Auto run when the session stops
 # ---------------------------------------------------------------------------
 
 
-def test_summarize_now_empty(harness: tuple) -> None:
-    runtime, settings, agent = harness
+def test_auto_on_stop(harness: tuple) -> None:
+    runtime, _settings, agent = harness
     _start_session(runtime)
 
-    # No content appended – summarize.now should return gracefully.
-    result = runtime.ui.dispatch_action("summarize.now", {})
-    assert result.ok
-    assert "暂无" in result.message
+    runtime.hub.current.transcript.append("课后自动整理。" * 20)
+    runtime.bus.flush(1.0)
 
-    # No agent run should have happened.
+    runtime.hub.end_session("test")
+    runtime.bus.flush(1.0)
+
+    assert agent.wait_for_runs(1), "session stop should trigger the handout"
+
+
+def test_auto_on_stop_disabled(harness: tuple) -> None:
+    runtime, settings, agent = harness
+    settings.set("summarize.auto_on_stop", False)
+    _start_session(runtime)
+
+    runtime.hub.current.transcript.append("不应自动整理。" * 20)
+    runtime.bus.flush(1.0)
+    runtime.hub.end_session("test")
+    runtime.bus.flush(1.0)
+    time.sleep(0.3)
+
     assert len(agent.run_calls) == 0
 
 
 # ---------------------------------------------------------------------------
-# 12. Audio trigger with insufficient text (min_chars guard)
+# 5. Empty lecture
 # ---------------------------------------------------------------------------
 
 
-def test_audio_trigger_insufficient_text(harness: tuple) -> None:
-    runtime, settings, agent = harness
+def test_empty_action(harness: tuple) -> None:
+    runtime, _settings, agent = harness
     _start_session(runtime)
 
-    streams = runtime.hub.current
+    result = runtime.ui.dispatch_action("summarize.full", {})
+    assert result.ok
+    assert "暂无" in result.message
+    assert len(agent.run_calls) == 0
 
-    # Very little text (< min_chars=80).
-    streams.transcript.append("Hi.")
-    runtime.bus.flush(0.5)
 
-    # Plenty of audio (>= 120s).
-    pcm = b"\x00" * (16000 * 2 * 120)
-    streams.audio.append(pcm)
-    runtime.bus.flush(2.0)
+# ---------------------------------------------------------------------------
+# 6. Concurrency guard
+# ---------------------------------------------------------------------------
 
-    # Wait a bit – summary should NOT trigger.
-    time.sleep(0.5)
+
+def test_busy_rejects_second_run(tmp_path: Path) -> None:
+    agent = FakeAgentService(block=True)
+    runtime = _build(tmp_path, agent)
+    try:
+        _start_session(runtime)
+        runtime.hub.current.transcript.append("并发测试。" * 20)
+        runtime.bus.flush(1.0)
+
+        first = runtime.ui.dispatch_action("summarize.full", {})
+        assert first.ok
+        assert "开始" in first.message
+
+        second = runtime.ui.dispatch_action("summarize.full", {})
+        assert second.ok
+        assert "运行中" in second.message
+
+        agent.release()
+        assert agent.wait_for_runs(1)
+    finally:
+        runtime.stop()
+
+
+# ---------------------------------------------------------------------------
+# 7. Failure surfaces as an error event
+# ---------------------------------------------------------------------------
+
+
+def test_failure_emits_error(tmp_path: Path) -> None:
+    agent = FakeAgentService(fail_runs=100)
+    runtime = _build(tmp_path, agent)
+    errors: list[Any] = []
+    try:
+        runtime.bus.on("summarize.error", errors.append)
+        _start_session(runtime)
+        runtime.hub.current.transcript.append("失败路径。" * 20)
+        runtime.bus.flush(1.0)
+
+        assert runtime.ui.dispatch_action("summarize.full", {}).ok
+        assert agent.wait_for_runs(1)
+        assert _wait_for(lambda: bool(errors), timeout=3.0), "summarize.error not emitted"
+    finally:
+        runtime.stop()
+
+
+# ---------------------------------------------------------------------------
+# 8. Prompts: structured outline, no timestamps, no compression
+# ---------------------------------------------------------------------------
+
+
+def test_prompts_require_structure_and_keep_detail(harness: tuple) -> None:
+    runtime, _settings, agent = harness
+    _start_session(runtime)
+    runtime.hub.current.transcript.append("提示词检查。" * 50)
     runtime.bus.flush(1.0)
 
-    assert len(agent.run_calls) == 0, (
-        "summary should NOT trigger with insufficient text"
+    runtime.ui.dispatch_action("summarize.full", {})
+    assert agent.wait_for_runs(1)
+
+    session_prompt = agent.create_calls[0]
+    assert "write" in session_prompt["tools"]
+    assert session_prompt["max_tool_output"] == 24000
+
+    prompt = agent.run_calls[0]["user_input"]
+    assert "禁止写时间戳" in prompt or "不写时间戳" in prompt
+    assert "大纲" in prompt
+    assert "压缩" in prompt
+    # Input blocks must not be timestamped logs.
+    assert not any(
+        line.startswith("[00:") for line in prompt.splitlines()
+    ), "stream timestamps leaked into the prompt"
+
+
+def test_system_prompt_rewrite_rules(harness: tuple) -> None:
+    _runtime, settings, _agent = harness
+    system_prompt = settings.get("summarize.system_prompt")
+    assert "write" in system_prompt
+    assert "大纲" in system_prompt
+    assert "时间戳" in system_prompt
+    assert "禁止压缩" in system_prompt
+
+
+# ---------------------------------------------------------------------------
+# 9. UI surface
+# ---------------------------------------------------------------------------
+
+
+def test_ui_state(harness: tuple) -> None:
+    runtime, _settings, _agent = harness
+    _start_session(runtime)
+
+    snap = runtime.ui.snapshot()
+    assert snap["tabs"]["note"] == "right"
+    assert snap["items"]["summarize.notes"] == "note"
+    assert "summarize.full" in snap["actions"]
+    assert "summarize.read" in snap["actions"]
+    assert "reader:main" in snap["pages"]
+    # Notes are read through the shared reader page, not a plugin-owned page.
+    assert "summarize:notes" not in snap["pages"]
+
+    item = next(
+        item
+        for tab in runtime.ui.state()["right_tabs"]
+        for item in tab["toolbox"]
+        if item["id"] == "summarize.notes"
     )
+    assert item["blocks"], "note toolbox item rendered empty blocks"
+
+    result = runtime.ui.dispatch_action("summarize.read", {"doc": "knowledge"})
+    assert result.ok
+    assert result.open_page == "reader:main"
+    assert runtime.ui.state()["active_page"] == "reader:main"
+    reader_blocks = runtime.ui.state()["page_content"]["reader:main"]
+    tabs = next(block for block in reader_blocks if block["type"] == "tabs")
+    assert [tab["title"] for tab in tabs["tabs"]] == ["知识", "闲话与分享", "通知"]
 
 
 # ---------------------------------------------------------------------------
-# 13. Settings registration
+# 10. Settings + service registration
 # ---------------------------------------------------------------------------
 
 
-def test_settings_registered(harness: tuple) -> None:
-    runtime, settings, agent = harness
+def test_settings_and_service(harness: tuple) -> None:
+    runtime, settings, _agent = harness
 
-    expected_keys = [
-        "summarize.trigger_chars",
-        "summarize.trigger_audio_seconds",
-        "summarize.min_chars",
-        "summarize.max_steps",
-        "summarize.model",
-        "summarize.notes_dir",
-        "summarize.system_prompt",
-        "summarize.retry_max",
-    ]
-    for key in expected_keys:
-        val = settings.get(key)
-        assert val is not None, f"setting {key} not registered"
-    assert settings.get("summarize.trigger_chars") == 600
-    assert settings.get("summarize.trigger_audio_seconds") == 120
-    assert settings.get("summarize.min_chars") == 80
-    assert settings.get("summarize.max_steps") == 8
-    assert settings.get("summarize.retry_max") == 2
-    assert settings.get("summarize.notes_dir") == "notes"
-    assert settings.get("summarize.model") == ""
+    expected = {
+        "summarize.max_steps": 16,
+        "summarize.max_tool_output": 24000,
+        "summarize.chunk_chars": 6000,
+        "summarize.model": "",
+        "summarize.notes_dir": "notes",
+        "summarize.retry_max": 1,
+        "summarize.auto_on_stop": True,
+    }
+    for key, value in expected.items():
+        assert settings.get(key) == value, f"setting {key} wrong: {settings.get(key)!r}"
 
-
-# ---------------------------------------------------------------------------
-# 14. Service registration
-# ---------------------------------------------------------------------------
-
-
-def test_service_registration(harness: tuple) -> None:
-    runtime, settings, agent = harness
     assert "summarize" in runtime.services
-    svc = runtime.services.get("summarize")
-    assert svc is not None
 
 
 # ---------------------------------------------------------------------------
-# 15. No-change → retry with stricter prompt
+# 11. Block ordering
 # ---------------------------------------------------------------------------
 
 
-def test_no_change_retry(harness: tuple) -> None:
-    """First agent run is noop → plugin retries with stricter prompt."""
-    # Fresh runtime with agent that noops the first run.
-    import shutil
-    import tempfile
-
-    agent2 = FakeAgentService(noop_runs=1)
-    d = tempfile.mkdtemp()
-    try:
-        cfg2 = load_config(data_dir=d)
-        rt = build_runtime(
-            cfg2,
-            plugins=[
-                _StubSettingsPlugin(),
-                _StubAgentPlugin(agent2),
-                SummarizePlugin(),
-            ],
-        )
-        rt.start()
-        try:
-            _start_session(rt)
-            streams = rt.hub.current
-            streams.transcript.append("M" * 600)
-            rt.bus.flush(2.0)
-
-            # Should have 2 runs: main (noop) + retry (writes).
-            assert agent2.wait_for_runs(2, timeout=5.0), (
-                f"expected 2 runs (main+retry), got {len(agent2.run_calls)}"
-            )
-
-            # The retry should have RETRY_PROMPT content.
-            retry_input = agent2.run_calls[1]["user_input"]
-            assert "上一次运行" in retry_input or "注意" in retry_input
-
-            # Two create_session calls.
-            assert len(agent2.create_calls) == 2
-        finally:
-            rt.stop()
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# 16. Exhausted retries → error event + watermark advance
-# ---------------------------------------------------------------------------
-
-
-def test_exhausted_retries(harness: tuple) -> None:
-    """Agent always fails → error event emitted, watermarks advanced."""
-    import shutil
-    import tempfile
-
-    agent2 = FakeAgentService(fail_runs=100)  # always fails
-    d = tempfile.mkdtemp()
-    try:
-        cfg2 = load_config(data_dir=d)
-        rt = build_runtime(
-            cfg2,
-            plugins=[
-                _StubSettingsPlugin(),
-                _StubAgentPlugin(agent2),
-                SummarizePlugin(),
-            ],
-        )
-        rt.start()
-        error_events: list[Any] = []
-
-        def on_error(event: Any) -> None:
-            error_events.append(event)
-
-        rt.bus.on("summarize.error", on_error)
-
-        try:
-            sid = _start_session(rt)
-            streams = rt.hub.current
-            streams.transcript.append("N" * 600)
-            rt.bus.flush(2.0)
-
-            # Should eventually emit summarize.error.
-            deadline = time.monotonic() + 5.0
-            while not error_events and time.monotonic() < deadline:
-                rt.bus.flush(0.2)
-                time.sleep(0.1)
-
-            assert len(error_events) >= 1, "summarize.error was not emitted"
-
-            # Watermarks should have advanced (avoid infinite loop).
-            wm = rt.services.get("summarize")._watermarks.get(sid, {})
-            assert wm.get("transcript", 0) > 0, (
-                "watermarks should advance even on failure"
-            )
-        finally:
-            rt.stop()
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# 17. course_name falls back to streams.current.meta
-# ---------------------------------------------------------------------------
-
-
-def test_course_name_fallback(harness: tuple) -> None:
-    """When MetaRegistry has no 'course', use streams.current.meta."""
-    runtime, settings, agent = harness
-    _start_session(runtime, meta={"course": "代数拓扑"})
-
-    streams = runtime.hub.current
-    streams.transcript.append("C" * 600)
-    runtime.bus.flush(2.0)
-    assert agent.wait_for_runs(1, timeout=5.0)
-
-    user_prompt = agent.run_calls[0]["user_input"]
-    assert "代数拓扑" in user_prompt, (
-        f"course name should be in prompt: {user_prompt[:200]}"
+def test_collect_blocks_merges_chronologically() -> None:
+    transcript = SimpleNamespace(
+        items_since=lambda _n: [
+            SimpleNamespace(text="讲授一", start=0.0, source="stt"),
+            SimpleNamespace(text="讲授二", start=20.0, source="stt"),
+        ]
     )
+    visual = SimpleNamespace(
+        items_since=lambda _n: [
+            SimpleNamespace(text="板书一", start=10.0, source="vlm"),
+        ]
+    )
+    streams = SimpleNamespace(transcript=transcript, visual=visual)
+
+    blocks = _collect_blocks(streams)
+    assert blocks == ["【讲授】讲授一", "【板书】板书一", "【讲授】讲授二"]
+
+
+def test_collect_blocks_without_start_times() -> None:
+    transcript = SimpleNamespace(
+        items_since=lambda _n: [
+            SimpleNamespace(text="讲授一", start=None, source="stt"),
+        ]
+    )
+    visual = SimpleNamespace(
+        items_since=lambda _n: [
+            SimpleNamespace(text="板书一", start=None, source="vlm"),
+        ]
+    )
+    streams = SimpleNamespace(transcript=transcript, visual=visual)
+
+    assert _collect_blocks(streams) == ["【讲授】讲授一", "【板书】板书一"]

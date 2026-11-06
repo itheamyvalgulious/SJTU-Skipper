@@ -172,6 +172,7 @@ class AgentService:
         tools: list[str] | list[ToolSpec] | None = None,
         model: str | None = None,
         max_steps: int | None = None,
+        max_tool_output: int | None = None,
         extra_instructions: Iterable[str] = (),
         parent_id: str | None = None,
         meta: Mapping[str, Any] | None = None,
@@ -187,6 +188,8 @@ class AgentService:
                    ``None`` for all four defaults.
             model: LLM model; ``None`` uses the plugin default.
             max_steps: REPL iteration cap for this session.
+            max_tool_output: Per-tool-call output cap in characters; ``None``
+                uses the ``agent.max_tool_output`` setting.
             extra_instructions: Per-session lines appended after the system prompt.
             parent_id: Session to fork from (for create_subsession).
             meta: Arbitrary caller metadata.
@@ -223,8 +226,12 @@ class AgentService:
                 if max_steps is not None
                 else self._setting("agent.max_steps", self._default_max_steps)
             ),
-            max_tool_output=self._setting(
-                "agent.max_tool_output", self._default_max_tool_output
+            max_tool_output=(
+                max_tool_output
+                if max_tool_output is not None
+                else self._setting(
+                    "agent.max_tool_output", self._default_max_tool_output
+                )
             ),
             extra_instructions=tuple(extra_instructions),
             parent_id=parent_id,
@@ -312,15 +319,16 @@ class AgentService:
                     result[spec.name] = spec
         else:
             # List of tool name strings
+            requested = tuple(str(name) for name in tools)
             default_specs = _build_default_tools(
                 workspace=session.workspace,
                 session_getter=lambda: session,
                 meta_getter=self._ctx.meta.render,
                 max_tool_output=max_out,
+                names=requested,
             )
             default_map = {s.name: s for s in default_specs}
-            for name in tools:
-                name = str(name)
+            for name in requested:
                 if name in default_map:
                     result[name] = default_map[name]
                 elif name in self._custom_tools:
@@ -579,6 +587,16 @@ class AgentService:
                     name=tc_name,
                     result=result[:500],
                 )
+
+                # The notes reader renders files from disk; refresh the web UI
+                # as soon as a tool actually writes so new notes appear live.
+                if tc_name in {"write", "append", "replace"} and not str(
+                    result
+                ).startswith("错误"):
+                    try:
+                        self._ctx.ui.refresh(f"agent.file:{tc_name}")
+                    except Exception:  # noqa: BLE001 - refresh is best effort
+                        self._ctx.logger.debug("ui refresh after %s failed", tc_name)
         else:
             # max_steps exceeded
             self._emit(
@@ -651,6 +669,17 @@ class AgentService:
 
 _AGENT_SETTINGS_GROUP = "Agent"
 _AGENT_TAB_ID = "agent"
+
+# Session-name prefixes used by plugins that drive the agent internally; these
+# are implementation details and must not show up in the user's session list.
+_INTERNAL_SESSION_PREFIXES = ("summarize-", "instant-summarize-")
+
+
+def _is_internal_session(name: Any) -> bool:
+    """Return True for agent sessions owned by background note workers."""
+
+    text = str(name or "")
+    return text.startswith(_INTERNAL_SESSION_PREFIXES)
 _AGENT_PAGE_ID = "agent:chat"
 
 
@@ -770,26 +799,9 @@ class AgentPlugin(Plugin):
             ctx.events.define(evt_name, evt_desc)
 
         # --- UI ---
+        # The agent is a page, not a sidebar tab: open it from the menu bar or
+        # the command palette (Ctrl+P).
         ui = ctx.ui
-        ui.add_tab(
-            "right",
-            _AGENT_TAB_ID,
-            "Agent",
-            icon="✦",
-            order=600,
-            plugin_id=self.id,
-        )
-        self._tab_added = True
-
-        ui.add_toolbox_item(
-            _AGENT_TAB_ID,
-            "agent.sessions",
-            "会话列表",
-            description="查看和切换 Agent 会话",
-            order=0,
-            render=self._render_sessions,
-            plugin_id=self.id,
-        )
         ui.add_page(
             _AGENT_PAGE_ID,
             "Agent",
@@ -810,6 +822,19 @@ class AgentPlugin(Plugin):
             ui.register_action(action_id, handler, plugin_id=self.id)
             self._actions.append(action_id)
 
+        ui.register_command(
+            "agent.open",
+            "Agent",
+            subtitle="与课堂 Agent 对话、查看会话",
+            category="视图",
+            icon="✦",
+            order=20,
+            page_id=_AGENT_PAGE_ID,
+            keywords="agent chat session llm",
+            plugin_id=self.id,
+        )
+        self._command_added = True
+
         ctx.logger.info("agent plugin ready; %s sessions", 0)
 
     def teardown(self) -> None:
@@ -821,22 +846,18 @@ class AgentPlugin(Plugin):
                 except Exception:
                     pass
             self._actions.clear()
+            if getattr(self, "_command_added", False):
+                try:
+                    ctx.ui.unregister_command("agent.open")
+                except Exception:
+                    pass
+                self._command_added = False
             if self._page_added:
                 try:
                     ctx.ui.remove_page(_AGENT_PAGE_ID)
                 except Exception:
                     pass
                 self._page_added = False
-            try:
-                ctx.ui.remove_toolbox_item("agent.sessions")
-            except Exception:
-                pass
-            if self._tab_added:
-                try:
-                    ctx.ui.remove_tab(_AGENT_TAB_ID)
-                except Exception:
-                    pass
-                self._tab_added = False
         self.service = None
 
     # ------------------------------------------------------------------
@@ -851,7 +872,7 @@ class AgentPlugin(Plugin):
         return [
             s
             for s in service.list_sessions()
-            if not str(s.get("name", "")).startswith("summarize-")
+            if not _is_internal_session(s.get("name", ""))
         ]
 
     def _current_session(self, sessions: list[dict[str, Any]]) -> str:
@@ -864,7 +885,7 @@ class AgentPlugin(Plugin):
             (
                 s
                 for s in reversed(sessions)
-                if not str(s.get("name", "")).startswith("summarize-")
+                if not _is_internal_session(s.get("name", ""))
             ),
             sessions[-1] if sessions else None,
         )

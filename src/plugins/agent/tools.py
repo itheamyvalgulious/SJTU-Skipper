@@ -1,8 +1,9 @@
-"""Default agent tools: info, read, replace, append.
+"""Default agent tools: info, read, replace, append, write.
 
 Each tool is a ``ToolSpec`` with a JSON Schema parameter definition and a
 callable handler.  The default four tools are always available unless the
-caller provides an explicit *tools* argument to ``create_session``.
+caller provides an explicit *tools* argument to ``create_session``; ``write``
+(full-file overwrite) is opt-in and must be requested by name.
 """
 
 from __future__ import annotations
@@ -104,6 +105,22 @@ _APPEND_SCHEMA: dict[str, Any] = {
         "text": {
             "type": "string",
             "description": "要追加的文本内容（会自动在末尾添加换行符）",
+        },
+    },
+    "required": ["file", "text"],
+    "additionalProperties": False,
+}
+
+_WRITE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "file": {
+            "type": "string",
+            "description": "要整体写入的文件名（逻辑名）",
+        },
+        "text": {
+            "type": "string",
+            "description": "文件的完整新内容，将整体替换原有内容（不是追加）",
         },
     },
     "required": ["file", "text"],
@@ -241,6 +258,27 @@ def _build_default_tools(
                 description="在文件末尾追加一行新文本。自动确保末尾有换行。",
                 parameters=_APPEND_SCHEMA,
                 handler=tool_append,
+            )
+        )
+
+    if "write" in names:
+
+        def tool_write(file: str, text: str, **kwargs: Any) -> str:
+            if file not in workspace.names:
+                return f"错误：未注册的文件 {file!r}"
+            workspace.write(file, text)
+            line_count = text.count("\n") + (0 if text.endswith("\n") else 1)
+            return f"已整体写入 {file}（{len(text)} 字符，{line_count} 行）"
+
+        tools.append(
+            ToolSpec(
+                name="write",
+                description=(
+                    "用给定文本整体替换文件内容（覆盖写入，不是追加）。"
+                    "适合重排大纲、合并条目、整篇重写；需要保留的旧内容必须先 read。"
+                ),
+                parameters=_WRITE_SCHEMA,
+                handler=tool_write,
             )
         )
 

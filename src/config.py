@@ -13,6 +13,11 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data" / "agent"
 
+# Seconds Ctrl+C / SIGTERM may spend tearing the server down before the
+# remaining work is abandoned. Bounds both the HTTP connection drain and the
+# plugin teardown, so a wedged network call cannot make the process unkillable.
+SHUTDOWN_TIMEOUT = 5
+
 
 def _load_env() -> None:
     """Load project and submodule .env files without overriding real env."""
@@ -39,6 +44,7 @@ class AppConfig:
     enable_stt: bool = True
     enable_vlm: bool = True
     enable_summarize: bool = True
+    enable_instant_summarize: bool = True
     config_file: Path | None = None
 
     def resolve(self) -> "AppConfig":
@@ -96,6 +102,9 @@ def load_config(
         cfg.enable_vlm = _coerce_bool(section.get("enable_vlm"), cfg.enable_vlm)
         cfg.enable_summarize = _coerce_bool(
             section.get("enable_summarize"), cfg.enable_summarize
+        )
+        cfg.enable_instant_summarize = _coerce_bool(
+            section.get("enable_instant_summarize"), cfg.enable_instant_summarize
         )
         cfg.config_file = candidate
 

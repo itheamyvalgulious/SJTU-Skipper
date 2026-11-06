@@ -19,7 +19,9 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
 
     from .agent.plugin import AgentPlugin
     from .input.plugin import InputPlugin
+    from .instant_summarize.plugin import InstantSummarizePlugin
     from .llm_core.plugin import LLMPlugin
+    from .reader.plugin import ReaderPlugin
     from .settings.plugin import SettingsPlugin
     from .stt.plugin import STTPlugin
     from .summarize.plugin import SummarizePlugin
@@ -29,6 +31,7 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
         SettingsPlugin(),
         LLMPlugin(),
         AgentPlugin(),
+        ReaderPlugin(),
     ]
     if config.enable_input:
         plugins.append(InputPlugin())
@@ -38,4 +41,6 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
         plugins.append(VLMPlugin())
     if config.enable_summarize:
         plugins.append(SummarizePlugin())
+    if config.enable_instant_summarize:
+        plugins.append(InstantSummarizePlugin())
     return plugins

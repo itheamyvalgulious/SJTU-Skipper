@@ -1,10 +1,18 @@
-"""P4 Summarize plugin: incremental lecture note-taking via LLM agent."""
+"""Summarize plugin: non-instant, whole-lecture structured notes.
+
+Unlike the instant plugin, this one does not run during the lecture.  It runs
+once over the entire session (manually via the UI action, or automatically
+when the session stops) and rewrites the three note files into a complete,
+outline-structured handout.
+
+Long lectures are processed in sequential batches: every batch is merged into
+the same outline, so the notes stay coherent from the first batch to the last.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,71 +20,75 @@ from typing import Any
 from core.plugin import Plugin, PluginContext
 from plugins.settings.spec import SettingsSpec
 
-from .prompts import RETRY_PROMPT, SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from .prompts import (
+    FINAL_INSTRUCTION,
+    RETRY_PROMPT,
+    SYSTEM_PROMPT,
+    USER_PROMPT_TEMPLATE,
+)
 
 # ---------------------------------------------------------------------------
 # Fixed file headers (written once when a session starts)
 # ---------------------------------------------------------------------------
-NOTES_HEADERS: dict[str, str] = {
-    "knowledge.md": (
-        "# 课堂知识笔记\n\n"
-        "> 本文件记录课程知识性内容：定理、证明、概念、公式、例题等。\n"
-        "> 格式：Markdown，数学公式使用 $...$（行内）或 $$...$$（行间）。\n"
-        "> 每条记录附带时间戳。\n\n"
+NOTE_HEADERS: dict[str, str] = {
+    "note_knowledge.md": (
+        "# 课堂讲义：知识\n\n"
+        "> 由整堂课的完整记录整理而成：定义、定理、证明、例题、方法。\n"
+        "> 结构：按知识逻辑分章节组织；细节完整，不作压缩。\n"
+        "> 公式使用 $...$（行内）或 $$...$$（行间）。\n\n"
     ),
-    "gossip.md": (
-        "# 课堂闲话笔记\n\n"
-        "> 本文件记录与课程知识无关的内容：世界局势、生活趣事、对学生的期待、\n"
-        "> AI 对数学的冲击、个人经历分享等。\n"
-        "> 格式：Markdown，数学公式使用 $...$（行内）或 $$...$$（行间）。\n"
-        "> 每条记录附带时间戳。\n\n"
+    "note_gossip.md": (
+        "# 课堂讲义：闲话与分享\n\n"
+        "> 记录与课程知识无关的内容：时事、生活趣事、个人经历、对学生的期待等。\n"
+        "> 结构：按主题分章节组织；细节完整，不作压缩。\n"
+        "> 公式使用 $...$（行内）或 $$...$$（行间）。\n\n"
     ),
-    "notice.md": (
-        "# 课堂通知笔记\n\n"
-        "> 本文件记录作业、考试、考核要求、课程安排等通知。\n"
-        "> 格式：Markdown，数学公式使用 $...$（行内）或 $$...$$（行间）。\n"
-        "> 每条记录附带时间戳。\n\n"
+    "note_notice.md": (
+        "# 课堂讲义：通知\n\n"
+        "> 记录作业、考试、考核要求、课程安排等通知。\n"
+        "> 结构：按类型分章节组织；细节完整，不作压缩。\n"
+        "> 公式使用 $...$（行内）或 $$...$$（行间）。\n\n"
     ),
 }
 
-NOTE_FILES = ("knowledge.md", "gossip.md", "notice.md")
+NOTE_FILES = tuple(NOTE_HEADERS)
+
+_DOC_FILES = {
+    "knowledge": "note_knowledge.md",
+    "gossip": "note_gossip.md",
+    "notice": "note_notice.md",
+}
+
+_TOOLS = ["info", "read", "replace", "append", "write"]
 
 
 # ---------------------------------------------------------------------------
 # Plugin
 # ---------------------------------------------------------------------------
 class SummarizePlugin(Plugin):
-    """Incrementally summarize lecture streams into three structured notes."""
+    """One-shot whole-lecture summarizer producing structured handouts."""
 
     id = "summarize"
-    requires = ("settings", "llm-agent")
+    requires = ("settings", "llm-agent", "reader")
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
         self._settings_service = ctx.require("settings")
         self._agent_service = ctx.require("agent")
 
-        # --- settings -------------------------------------------------------
         for spec in _SETTING_SPECS:
             self._settings_service.register(spec)
 
-        # --- service --------------------------------------------------------
         ctx.register_service("summarize", self)
 
-        # --- state ----------------------------------------------------------
-        # Per-session watermarks: session_id -> {transcript:idx, visual:idx, audio:float}
-        self._watermarks: dict[str, dict[str, int | float]] = {}
-        self._retry_counts: dict[str, int] = {}
-
-        # Worker guard: only one summary runs at a time across all sessions.
-        self._worker_lock = threading.Lock()
-        self._worker_busy = False
+        self._job_lock = threading.Lock()
+        self._job_busy = False
         self._stop_event = threading.Event()
+        self._status = "尚未生成讲义"
 
-        # --- events ---------------------------------------------------------
-        ctx.events.define("summarize.triggered", "A summary run has started")
-        ctx.events.define("summarize.updated", "Summary completed, watermarks advanced")
-        ctx.events.define("summarize.error", "Summary failed after all retries")
+        ctx.events.define("summarize.started", "A whole-lecture summary started")
+        ctx.events.define("summarize.finished", "Whole-lecture summary finished")
+        ctx.events.define("summarize.error", "Whole-lecture summary failed")
 
         ctx.events.on(
             "session.started", self._on_session_started, plugin_id=self.id
@@ -84,11 +96,7 @@ class SummarizePlugin(Plugin):
         ctx.events.on(
             "session.stopped", self._on_session_stopped, plugin_id=self.id
         )
-        ctx.events.on(
-            "stream.appended", self._on_stream_appended, plugin_id=self.id
-        )
 
-        # --- UI -------------------------------------------------------------
         self._setup_ui()
 
     def teardown(self) -> None:
@@ -98,20 +106,12 @@ class SummarizePlugin(Plugin):
     # Settings
     # ------------------------------------------------------------------
     @property
-    def _trigger_chars(self) -> int:
-        return int(self._settings_service.get("summarize.trigger_chars", 600))
-
-    @property
-    def _trigger_audio_seconds(self) -> int:
-        return int(self._settings_service.get("summarize.trigger_audio_seconds", 120))
-
-    @property
-    def _min_chars(self) -> int:
-        return int(self._settings_service.get("summarize.min_chars", 80))
-
-    @property
     def _max_steps(self) -> int:
-        return int(self._settings_service.get("summarize.max_steps", 8))
+        return int(self._settings_service.get("summarize.max_steps", 16))
+
+    @property
+    def _max_tool_output(self) -> int:
+        return int(self._settings_service.get("summarize.max_tool_output", 24000))
 
     @property
     def _model(self) -> str:
@@ -123,11 +123,29 @@ class SummarizePlugin(Plugin):
 
     @property
     def _system_prompt(self) -> str:
-        return str(self._settings_service.get("summarize.system_prompt", SYSTEM_PROMPT) or SYSTEM_PROMPT)
+        return str(
+            self._settings_service.get("summarize.system_prompt", SYSTEM_PROMPT)
+            or SYSTEM_PROMPT
+        )
 
     @property
     def _retry_max(self) -> int:
-        return int(self._settings_service.get("summarize.retry_max", 2))
+        return int(self._settings_service.get("summarize.retry_max", 1))
+
+    @property
+    def _chunk_chars(self) -> int:
+        return max(200, int(self._settings_service.get("summarize.chunk_chars", 6000)))
+
+    @property
+    def _auto_on_stop(self) -> bool:
+        value = self._settings_service.get("summarize.auto_on_stop", True)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+    @property
+    def busy(self) -> bool:
+        return self._job_busy
 
     # ------------------------------------------------------------------
     # UI
@@ -135,115 +153,97 @@ class SummarizePlugin(Plugin):
     def _setup_ui(self) -> None:
         ui = self.ctx.ui
 
-        # Ensure left tab "classroom" exists.
-        if not ui.has_tab("classroom"):
-            ui.add_tab("left", "classroom", "课堂", icon="📖", order=10)
-
-        # Toolbox item for notes.
+        # Right sidebar: the shared "note" area, one item per notes plugin.
+        if not ui.has_tab("note"):
+            ui.add_tab("right", "note", "笔记", icon="📘", order=20)
         if not ui.has_toolbox_item("summarize.notes"):
             ui.add_toolbox_item(
-                "classroom",
+                "note",
                 "summarize.notes",
-                "课堂笔记",
-                description="查看课堂笔记",
-                order=20,
-                render=self._render_toolbox_notes,
+                "课堂讲义",
+                description="整堂课整理出的结构化讲义",
+                order=10,
+                render=self._render_note_item,
             )
 
-        # Notes page.
-        ui.add_page(
-            "summarize:notes",
-            "课堂笔记",
-            render=self._render_notes_page,
-            icon="📝",
-            order=30,
-        )
-
-        # Action: force-summarize now.
         ui.register_action(
-            "summarize.now", self._on_summarize_now, plugin_id=self.id
+            "summarize.full", self._on_summarize_full, plugin_id=self.id
+        )
+        ui.register_action(
+            "summarize.read", self._on_read, plugin_id=self.id
         )
 
-    def _render_toolbox_notes(self) -> list[dict[str, Any]]:
-        """Toolbox preview for the notes."""
+    # ------------------------------------------------------------------
+    # Note tab
+    # ------------------------------------------------------------------
+    _DOC_LABELS = {
+        "knowledge": "知识",
+        "gossip": "闲话与分享",
+        "notice": "通知",
+    }
+
+    def _docs(self) -> list[dict[str, str]]:
         sid = self.ctx.streams.current.session_id
-        note_paths = [
-            (fname, self._note_path(sid, fname))
-            for fname in NOTE_FILES
-        ]
-        existing = [
-            (fname, p)
-            for fname, p in note_paths
-            if p.exists() and p.stat().st_size > len(NOTES_HEADERS[fname].encode("utf-8"))
-        ]
-        lines: list[str] = []
-        if existing:
-            lines.append(f"已有 {len(existing)} 个笔记文件包含内容")
-        else:
-            lines.append("笔记文件尚未建立或为空（开始课堂后自动创建）")
         return [
-            {"type": "text", "text": "\n".join(lines)},
+            {
+                "key": key,
+                "label": label,
+                "path": str(self._note_path(sid, _DOC_FILES[key])),
+            }
+            for key, label in self._DOC_LABELS.items()
+        ]
+
+    def _render_note_item(self) -> list[dict[str, Any]]:
+        sid = self.ctx.streams.current.session_id
+        ready = sum(
+            1
+            for key in self._DOC_LABELS
+            if _has_content(self._note_path(sid, _DOC_FILES[key]), NOTE_HEADERS[_DOC_FILES[key]])
+        )
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": self._status if ready == 0 else f"已生成 {ready}/{len(self._DOC_LABELS)} 篇",
+            },
             {
                 "type": "buttons",
                 "buttons": [
                     {
-                        "label": "📝 打开笔记页",
-                        "action": "ui.open_page",
-                        "value": {"page_id": "summarize:notes"},
-                    },
-                    {"label": "⚡ 立即总结", "action": "summarize.now", "style": "primary"},
+                        "label": label,
+                        "action": "summarize.read",
+                        "value": {"doc": key},
+                        "class": "btn btn-sm",
+                    }
+                    for key, label in self._DOC_LABELS.items()
                 ],
             },
-        ]
-
-    def _render_notes_page(self) -> list[dict[str, Any]]:
-        """Render the notes page with three tabs (knowledge / gossip / notice)."""
-        tab_labels = [
-            ("knowledge.md", "知识"),
-            ("gossip.md", "生活趣事"),
-            ("notice.md", "通知"),
-        ]
-        tabs: list[dict[str, Any]] = []
-        for filename, title in tab_labels:
-            text = self._read_note_file(filename)
-            if text is None:
-                blocks: list[dict[str, Any]] = [
-                    {"type": "text", "text": "（会话未开始）"}
-                ]
-            elif text == "":
-                blocks = [{"type": "text", "text": "（暂无内容）"}]
-            else:
-                blocks = [
-                    {"type": "markdown", "text": chunk}
-                    for chunk in _split_markdown(text)
-                ]
-            tabs.append({"title": title, "blocks": blocks})
-
-        return [
             {
                 "type": "buttons",
                 "buttons": [
                     {
-                        "label": "立即总结",
-                        "action": "summarize.now",
-                        "style": "primary",
+                        "label": "生成完整讲义",
+                        "action": "summarize.full",
+                        "class": "btn btn-sm btn-primary",
                     }
                 ],
             },
-            {"type": "tabs", "id": "summarize.notes", "tabs": tabs},
         ]
+        return blocks
 
-    def _read_note_file(self, filename: str) -> str | None:
-        """Return the current session's note file content, or None."""
-        sid = self.ctx.streams.current.session_id
-        path = self._note_path(sid, filename)
-        if path.exists():
-            return path.read_text("utf-8")
-        # File hasn't been created yet – return empty string so UI shows placeholder.
-        notes_dir = self.ctx.data_dir / "sessions" / sid / self._notes_dir_name
-        if notes_dir.exists():
-            return ""
-        return None
+    def _on_read(self, payload: dict[str, Any]) -> dict[str, Any]:
+        doc = str(payload.get("doc", "knowledge") or "knowledge")
+        if doc not in _DOC_FILES:
+            doc = "knowledge"
+        reader = self.ctx.require("reader")
+        reader.show(
+            title=f"课堂讲义 · {self._course_name()}",
+            docs=self._docs(),
+            active=doc,
+        )
+        return {"ok": True, "open_page": "reader:main"}
+
+    def _course_name(self) -> str:
+        return _course_name(self.ctx.streams.current)
 
     def _note_path(self, session_id: str, filename: str) -> Path:
         return (
@@ -254,25 +254,17 @@ class SummarizePlugin(Plugin):
             / filename
         )
 
-    def _on_summarize_now(self, _payload: dict[str, Any]) -> dict[str, Any]:
-        """Action handler: force a summary for the current session."""
+    # ------------------------------------------------------------------
+    # Action
+    # ------------------------------------------------------------------
+    def _on_summarize_full(self, _payload: dict[str, Any]) -> dict[str, Any]:
         sid = self.ctx.streams.current.session_id
-        streams = self.ctx.streams.current
-
-        wm = self._ensure_watermarks(sid)
-        new_chars = (
-            streams.transcript.char_count_since(int(wm["transcript"]))
-            + streams.visual.char_count_since(int(wm["visual"]))
-        )
-        if new_chars == 0 and streams.audio.duration <= float(wm["audio"]):
-            return {"ok": True, "message": "暂无新内容需要总结", "refresh": False}
-
-        triggered = self._maybe_trigger(sid, force=True)
-        return {
-            "ok": True,
-            "message": "总结已开始" if triggered else "总结已在运行中",
-            "refresh": True,
-        }
+        started = self.start(sid)
+        if started:
+            return {"ok": True, "message": "完整讲义生成已开始", "refresh": True}
+        if self.busy:
+            return {"ok": True, "message": "讲义生成已在运行中", "refresh": False}
+        return {"ok": True, "message": "暂无内容可整理", "refresh": False}
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -282,329 +274,262 @@ class SummarizePlugin(Plugin):
         if not sid:
             return
         self._create_note_files(sid)
-        # Reset watermarks for this session.
-        self._watermarks[sid] = {
-            "transcript": 0,
-            "visual": 0,
-            "audio": 0.0,
-        }
-        self._retry_counts.pop(sid, None)
+        self._status = "课堂进行中，讲义将在课后生成"
 
     def _on_session_stopped(self, event: Any) -> None:
         sid = event.get("session_id", "")
         if not sid:
             return
-        # Flush any remaining content.
-        self._maybe_trigger(sid, force=True)
+        if self._auto_on_stop:
+            self.start(sid)
 
     def _create_note_files(self, session_id: str) -> None:
         notes_dir = (
-            self.ctx.data_dir
-            / "sessions"
-            / session_id
-            / self._notes_dir_name
+            self.ctx.data_dir / "sessions" / session_id / self._notes_dir_name
         )
         notes_dir.mkdir(parents=True, exist_ok=True)
         for filename in NOTE_FILES:
             path = notes_dir / filename
             if not path.exists():
-                path.write_text(NOTES_HEADERS[filename], "utf-8")
+                path.write_text(NOTE_HEADERS[filename], "utf-8")
 
     # ------------------------------------------------------------------
-    # Trigger logic
+    # Job control
     # ------------------------------------------------------------------
-    def _ensure_watermarks(self, session_id: str) -> dict[str, int | float]:
-        if session_id not in self._watermarks:
-            self._watermarks[session_id] = {
-                "transcript": 0,
-                "visual": 0,
-                "audio": 0.0,
-            }
-        return self._watermarks[session_id]
-
-    def _on_stream_appended(self, event: Any) -> None:
-        sid = event.get("session_id", "")
-        if not sid:
-            return
-        # Ensure we have watermarks for this session.
-        self._ensure_watermarks(sid)
-        # Check trigger (non-force: respect thresholds).
-        self._maybe_trigger(sid, force=False)
-
-    def _maybe_trigger(self, session_id: str, *, force: bool = False) -> bool:
-        """Check trigger conditions and start worker if possible.
-
-        Returns True if a summary was started (or already running).
-        """
-        wm = self._ensure_watermarks(session_id)
+    def start(self, session_id: str) -> bool:
+        """Start a whole-lecture summary job. Returns False when not started."""
+        if not session_id:
+            return False
         streams = self.ctx.streams.current
         if streams.session_id != session_id:
-            # Session has changed; skip (the old session is no longer current).
+            return False
+        blocks = _collect_blocks(streams)
+        if not blocks:
+            return False
+        if self._stop_event.is_set():
             return False
 
-        # Calculate deltas since last watermark.
-        new_transcript_chars = streams.transcript.char_count_since(
-            int(wm["transcript"])
-        )
-        new_visual_chars = streams.visual.char_count_since(int(wm["visual"]))
-        total_new_chars = new_transcript_chars + new_visual_chars
-        new_audio = streams.audio.duration - float(wm["audio"])
-
-        # Check trigger conditions.
-        should_trigger = force
-        if not should_trigger:
-            if total_new_chars >= self._trigger_chars:
-                should_trigger = True
-            elif (
-                new_audio >= self._trigger_audio_seconds
-                and total_new_chars >= self._min_chars
-            ):
-                should_trigger = True
-
-        if not should_trigger:
-            return False
-
-        # If worker is already busy, the pending content will be picked up
-        # when it finishes (watermarks haven't moved yet).
-        if self._worker_busy:
-            return False
-
-        # Snapshot current positions *before* acquiring lock.
-        target_wm = {
-            "transcript": streams.transcript.snapshot_index(),
-            "visual": streams.visual.snapshot_index(),
-            "audio": streams.audio.duration,
-        }
-        # Don't run if nothing new (can happen with force + empty streams).
-        if not force and (
-            target_wm["transcript"] <= int(wm["transcript"])
-            and target_wm["visual"] <= int(wm["visual"])
-            and target_wm["audio"] <= float(wm["audio"])
-        ):
-            return False
-
-        if not self._worker_lock.acquire(blocking=False):
-            return False
-        try:
-            if self._worker_busy:
+        with self._job_lock:
+            if self._job_busy:
                 return False
-            self._worker_busy = True
-        finally:
-            self._worker_lock.release()
+            self._job_busy = True
 
-        # Reset retry count for fresh trigger.
-        self._retry_counts[session_id] = 0
+        # Snapshot everything the job needs now: the current stream may be
+        # replaced by a new session as soon as the old one stops.
+        course_name = _course_name(streams)
+        duration = streams.audio.duration
 
-        base_wm = dict(wm)  # copy current watermarks as processing baseline
-
-        t = threading.Thread(
-            target=self._run_summary,
-            args=(session_id, base_wm, target_wm, force),
+        self._status = "正在生成完整讲义…"
+        thread = threading.Thread(
+            target=self._run_full,
+            args=(session_id, blocks, course_name, duration),
             name=f"summarize-{session_id[:8]}",
             daemon=True,
         )
-        t.start()
+        thread.start()
         return True
 
-    # ------------------------------------------------------------------
-    # Worker
-    # ------------------------------------------------------------------
-    def _run_summary(
+    def _run_full(
         self,
         session_id: str,
-        base_wm: dict[str, int | float],
-        target_wm: dict[str, int | float],
-        force: bool,
+        blocks: list[str],
+        course_name: str,
+        duration: float,
     ) -> None:
-        self.ctx.events.emit("summarize.triggered", session_id=session_id)
-
-        max_attempts = self._retry_max + 1  # 1 initial + N retries
+        self.ctx.events.emit("summarize.started", session_id=session_id)
+        self.ctx.ui.refresh("summarize.started")
         success = False
-
-        for attempt in range(max_attempts):
-            try:
-                self._run_summary_inner(session_id, base_wm, force)
-                success = True
-                break
-            except Exception:
-                if attempt < max_attempts - 1:
-                    delay = min(2**attempt, 30)
-                    self.ctx.logger.warning(
-                        "summarize attempt %d/%d failed for session %s, "
-                        "retry in %.1fs",
-                        attempt + 1,
-                        max_attempts,
-                        session_id,
-                        delay,
-                    )
-                    time.sleep(delay)
-                else:
-                    self.ctx.logger.error(
-                        "summarize failed after %d attempts for session %s",
-                        max_attempts,
-                        session_id,
-                    )
-
-        with self._worker_lock:
-            self._worker_busy = False
+        try:
+            passes = self._run_passes(session_id, blocks, course_name, duration)
+            success = True
+            self._status = f"讲义已生成（{passes} 批材料）"
+        except Exception:
+            self.ctx.logger.exception(
+                "whole-lecture summarize failed for session %s", session_id
+            )
+            self._status = "讲义生成失败"
+        finally:
+            with self._job_lock:
+                self._job_busy = False
 
         if success:
-            self._watermarks[session_id] = target_wm
-            self._retry_counts.pop(session_id, None)
-            self.ctx.events.emit("summarize.updated", session_id=session_id)
-            self.ctx.ui.refresh("summarize.updated")
+            self.ctx.events.emit("summarize.finished", session_id=session_id)
+            self.ctx.ui.refresh("summarize.finished")
         else:
             self.ctx.events.emit("summarize.error", session_id=session_id)
-            # Advance watermarks to avoid infinite loops.
-            self._watermarks[session_id] = target_wm
-            self._retry_counts.pop(session_id, None)
+            self.ctx.ui.refresh("summarize.error")
 
-        # Check if more content arrived while we were working.
-        if not self._stop_event.is_set():
-            self._maybe_trigger(session_id, force=False)
-
-    def _run_summary_inner(
+    def _run_passes(
         self,
         session_id: str,
-        base_wm: dict[str, int | float],
-        force: bool,
-    ) -> None:
-        """Single summary attempt (may be retried on failure)."""
-        streams = self.ctx.streams.current
-        if streams.session_id != session_id:
-            raise RuntimeError("Session changed during summary")
-
-        # Gather new content.
-        transcript_items = streams.transcript.items_since(
-            int(base_wm["transcript"])
-        )
-        visual_items = streams.visual.items_since(int(base_wm["visual"]))
-        audio_start = float(base_wm["audio"])
-        audio_end = streams.audio.duration
-
-        transcript_text = _format_stream_items(transcript_items)
-        visual_text = _format_stream_items(visual_items)
-
-        time_start = _format_seconds(audio_start)
-        time_end = _format_seconds(audio_end)
-
-        if not transcript_text.strip() and not visual_text.strip():
-            # Nothing to summarize (even a manual/stop flush).  Do not ask the
-            # model to write placeholder noise into the note files.
-            return
-
-        # Build user prompt.
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        course_name = (
-            self.ctx.meta.snapshot().get("course")
-            or self.ctx.streams.current.meta.get("course")
-            or "未知课程"
-        )
-        user_prompt = USER_PROMPT_TEMPLATE.format(
-            session_id=session_id,
-            date=now,
-            course_name=course_name,
-            time_start=time_start,
-            time_end=time_end,
-            transcript_text=transcript_text,
-            visual_text=visual_text,
-        )
-
-        # Create notes directory (in case session started before we created files).
+        blocks: list[str],
+        course_name: str,
+        duration: float,
+    ) -> int:
         notes_dir = (
-            self.ctx.data_dir
-            / "sessions"
-            / session_id
-            / self._notes_dir_name
+            self.ctx.data_dir / "sessions" / session_id / self._notes_dir_name
         )
         notes_dir.mkdir(parents=True, exist_ok=True)
 
-        # Ensure files exist.
         file_paths: dict[str, str] = {}
         for filename in NOTE_FILES:
             path = notes_dir / filename
             if not path.exists():
-                path.write_text(NOTES_HEADERS[filename], "utf-8")
+                path.write_text(NOTE_HEADERS[filename], "utf-8")
             file_paths[filename] = str(path)
 
-        # Snapshot file contents before run.
+        chunks = _chunk_blocks(blocks, self._chunk_chars)
+        total = len(chunks)
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        time_start = _format_seconds(0.0)
+        time_end = _format_seconds(duration)
+
+        for index, (chunk, chunk_start, chunk_end) in enumerate(chunks, start=1):
+            prompt = USER_PROMPT_TEMPLATE.format(
+                course_name=course_name,
+                date=now,
+                session_id=session_id,
+                time_start=time_start,
+                time_end=time_end,
+                part=index,
+                parts=total,
+                part_range=f"第 {chunk_start + 1}–{chunk_end} 字",
+                content="\n\n".join(chunk),
+                final_instruction=FINAL_INSTRUCTION if index == total else "",
+            )
+            self._run_pass(session_id, index, file_paths, prompt)
+
+        return total
+
+    def _run_pass(
+        self,
+        session_id: str,
+        index: int,
+        file_paths: dict[str, str],
+        prompt: str,
+    ) -> None:
+        """Run one batch (with one retry when nothing was written)."""
+        agent = self._agent_service
+        model = self._model or None
         hashes_before = {
             filename: _file_md5(path) for filename, path in file_paths.items()
         }
 
-        # Create agent session and run.
-        agent = self._agent_service
-        model = self._model or None
         session = agent.create_session(
-            name=f"summarize-{session_id[:12]}",
+            name=f"summarize-{session_id[:12]}-{index}",
             system_prompt=self._system_prompt,
             files=file_paths,
-            tools=["info", "read", "replace", "append"],
+            tools=list(_TOOLS),
             model=model,
             max_steps=self._max_steps,
+            max_tool_output=self._max_tool_output,
         )
-        agent.run(session.id, user_prompt)
+        agent.run(session.id, prompt)
 
-        # Check if files changed.
         hashes_after = {
             filename: _file_md5(path) for filename, path in file_paths.items()
         }
         if hashes_after == hashes_before:
-            # Retry with stricter prompt.
             retry_session = agent.create_session(
-                name=f"summarize-retry-{session_id[:12]}",
+                name=f"summarize-retry-{session_id[:12]}-{index}",
                 system_prompt=self._system_prompt,
                 files=file_paths,
-                tools=["info", "read", "replace", "append"],
+                tools=list(_TOOLS),
                 model=model,
                 max_steps=self._max_steps,
+                max_tool_output=self._max_tool_output,
             )
             agent.run(retry_session.id, RETRY_PROMPT)
-
-
-
-def _split_markdown(text: str, max_chars: int = 4000) -> list[str]:
-    """Split a note into paragraph-aligned chunks for KaTeX rendering."""
-
-    paragraphs = text.split("\n\n")
-    chunks: list[str] = []
-    current: list[str] = []
-    size = 0
-    in_display = False
-    in_fence = False
-    for para in paragraphs:
-        if current and size >= max_chars and not in_display and not in_fence:
-            chunks.append("\n\n".join(current))
-            current = []
-            size = 0
-        current.append(para)
-        size += len(para) + 2
-        if para.count("$$") % 2:
-            in_display = not in_display
-        if para.count("```") % 2:
-            in_fence = not in_fence
-    if current:
-        chunks.append("\n\n".join(current))
-    return chunks or [text]
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _format_stream_items(items: list[Any]) -> str:
-    """Format a list of TextItems into a readable text block with timestamps."""
-    if not items:
-        return "（无内容）"
-    lines: list[str] = []
-    for item in items:
-        ts = ""
-        if item.start is not None:
-            ts = _format_seconds(item.start)
-            if item.end is not None:
-                ts += f" - {_format_seconds(item.end)}"
-        prefix = f"[{ts}] " if ts else ""
-        lines.append(f"{prefix}{item.text}")
-    return "\n\n".join(lines)
+def _course_name(streams: Any) -> str:
+    meta = getattr(streams, "meta", {}) or {}
+    name: Any = meta.get("course_name") or meta.get("course")
+    if isinstance(name, dict):
+        name = name.get("course_name") or name.get("name") or ""
+    text = str(name or "").strip()
+    return text or "未知课程"
+
+
+def _item_start(item: Any) -> float | None:
+    value = getattr(item, "start", None)
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_blocks(streams: Any) -> list[str]:
+    """Flatten transcript + visual streams into tagged text blocks in order.
+
+    Both streams are merged chronologically only when every item carries a
+    usable start time; otherwise the transcript is kept first and the visual
+    stream follows, each in arrival order.
+    """
+    transcript = [
+        item
+        for item in streams.transcript.items_since(0)
+        if str(getattr(item, "text", "") or "").strip()
+    ]
+    visual = [
+        item
+        for item in streams.visual.items_since(0)
+        if str(getattr(item, "text", "") or "").strip()
+    ]
+
+    tagged: list[tuple[float | None, int, str]] = []
+    for order, item in enumerate(transcript):
+        tagged.append(
+            (_item_start(item), order, f"【讲授】{str(item.text).strip()}")
+        )
+    offset = len(transcript)
+    for order, item in enumerate(visual):
+        tagged.append(
+            (_item_start(item), offset + order, f"【板书】{str(item.text).strip()}")
+        )
+
+    if tagged and all(entry[0] is not None for entry in tagged):
+        tagged.sort(key=lambda entry: (entry[0], entry[1]))
+    return [entry[2] for entry in tagged]
+
+
+def _chunk_blocks(blocks: list[str], limit: int) -> list[tuple[list[str], int, int]]:
+    """Pack blocks into batches of at most *limit* characters.
+
+    Returns ``(blocks, start_char, end_char)`` triples, where the offsets are
+    cumulative character positions inside the full lecture record.
+    """
+    chunks: list[tuple[list[str], int, int]] = []
+    current: list[str] = []
+    size = 0
+    cursor = 0
+    chunk_start = 0
+    for block in blocks:
+        if current and size + len(block) > limit:
+            chunks.append((current, chunk_start, cursor))
+            current = []
+            size = 0
+            chunk_start = cursor
+        current.append(block)
+        size += len(block) + 2
+        cursor += len(block) + 2
+    if current:
+        chunks.append((current, chunk_start, cursor))
+    return chunks or [([], 0, 0)]
+
+
+def _has_content(path: Path, header: str) -> bool:
+    """True when the note file exists and holds more than its fixed header."""
+    try:
+        return path.stat().st_size > len(header.encode("utf-8"))
+    except OSError:
+        return False
+
+
 
 
 def _format_seconds(seconds: float) -> str:
@@ -629,36 +554,28 @@ def _file_md5(path: str) -> str:
 # ---------------------------------------------------------------------------
 _SETTING_SPECS: list[SettingsSpec] = [
     SettingsSpec(
-        key="summarize.trigger_chars",
-        label="触发字符数",
-        type="int",
-        default=600,
-        group="Summarize",
-        description="新增文字达到此数量时触发总结",
-    ),
-    SettingsSpec(
-        key="summarize.trigger_audio_seconds",
-        label="触发音频秒数",
-        type="int",
-        default=120,
-        group="Summarize",
-        description="新增音频达到此时长且文字足够时触发",
-    ),
-    SettingsSpec(
-        key="summarize.min_chars",
-        label="最小字符数",
-        type="int",
-        default=80,
-        group="Summarize",
-        description="音频触发时至少需要的文字量",
-    ),
-    SettingsSpec(
         key="summarize.max_steps",
         label="最大步数",
         type="int",
-        default=8,
+        default=16,
         group="Summarize",
-        description="Agent 最大工具调用步数",
+        description="每批材料的 Agent 最大工具调用步数",
+    ),
+    SettingsSpec(
+        key="summarize.max_tool_output",
+        label="工具输出上限",
+        type="int",
+        default=24000,
+        group="Summarize",
+        description="单次 read 输出上限（字符），需要足够大才能整篇重写",
+    ),
+    SettingsSpec(
+        key="summarize.chunk_chars",
+        label="分批字符数",
+        type="int",
+        default=6000,
+        group="Summarize",
+        description="每批材料的目标字符数，过大可能超出上下文",
     ),
     SettingsSpec(
         key="summarize.model",
@@ -688,8 +605,16 @@ _SETTING_SPECS: list[SettingsSpec] = [
         key="summarize.retry_max",
         label="最大重试次数",
         type="int",
-        default=2,
+        default=1,
         group="Summarize",
-        description="总结失败后最大重试次数",
+        description="某批材料未写入任何内容时的重试次数",
+    ),
+    SettingsSpec(
+        key="summarize.auto_on_stop",
+        label="课后自动生成",
+        type="bool",
+        default=True,
+        group="Summarize",
+        description="会话结束时自动生成完整讲义",
     ),
 ]

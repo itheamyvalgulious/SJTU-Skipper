@@ -362,6 +362,43 @@ class TestToolSpec:
         assert "已追加" in result
         assert f.read_text(encoding="utf-8") == "line1\nline2\n"
 
+    def test_write_tool_is_opt_in(self, tmp_path: Path):
+        f = tmp_path / "notes.md"
+        f.write_text("old\n", encoding="utf-8")
+        ws = FileWorkspace({"notes.md": f})
+        sess = AgentSession(workspace=ws)
+
+        default_tools = _build_default_tools(
+            workspace=ws,
+            session_getter=lambda: sess,
+            meta_getter=lambda: "",
+        )
+        assert "write" not in {t.name for t in default_tools}
+
+        tools = _build_default_tools(
+            workspace=ws,
+            session_getter=lambda: sess,
+            meta_getter=lambda: "",
+            names=("info", "read", "replace", "append", "write"),
+        )
+        write_tool = next(t for t in tools if t.name == "write")
+        result = write_tool.handler(file="notes.md", text="# 新大纲\n\n## 第一节\n")
+        assert "已整体写入" in result
+        assert f.read_text(encoding="utf-8") == "# 新大纲\n\n## 第一节\n"
+
+    def test_write_tool_unregistered_file(self, tmp_path: Path):
+        ws = FileWorkspace({"notes.md": tmp_path / "notes.md"})
+        sess = AgentSession(workspace=ws)
+        tools = _build_default_tools(
+            workspace=ws,
+            session_getter=lambda: sess,
+            meta_getter=lambda: "",
+            names=("write",),
+        )
+        write_tool = next(t for t in tools if t.name == "write")
+        result = write_tool.handler(file="secret.txt", text="x")
+        assert "未注册" in result
+
 
 # ===================================================================
 # AgentSession tests
@@ -434,6 +471,19 @@ class TestAgentService:
 
             session = agent.create_session("test", tools=["info", "read"])
             assert set(session.tools) == {"info", "read", "my_tool"}
+        finally:
+            runtime.stop()
+
+    def test_create_session_write_tool_and_output_cap(self, tmp_path: Path):
+        runtime, agent, llm, settings = _make_agent_runtime(tmp_path)
+        try:
+            session = agent.create_session(
+                "test",
+                tools=["info", "read", "replace", "append", "write"],
+                max_tool_output=24000,
+            )
+            assert "write" in session.tools
+            assert session.max_tool_output == 24000
         finally:
             runtime.stop()
 
@@ -530,6 +580,29 @@ class TestAgentService:
             content = f.read_text(encoding="utf-8")
             assert "fixed line" in content
             assert "new line" in content
+        finally:
+            runtime.stop()
+
+    def test_file_writes_refresh_ui(self, tmp_path: Path):
+        """Every notes write must bump the UI version (live note refresh)."""
+        f = tmp_path / "notes.md"
+        f.write_text("old\n", encoding="utf-8")
+        script = [
+            FakeResponse(
+                content="",
+                tool_calls=[
+                    FakeToolCall(id="c1", name="append", arguments={"file": "notes.md", "text": "新内容"}),
+                ],
+            ),
+            FakeResponse(content="done"),
+        ]
+        fake_llm = FakeLLM(script)
+        runtime, agent, _, _ = _make_agent_runtime(tmp_path, fake_llm=fake_llm)
+        try:
+            version_before = runtime.ui.state()["version"]
+            session = agent.create_session("test", files={"notes.md": f})
+            agent.run(session.id, "append")
+            assert runtime.ui.state()["version"] > version_before
         finally:
             runtime.stop()
 
@@ -854,12 +927,13 @@ class TestAgentUI:
         runtime, agent, llm, settings = _make_agent_runtime(tmp_path)
         try:
             state = runtime.ui.state()
-            # Check right tab
+            # The agent is a page opened from the palette / menu bar.
             right_ids = [t["id"] for t in state["right_tabs"]]
-            assert "agent" in right_ids
-            # Check page
+            assert "agent" not in right_ids
             page_ids = [p["id"] for p in state["pages"]]
             assert "agent:chat" in page_ids
+            command = next(c for c in state["commands"] if c["id"] == "agent.open")
+            assert command["page"] == "agent:chat"
         finally:
             runtime.stop()
 
@@ -884,11 +958,12 @@ class TestAgentUI:
         finally:
             runtime.stop()
 
-    def test_ui_sessions_toolbox(self, tmp_path: Path):
+    def test_no_agent_sidebar_item(self, tmp_path: Path):
         runtime, agent, llm, settings = _make_agent_runtime(tmp_path)
         try:
             snapshot = runtime.ui.snapshot()
-            assert "agent.sessions" in snapshot["items"]
+            assert "agent.sessions" not in snapshot["items"]
+            assert "agent.open" in snapshot["commands"]
         finally:
             runtime.stop()
 

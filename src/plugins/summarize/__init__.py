@@ -1,7 +1,7 @@
-"""P4 Summarize plugin: incremental lecture note-taking."""
+"""Summarize plugin: non-instant, whole-lecture structured notes."""
 
 from __future__ import annotations
 
-from .plugin import SummarizePlugin
+from .plugin import NOTE_FILES, NOTE_HEADERS, SummarizePlugin
 
-__all__ = ["SummarizePlugin"]
+__all__ = ["SummarizePlugin", "NOTE_FILES", "NOTE_HEADERS"]

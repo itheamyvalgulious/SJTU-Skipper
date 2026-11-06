@@ -128,3 +128,18 @@ def test_service_registry() -> None:
     registry.unregister("x", plugin_id="p")
     with pytest.raises(ServiceNotFound):
         registry.require("x")
+
+
+def test_builtin_registers_both_summarizers(tmp_path) -> None:
+    from plugins.builtin import builtin_plugins
+
+    cfg = load_config(data_dir=tmp_path)
+    ids = [plugin.id for plugin in builtin_plugins(cfg)]
+    assert "summarize" in ids
+    assert "instant-summarize" in ids
+
+    cfg.enable_summarize = False
+    cfg.enable_instant_summarize = False
+    ids = [plugin.id for plugin in builtin_plugins(cfg)]
+    assert "summarize" not in ids
+    assert "instant-summarize" not in ids
