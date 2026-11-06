@@ -78,6 +78,17 @@ class Catalog:
             lambda: self._cat().get_recording_url(course_id, video_id),
         )
 
+    def get_recording_streams(
+        self, course_id: str, video_id: str
+    ) -> dict[str, str]:
+        """Per-view URLs (``"1"``=课堂, ``"2"``=屏幕)."""
+
+        return self._cached(
+            ("recording_streams", str(course_id), str(video_id)),
+            60.0,
+            lambda: self._cat().get_recording_streams(course_id, video_id),
+        )
+
     # -- Live -------------------------------------------------------------
 
     def list_lives(self, start: str, end: str) -> list[dict[str, Any]]:

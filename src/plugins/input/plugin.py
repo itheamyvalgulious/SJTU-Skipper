@@ -1,209 +1,77 @@
 """Input plugin: Canvas/SJTU video portal → ffmpeg → audio/video streams.
 
-Registers settings, service ``"input"``, UI tabs/pages, and actions.
+Registers settings, the ``"input"`` service, the left-side course tree, the
+per-class playback toolbox item and the related actions.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timezone
-from typing import Any, Callable
+import time
+from datetime import datetime
+from typing import Any
 
 from core.plugin import Plugin, PluginContext
 from integrations.sjtu_canvas import InputError
 from plugins.settings.spec import SettingsSpec
 from .catalog import Catalog
 from .sources import SourceManager, SourceSpec
+from .tree import build_tree, live_state, local_time
 
 _log = logging.getLogger("lecture_agent.plugins.input")
 
-_LOCAL_TZ = datetime.now().astimezone().tzinfo
 
 
 def _local_time(iso_string: str) -> str:
     """Convert an ISO-ish timestamp to local time display."""
-    if not iso_string:
-        return ""
-    for fmt in (
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%d %H:%M:%S%z",
-    ):
-        try:
-            dt = datetime.strptime(iso_string.strip(), fmt)
-        except ValueError:
-            continue
-        if dt.tzinfo is None:
-            # SJTU/SJTU video API timestamps are already campus-local.
-            return dt.strftime("%m-%d %H:%M")
-        local = dt.astimezone(_LOCAL_TZ)
-        return local.strftime("%m-%d %H:%M")
-    return iso_string
+
+    return local_time(iso_string)
 
 
 def _live_state(begin: str, end: str) -> str:
     """Return 直播中 / 未开始 / 已结束 for a local-time range."""
 
-    try:
-        begin_dt = datetime.strptime(begin, "%Y-%m-%d %H:%M:%S")
-        end_dt = datetime.strptime(end, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return ""
-    now = datetime.now()
-    if begin_dt <= now <= end_dt:
-        return "直播中"
-    if now < begin_dt:
-        return "未开始"
-    return "已结束"
+    return live_state(begin, end)
 
 
-def _build_course_page(
-    ctx: PluginContext,
-    course_id: str,
-    catalog: Catalog,
-    course_name: str = "",
-) -> list[dict[str, Any]]:
-    """Render one course's recordings only; live has its own page."""
+def _map_view_streams(views: dict[str, str]) -> dict[str, str]:
+    """Map recording views to ``main`` (classroom) and ``screen`` URLs."""
 
-    title = course_name or f"课程 {course_id}"
-    blocks: list[dict[str, Any]] = [
-        {"type": "markdown", "text": f"## {title}"},
-        {"type": "markdown", "text": "### 📼 录播回放"},
-    ]
-
-    try:
-        recs = catalog.list_recordings(course_id)
-    except InputError as exc:
-        blocks.append({"type": "text", "text": f"⚠️ {exc}"})
-        recs = []
-
-    if not recs:
-        blocks.append({"type": "text", "text": "暂无录播记录。"})
-    else:
-        rows: list[dict[str, Any]] = []
-        for record in recs:
-            rows.append(
-                {
-                    "name": str(record.get("name", "?")),
-                    "date": _local_time(str(record.get("begin", ""))),
-                    "classroom": str(record.get("classroom", "")),
-                    "course": course_id,
-                    "video": str(record.get("video_id", "")),
-                }
-            )
-        blocks.append(
-            {
-                "type": "table",
-                "columns": [
-                    {"key": "name", "label": "节次"},
-                    {"key": "date", "label": "时间"},
-                    {"key": "classroom", "label": "教室"},
-                ],
-                "rows": rows,
-                "row_actions": [
-                    {
-                        "label": "▶ 播放录播",
-                        "action": "input.play_recording",
-                        "keys": ["course", "video"],
-                        "class": "btn btn-sm btn-primary",
-                    }
-                ],
-            }
-        )
-    blocks.append(
-        {
-            "type": "buttons",
-            "buttons": [
-                {
-                    "label": "🔴 去直播",
-                    "action": "ui.open_page",
-                    "value": {"page_id": "input:live"},
-                    "class": "btn btn-sm",
-                }
-            ],
-        }
-    )
-    return blocks
+    main = views.get("1") or next(iter(views.values()), "")
+    screen = views.get("2", "")
+    out: dict[str, str] = {}
+    if main:
+        out["main"] = main
+    if screen and screen != main:
+        out["screen"] = screen
+    return out
 
 
-def _build_live_page(ctx: PluginContext, catalog: Catalog) -> list[dict[str, Any]]:
-    """Render live streams and upcoming streams as separate sections."""
+def _map_live_streams(devices: list[dict[str, Any]]) -> dict[str, str]:
+    """Map live devices to ``main`` (classroom) and ``screen`` URLs."""
 
-    now = datetime.now()
-    start_str = now.strftime("%Y-%m-%d 00:00:00")
-    end_str = now.strftime("%Y-%m-%d 23:59:59")
-    blocks: list[dict[str, Any]] = [{"type": "markdown", "text": "### 🔴 今日直播"}]
-    try:
-        lives = catalog.list_lives(start_str, end_str)
-    except InputError as exc:
-        blocks.append({"type": "text", "text": f"⚠️ {exc}"})
-        lives = []
+    by_view: dict[int, str] = {}
+    ordered: list[str] = []
+    for device in devices:
+        url = str(device.get("url", "") or "")
+        if not url:
+            continue
+        ordered.append(url)
+        try:
+            view = int(device.get("view_num") or 0)
+        except (TypeError, ValueError):
+            continue
+        by_view.setdefault(view, url)
 
-    live_rows: list[dict[str, Any]] = []
-    upcoming_rows: list[dict[str, Any]] = []
-    for live in lives:
-        state = _live_state(str(live.get("begin", "")), str(live.get("end", "")))
-        row = {
-            "name": str(live.get("name", "?")),
-            "time": _local_time(str(live.get("begin", ""))),
-            "classroom": str(live.get("classroom", "")),
-            "state": state,
-            "live": str(live.get("id", "")),
-        }
-        if state == "直播中":
-            live_rows.append(row)
-        elif state == "未开始":
-            upcoming_rows.append(row)
-
-    columns = [
-        {"key": "name", "label": "课程"},
-        {"key": "time", "label": "时间"},
-        {"key": "classroom", "label": "教室"},
-        {"key": "state", "label": "状态"},
-    ]
-    if live_rows:
-        blocks.append({"type": "markdown", "text": "#### 正在直播"})
-        blocks.append(
-            {
-                "type": "table",
-                "columns": columns,
-                "rows": live_rows,
-                "row_actions": [
-                    {
-                        "label": "🔴 观看直播",
-                        "action": "input.watch_live",
-                        "keys": ["live", "name"],
-                        "class": "btn btn-sm btn-primary",
-                    }
-                ],
-            }
-        )
-    if upcoming_rows:
-        blocks.append({"type": "markdown", "text": "#### 即将开始"})
-        blocks.append({"type": "table", "columns": columns, "rows": upcoming_rows})
-    if not live_rows and not upcoming_rows:
-        blocks.append({"type": "text", "text": "今日暂无正在或即将开始的直播。"})
-    blocks.append(
-        {
-            "type": "buttons",
-            "buttons": [
-                {
-                    "label": "🔄 刷新直播",
-                    "action": "input.refresh_live",
-                    "class": "btn btn-sm",
-                },
-                {
-                    "label": "📚 去课程录播",
-                    "action": "ui.open_page",
-                    "value": {"page_id": "input:courses"},
-                    "class": "btn btn-sm",
-                },
-            ],
-        }
-    )
-    return blocks
+    main = by_view.get(1) or (ordered[0] if ordered else "")
+    screen = by_view.get(2) or (ordered[1] if len(ordered) > 1 else "")
+    out: dict[str, str] = {}
+    if main:
+        out["main"] = main
+    if screen and screen != main:
+        out["screen"] = screen
+    return out
 
 
 class InputPlugin(Plugin):
@@ -216,6 +84,31 @@ class InputPlugin(Plugin):
         self._pending_message = ""
         self._last_error = ""
         settings = ctx.require("settings")
+
+        # Course tree cache / sidebar state.
+        self._tree_lock = threading.RLock()
+        self._tree: dict[str, Any] = {
+            "nodes": [],
+            "error": "",
+            "at": 0.0,
+            "started": 0.0,
+            "loading": False,
+        }
+        self._tree_ttl = 30.0
+        self._expanded: set[str] = set()
+        self._current_class_id = ""
+
+        # Current class / player state.
+        self._class_lock = threading.RLock()
+        self._current_class: dict[str, Any] | None = None
+        self._class_index = 0
+        self._class_streams: dict[str, str] = {}
+        self._streams_loading = False
+        self._streams_error = ""
+        self._processing = False
+        self._want_processing = False
+        self._session_started = False
+        self._class_finished = False
 
         # ---- Register settings ----
         for spec in _INPUT_SETTINGS:
@@ -241,8 +134,15 @@ class InputPlugin(Plugin):
         def _input_meta() -> dict[str, Any]:
             session = ctx.streams.current
             return {
-                "course": session.meta.get("course", ""),
-                "lecture": session.meta.get("lecture", ""),
+                "course": session.meta.get("course_name", "")
+                or (
+                    session.meta.get("course", "")
+                    if isinstance(session.meta.get("course", ""), str)
+                    else ""
+                ),
+                "course_id": session.meta.get("course_id", ""),
+                "lecture": session.meta.get("class_label", "")
+                or session.meta.get("lecture", ""),
                 "session_id": session.session_id,
                 "source": session.meta.get("title", ""),
                 "kind": session.meta.get("kind", ""),
@@ -256,6 +156,7 @@ class InputPlugin(Plugin):
         self._setup_ui(ctx)
         ctx.events.on("input.status", self._on_input_event, plugin_id=self.id)
         ctx.events.on("input.error", self._on_input_event, plugin_id=self.id)
+        ctx.events.on("input.ended", self._on_input_event, plugin_id=self.id)
         ctx.events.on("settings.changed", self._on_settings_changed, plugin_id=self.id)
 
         ctx.logger.info("Input plugin ready")
@@ -268,6 +169,8 @@ class InputPlugin(Plugin):
         if event.type == "input.error":
             self._pending_message = ""
             self._last_error = str(event.get("message", "") or "输入源错误")
+        elif event.type == "input.ended":
+            threading.Thread(target=self._on_class_ended, daemon=True).start()
         elif event.type == "input.status":
             status = str(event.get("status", ""))
             if status in {"playing", "stopped"}:
@@ -280,6 +183,8 @@ class InputPlugin(Plugin):
         key = str(event.get("key", ""))
         if key in {"input.canvas_token", "input.canvas_base_url"}:
             self._catalog.reset()
+            self._invalidate_tree()
+            self._ensure_tree(force=True)
         if key.startswith("input."):
             self._apply_source_settings()
             self._ctx.ui.refresh("input.settings")
@@ -357,66 +262,33 @@ class InputPlugin(Plugin):
         ui = ctx.ui
         pid = self.id
 
-        # Left: recordings and live are separate, first-class tabs.
+        # Left sidebar: one collapsible course tree, no tab strip.
         ui.add_tab("left", "courses", "课程", icon="📚", order=0, plugin_id=pid)
-        ui.add_tab("left", "live", "直播", icon="🔴", order=5, plugin_id=pid)
-
         ui.add_toolbox_item(
             "courses",
             "input.courses",
-            "课程录播",
-            description="选择课程，查看历史录播",
+            "",
             order=0,
             render=self._render_courses_list,
             plugin_id=pid,
         )
-        ui.add_toolbox_item(
-            "live",
-            "input.live",
-            "今日直播",
-            description="正在或即将开始的课堂直播",
-            order=0,
-            render=self._render_live,
-            plugin_id=pid,
-        )
-        ui.add_toolbox_item(
-            "live",
-            "input.manual",
-            "手动播放 URL",
-            description="直接播放 HLS/FLV/mp4/本地文件",
-            order=1,
-            render=self._render_manual_form,
-            plugin_id=pid,
-        )
 
-        # Right: a persistent playback control tab.
-        ui.add_tab("right", "session", "播放控制", icon="▶", order=10, plugin_id=pid)
+        # Right sidebar: functional areas for the selected class.
+        ui.add_tab("right", "session", "本节课", icon="▶", order=10, plugin_id=pid)
         ui.add_toolbox_item(
             "session",
             "input.session",
-            "当前播放",
-            description="暂停、继续或停止当前音视频源",
+            "处理控制",
             order=0,
             render=self._render_session_item,
             plugin_id=pid,
+            page_id="input:session",
         )
 
         ui.add_page(
             "input:session",
-            "播放控制",
+            "课堂",
             render=lambda: self._render_session(),
-            plugin_id=pid,
-        )
-        ui.add_page(
-            "input:live",
-            "直播",
-            render=lambda: _build_live_page(ctx, self._catalog),
-            plugin_id=pid,
-        )
-        ui.add_page(
-            "input:courses",
-            "课程录播",
-            render=self._render_courses_page,
             plugin_id=pid,
         )
         ui.add_page(
@@ -426,13 +298,12 @@ class InputPlugin(Plugin):
             plugin_id=pid,
         )
 
-        # ---- Actions ----
         for action_id, handler in (
             ("input.refresh_courses", self._act_refresh_courses),
-            ("input.refresh_live", self._act_refresh_live),
-            ("input.open_course", self._act_open_course),
-            ("input.play_recording", self._act_play_recording),
-            ("input.watch_live", self._act_watch_live),
+            ("input.toggle_course", self._act_toggle_course),
+            ("input.open_class", self._act_open_class),
+            ("input.start_processing", self._act_start_processing),
+            ("input.pause_processing", self._act_pause_processing),
             ("input.play_url", self._act_play_url),
             ("input.stop", self._act_stop),
             ("input.pause", self._act_pause),
@@ -440,18 +311,34 @@ class InputPlugin(Plugin):
         ):
             ui.register_action(action_id, handler, plugin_id=pid)
 
+        ui.register_command(
+            "input.refresh",
+            "刷新课程列表",
+            category="课程",
+            icon="🔄",
+            order=0,
+            action="input.refresh_courses",
+            plugin_id=pid,
+        )
+        ui.register_command(
+            "input.manual",
+            "手动播放 URL",
+            subtitle="HLS / FLV / mp4 / 本地文件",
+            category="调试",
+            icon="🔗",
+            order=10,
+            page_id="input:manual",
+            plugin_id=pid,
+        )
+
     # ------------------------------------------------------------------
     # Toolbox renders
     # ------------------------------------------------------------------
 
     def _render_courses_list(self) -> list[dict[str, Any]]:
-        catalog = self._catalog
-        if not catalog.has_token():
+        if not self._catalog.has_token():
             return [
-                {
-                    "type": "markdown",
-                    "text": "⚠️ **Canvas Token 未配置**\n\n请在设置 → **Canvas** 分组中填写 `input.canvas_token`。",
-                },
+                {"type": "markdown", "text": "**未配置 Canvas Token**"},
                 {
                     "type": "buttons",
                     "buttons": [
@@ -464,181 +351,135 @@ class InputPlugin(Plugin):
                     ],
                 },
             ]
-        try:
-            courses = catalog.list_courses()
-        except InputError as exc:
-            return [
-                {"type": "text", "text": f"⚠️ {exc}"},
-                {
-                    "type": "buttons",
-                    "buttons": [
-                        {
-                            "label": "🔄 重试",
-                            "action": "input.refresh_courses",
-                            "class": "btn btn-sm",
-                        }
-                    ],
-                },
-            ]
-        if not courses:
-            return [{"type": "text", "text": "没有找到课程。请确认 Canvas token。"}]
-        items = []
-        for c in courses:
-            name = str(c.get("name", "?"))
-            term = str(c.get("term", ""))
-            teacher = str(c.get("teacher", ""))
-            items.append(
-                {
-                    "title": name,
-                    "subtitle": " · ".join(part for part in (term, teacher) if part),
-                    "action": "input.open_course",
-                    "value": {"course": str(c.get("id", "")), "name": name},
-                    "label": "录播",
-                }
-            )
-        return [
-            {
-                "type": "buttons",
-                "buttons": [
-                    {
-                        "label": "🔄 刷新",
-                        "action": "input.refresh_courses",
-                        "class": "btn btn-sm",
-                    }
-                ],
-            },
-            {"type": "rows", "items": items},
-        ]
 
-    def _render_courses_page(self) -> list[dict[str, Any]]:
-        catalog = self._catalog
-        if not catalog.has_token():
-            return [
-                {
-                    "type": "markdown",
-                    "text": (
-                        "⚠️ **Canvas Token 未配置**\n\n"
-                        "请在设置 → **Canvas** 分组中填写 `input.canvas_token`，"
-                        "或将 `CANVAS_TOKEN` 写入根 `.env`。"
-                    ),
-                },
-                {
-                    "type": "buttons",
-                    "buttons": [
-                        {
-                            "label": "去设置 Canvas",
-                            "action": "ui.open_page",
-                            "value": {"page_id": "settings:main"},
-                            "class": "btn btn-sm btn-primary",
-                        }
-                    ],
-                },
-            ]
+        self._ensure_tree()
+        with self._tree_lock:
+            nodes = list(self._tree["nodes"])
+            error = str(self._tree["error"])
+            loading = bool(self._tree["loading"])
+            slow = loading and time.monotonic() - float(self._tree["started"]) > 20.0
 
-        blocks: list[dict[str, Any]] = [
-            {"type": "markdown", "text": "### 📚 我的课程"},
-            {
-                "type": "buttons",
-                "buttons": [
-                    {
-                        "label": "🔄 刷新课程",
-                        "action": "input.refresh_courses",
-                        "class": "btn btn-sm",
-                    }
-                ],
-            },
-        ]
-
-        try:
-            courses = catalog.list_courses()
-        except InputError as exc:
-            blocks.append({"type": "text", "text": f"⚠️ {exc}"})
-            return blocks
-
-        if not courses:
+        blocks: list[dict[str, Any]] = []
+        if nodes:
             blocks.append(
-                {"type": "text", "text": "没有找到课程。请确认 Canvas token 是否正确。"}
-            )
-            return blocks
-
-        rows: list[dict[str, Any]] = []
-        for c in courses:
-            rows.append(
                 {
-                    "name": str(c.get("name", "?")),
-                    "term": str(c.get("term", "")),
-                    "teacher": str(c.get("teacher", "")),
-                    "course": str(c.get("id", "")),
+                    "type": "tree",
+                    "id": "courses",
+                    "nodes": nodes,
+                    "empty_text": "没有课程",
                 }
             )
+        elif loading and not slow:
+            blocks.append({"type": "text", "text": "加载课程…"})
+        elif loading:
+            blocks.append({"type": "text", "text": "课程列表加载超时，点「刷新」重试。"})
+        elif error:
+            blocks.append({"type": "text", "text": f"⚠️ {error}"})
+        else:
+            blocks.append({"type": "text", "text": "没有找到课程。"})
+
         blocks.append(
             {
-                "type": "table",
-                "columns": [
-                    {"key": "name", "label": "课程"},
-                    {"key": "term", "label": "学期"},
-                    {"key": "teacher", "label": "教师"},
-                ],
-                "rows": rows,
-                "row_actions": [
+                "type": "buttons",
+                "buttons": [
                     {
-                        "label": "查看录播",
-                        "action": "input.open_course",
-                        "keys": ["course", "name"],
-                        "class": "btn btn-sm",
+                        "label": "刷新",
+                        "action": "input.refresh_courses",
+                        "class": "btn btn-sm btn-ghost",
                     }
                 ],
             }
         )
         return blocks
 
-    def _render_live(self) -> list[dict[str, Any]]:
-        if not self._catalog.has_token():
-            return [
-                {
-                    "type": "markdown",
-                    "text": "⚠️ **Canvas Token 未配置**\n\n请先在设置中填写 `input.canvas_token`。",
-                },
-                {
-                    "type": "buttons",
-                    "buttons": [
-                        {
-                            "label": "去设置 Canvas",
-                            "action": "ui.open_page",
-                            "value": {"page_id": "settings:main"},
-                            "class": "btn btn-sm btn-primary",
-                        }
-                    ],
-                },
-            ]
-        now = datetime.now()
-        start_str = now.strftime("%Y-%m-%d 00:00:00")
-        end_str = now.strftime("%Y-%m-%d 23:59:59")
+    # ------------------------------------------------------------------
+    # Course tree cache
+    # ------------------------------------------------------------------
+    def _ensure_tree(self, *, force: bool = False) -> None:
+        with self._tree_lock:
+            if self._tree["loading"]:
+                stale = time.monotonic() - float(self._tree["started"]) > 30.0
+                if not (force and stale):
+                    return
+            fresh = (
+                self._tree["nodes"]
+                and time.monotonic() - float(self._tree["at"]) < self._tree_ttl
+            )
+            if fresh and not force:
+                return
+            self._tree["loading"] = True
+            self._tree["started"] = time.monotonic()
+        threading.Thread(
+            target=self._load_tree, name="course-tree", daemon=True
+        ).start()
+
+    def _invalidate_tree(self) -> None:
+        with self._tree_lock:
+            self._tree["at"] = 0.0
+
+    def _apply_tree_state(self) -> None:
+        """Re-apply expand/active flags to the cached tree (no refetch)."""
+
+        with self._tree_lock:
+            expanded = set(self._expanded)
+            current = self._current_class_id
+            nodes = self._tree["nodes"]
+
+        def walk(items: list[dict[str, Any]]) -> None:
+            for node in items:
+                node_id = str(node.get("id", ""))
+                if node_id.startswith("course:"):
+                    cid = node_id.split(":", 1)[1]
+                    node["expanded"] = (cid in expanded) or bool(node.get("live"))
+                if node.get("action"):
+                    node["active"] = node_id == current
+                walk(node.get("children", []) or [])
+
+        walk(nodes)
+
+    def _load_tree(self) -> None:
+        nodes: list[dict[str, Any]] = []
+        error = ""
         try:
-            lives = self._catalog.list_lives(start_str, end_str)
+            courses = self._catalog.list_courses()
+            recordings: dict[str, list[dict[str, Any]]] = {}
+            for course in courses:
+                cid = str(course.get("id", ""))
+                try:
+                    recordings[cid] = self._catalog.list_recordings(cid)
+                except InputError:
+                    recordings[cid] = []
+            now = datetime.now()
+            lives = self._catalog.list_lives(
+                now.strftime("%Y-%m-%d 00:00:00"),
+                now.strftime("%Y-%m-%d 23:59:59"),
+            )
+            with self._tree_lock:
+                expanded = set(self._expanded)
+                current = self._current_class_id
+            nodes = build_tree(
+                courses,
+                recordings,
+                lives,
+                now=now,
+                expanded=expanded,
+                current_class_id=current,
+            )
         except InputError as exc:
-            return [
-                {"type": "text", "text": f"⚠️ 直播列表获取失败：{exc}"},
-                {"type": "buttons", "buttons": [
-                    {"label": "🔄 重试", "action": "input.refresh_live", "class": "btn btn-sm"}
-                ]},
-            ]
-        active = [
-            live for live in lives
-            if _live_state(str(live.get("begin", "")), str(live.get("end", ""))) != "已结束"
-        ]
-        blocks: list[dict[str, Any]] = [
-            {"type": "markdown", "text": "### 🔴 今日直播"},
-            {"type": "text", "text": f"正在/即将开始：{len(active)} 场"},
-            {
-                "type": "buttons",
-                "buttons": [
-                    {"label": "打开直播页", "action": "ui.open_page", "value": {"page_id": "input:live"}, "class": "btn btn-sm btn-primary"},
-                    {"label": "🔄 刷新", "action": "input.refresh_live", "class": "btn btn-sm"},
-                ],
-            },
-        ]
-        return blocks
+            error = str(exc)
+        except Exception as exc:  # noqa: BLE001 - never break the sidebar
+            _log.exception("course tree build failed")
+            error = f"课程列表加载失败：{exc}"
+        with self._tree_lock:
+            self._tree.update(
+                {
+                    "nodes": nodes,
+                    "error": error,
+                    "at": time.monotonic(),
+                    "loading": False,
+                }
+            )
+        self._ctx.ui.refresh("input.tree")
 
     def _render_manual_form(self) -> list[dict[str, Any]]:
         return [
@@ -677,83 +518,135 @@ class InputPlugin(Plugin):
             },
         ]
 
+    # ------------------------------------------------------------------
+    # Player / processing control
+    # ------------------------------------------------------------------
     def _render_session_item(self) -> list[dict[str, Any]]:
-        status = self._sources.status()
-        state = status.get("state", "idle")
-        source = status.get("source") or {}
-        streams = self._ctx.streams.current
-        state_label = {
-            "idle": "空闲",
-            "playing": "播放中",
-            "paused": "已暂停",
-            "stopped": "已停止",
-        }.get(str(state), str(state))
-        if self._pending_message:
-            state_label = self._pending_message
-        items = [
-            ["状态", state_label],
-            ["标题", source.get("title", "—")],
-            ["音频/视频", f"{streams.audio.duration:.1f}s / {streams.video.duration:.1f}s"],
-        ]
-        if self._last_error:
-            items.append(["错误", self._last_error])
-        if state in ("playing", "paused"):
-            buttons = [
-                {"label": "暂停", "action": "input.pause", "class": "btn btn-sm"},
-                {"label": "继续", "action": "input.resume", "class": "btn btn-sm btn-primary"},
-                {"label": "停止", "action": "input.stop", "class": "btn btn-sm btn-danger"},
-            ]
+        with self._class_lock:
+            cls = dict(self._current_class) if self._current_class else None
+            index = self._class_index
+            processing = self._processing
+            finished = self._class_finished
+            loading = self._streams_loading
+            error = self._streams_error
+
+        if cls is None:
+            return [{"type": "text", "text": "未选择课程"}]
+
+        parts = len(cls.get("videos") or []) or 1
+        if finished:
+            state_label = "已结束"
+        elif processing:
+            state_label = "处理中"
+        elif loading:
+            state_label = "准备中"
         else:
-            buttons = []
-        blocks = [{"type": "keyvalue", "items": items}]
-        if buttons:
-            blocks.append({"type": "buttons", "buttons": buttons})
+            state_label = "已暂停"
+
+        items = [
+            ["课程", str(cls.get("name", "") or "—")],
+            ["节次", str(cls.get("label", "") or "—")],
+            ["进度", f"第 {index + 1}/{parts} 节" if parts > 1 else "单节"],
+            ["状态", state_label],
+        ]
+        if error:
+            items.append(["错误", error])
+
+        blocks: list[dict[str, Any]] = [{"type": "keyvalue", "items": items}]
+        if not finished:
+            if processing:
+                blocks.append(
+                    {
+                        "type": "buttons",
+                        "buttons": [
+                            {
+                                "label": "暂停处理",
+                                "action": "input.pause_processing",
+                                "class": "btn btn-sm",
+                            }
+                        ],
+                    }
+                )
+            else:
+                blocks.append(
+                    {
+                        "type": "buttons",
+                        "buttons": [
+                            {
+                                "label": "继续处理",
+                                "action": "input.start_processing",
+                                "class": "btn btn-sm btn-primary",
+                            }
+                        ],
+                    }
+                )
         return blocks
 
     def _render_session(self) -> list[dict[str, Any]]:
-        status = self._sources.status()
-        state = status.get("state", "idle")
-        source = status.get("source") or {}
-        streams = self._ctx.streams.current
-        state_label = {
-            "idle": "空闲",
-            "playing": "播放中",
-            "paused": "已暂停",
-            "stopped": "已停止",
-        }.get(str(state), str(state))
-        if self._pending_message:
-            state_label = self._pending_message
-        items = [
-            ["状态", state_label],
-            ["标题", source.get("title", "—")],
-            ["类型", source.get("kind", "—")],
-            ["音频", f"{streams.audio.duration:.1f}s"],
-            ["视频", f"{streams.video.duration:.1f}s"],
-        ]
-        if self._last_error:
-            items.append(["错误", self._last_error])
-        blocks: list[dict[str, Any]] = [{"type": "keyvalue", "items": items}]
-        if state in ("playing", "paused"):
-            blocks.append(
+        with self._class_lock:
+            cls = dict(self._current_class) if self._current_class else None
+            index = self._class_index
+            processing = self._processing
+            finished = self._class_finished
+            streams = dict(self._class_streams)
+            loading = self._streams_loading
+            error = self._streams_error
+
+        if cls is None:
+            return [
                 {
-                    "type": "buttons",
-                    "buttons": [
-                        {"label": "暂停", "action": "input.pause", "class": "btn btn-sm"},
-                        {"label": "继续", "action": "input.resume", "class": "btn btn-sm btn-primary"},
-                        {"label": "停止", "action": "input.stop", "class": "btn btn-sm btn-danger"},
-                    ],
+                    "type": "markdown",
+                    "text": "### 课堂\n\n从左侧课程树选择一节课。",
+                }
+            ]
+
+        parts = len(cls.get("videos") or []) or 1
+        title = str(cls.get("label", "") or cls.get("name", "") or "课堂")
+        name = str(cls.get("name", "") or "")
+        heading = f"### {name} · {title}" if name else f"### {title}"
+        if parts > 1:
+            heading += f" · 第 {index + 1}/{parts} 节"
+        blocks: list[dict[str, Any]] = [{"type": "markdown", "text": heading}]
+
+        if loading:
+            blocks.append({"type": "text", "text": "正在获取视频地址…"})
+        if error:
+            blocks.append({"type": "text", "text": f"⚠️ {error}"})
+
+        sources: list[dict[str, Any]] = []
+        if streams.get("main"):
+            sources.append(
+                {"key": "main", "label": "课堂", "src": streams["main"]}
+            )
+        if streams.get("screen"):
+            sources.append(
+                {
+                    "key": "screen",
+                    "label": "屏幕",
+                    "src": streams["screen"],
+                    "muted": True,
                 }
             )
-        else:
+
+        if sources:
             blocks.append(
                 {
-                    "type": "buttons",
-                    "buttons": [
-                        {"label": "去直播", "action": "ui.open_page", "value": {"page_id": "input:live"}, "class": "btn btn-sm"},
-                        {"label": "去课程录播", "action": "ui.open_page", "value": {"page_id": "input:courses"}, "class": "btn btn-sm"},
-                    ],
+                    "type": "player",
+                    "id": f"input:session:{cls.get('id', '')}:{index}",
+                    "sources": sources,
+                    "live": cls.get("kind") == "live",
+                    "processing": processing,
+                    "finished": finished,
+                    "part": index + 1,
+                    "parts": parts,
+                    "screen_missing": bool(streams.get("main"))
+                    and not streams.get("screen"),
+                    "start_action": "input.start_processing",
+                    "pause_action": "input.pause_processing",
                 }
             )
+        elif not loading and not error:
+            blocks.append({"type": "text", "text": "没有可用的视频流。"})
         return blocks
 
     # ------------------------------------------------------------------
@@ -762,146 +655,261 @@ class InputPlugin(Plugin):
 
     def _act_refresh_courses(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._catalog.reset()
-        return {"ok": True}
+        self._invalidate_tree()
+        self._ensure_tree(force=True)
+        return {"ok": True, "message": "正在刷新课程"}
 
-    def _act_refresh_live(self, payload: dict[str, Any]) -> dict[str, Any]:
-        self._catalog.reset()
-        self._ctx.ui.refresh("input.live.refresh")
-        return {"ok": True, "message": "直播列表已刷新"}
-
-    def _act_open_course(self, payload: dict[str, Any]) -> dict[str, Any]:
-        course_id = str(payload.get("course", "") or payload.get("course_id", ""))
-        if not course_id:
-            return {"ok": False, "message": "缺少课程 ID"}
-
-        course_name = str(payload.get("name", ""))
-        page_id = f"input:course:{course_id}"
-        ctx = self._ctx
-
-        # Create page if not exists
-        try:
-            ctx.ui.add_page(
-                page_id,
-                f"课程: {course_name or course_id}",
-                render=lambda cid=course_id: _build_course_page(
-                    ctx, cid, self._catalog, course_name
-                ),
-                plugin_id=self.id,
-            )
-        except ValueError:
-            # Already exists, update renderer
-            ctx.ui.set_page_render(
-                page_id,
-                lambda cid=course_id: _build_course_page(
-                    ctx, cid, self._catalog, course_name
-                ),
-            )
-        return {"ok": True, "open_page": page_id}
-
-    def _act_play_recording(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _act_toggle_course(self, payload: dict[str, Any]) -> dict[str, Any]:
         course_id = str(payload.get("course", ""))
-        video_id = str(payload.get("video", ""))
-        if not course_id or not video_id:
-            return {"ok": False, "message": "缺少课程或视频 ID"}
-        self._pending_message = "正在获取录播地址…"
-        self._last_error = ""
-
-        def _bg() -> None:
-            try:
-                url = self._catalog.get_recording_url(course_id, video_id)
-            except InputError as exc:
-                self._pending_message = ""
-                self._ctx.events.emit(
-                    "input.error",
-                    message=str(exc),
-                    source=f"course {course_id} video {video_id}",
-                )
-                return
-            spec = SourceSpec(
-                kind="recording",
-                url=url,
-                title=f"录播 {video_id}",
-                course={"id": course_id, "video_id": video_id},
-            )
-            self._pending_message = ""
-            try:
-                self._start_source(spec)
-            except Exception as exc:  # noqa: BLE001 - surface startup failures
-                self._pending_message = ""
-                self._ctx.events.emit(
-                    "input.error",
-                    message=f"启动播放失败：{exc}",
-                    source=spec.title,
-                )
-
-        threading.Thread(target=_bg, daemon=True).start()
-        self._ctx.ui.refresh("input:recording:pending")
-        return {"ok": True, "message": "正在获取播放地址…", "open_page": "input:session"}
-
-    def _act_watch_live(self, payload: dict[str, Any]) -> dict[str, Any]:
-        live_id = str(payload.get("live", ""))
-        if not live_id:
-            return {"ok": False, "message": "缺少直播 ID"}
-        self._pending_message = "正在获取直播地址…"
-        self._last_error = ""
-
-        device_pref = self._ctx.require("settings").get("input.live_device", "0")
-
-        def _bg() -> None:
-            try:
-                devices = self._catalog.get_live_devices(live_id)
-            except InputError as exc:
-                self._pending_message = ""
-                self._ctx.events.emit(
-                    "input.error",
-                    message=str(exc),
-                    source=f"live {live_id}",
-                )
-                return
-
-            url = ""
-            name = ""
-            if devices:
-                idx = 0
-                try:
-                    idx = max(0, int(device_pref))
-                except (ValueError, TypeError):
-                    pass
-                if idx < len(devices):
-                    url = devices[idx].get("url", "")
-                    name = devices[idx].get("name", "")
+        if course_id:
+            with self._tree_lock:
+                if course_id in self._expanded:
+                    self._expanded.discard(course_id)
                 else:
-                    url = devices[0].get("url", "")
-                    name = devices[0].get("name", "")
+                    self._expanded.add(course_id)
+            self._apply_tree_state()
+        return {"ok": True, "refresh": True}
 
-            if not url:
-                self._ctx.events.emit(
-                    "input.error",
-                    message=f"未找到直播 {live_id} 的可用设备流。",
-                    source=f"live {live_id}",
+    def _act_open_class(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Select a class: load its streams but never auto-start playback."""
+
+        class_id = str(payload.get("id", ""))
+        kind = str(payload.get("kind", "recording") or "recording")
+        videos = payload.get("videos") or []
+        if isinstance(videos, str):
+            videos = [part for part in videos.split(",") if part]
+        videos = [str(video) for video in videos if str(video)]
+        live_id = str(payload.get("live_id", ""))
+
+        if kind == "recording" and not videos:
+            return {"ok": False, "message": "缺少录播 ID"}
+        if kind == "live" and not live_id:
+            return {"ok": False, "message": "缺少直播 ID"}
+
+        with self._class_lock:
+            if (
+                self._current_class is not None
+                and self._current_class.get("id") == class_id
+                and not self._class_finished
+            ):
+                # Re-selecting the same class must not interrupt playback.
+                return {"ok": True, "open_page": "input:session"}
+
+        # Switching classes ends the previous class session, but must not
+        # start anything for the newly selected one.
+        self._sources.stop()
+        self._end_open_session("class switched")
+
+        with self._class_lock:
+            self._current_class = {
+                "id": class_id,
+                "kind": kind,
+                "course": str(payload.get("course", "")),
+                "name": str(payload.get("name", "")),
+                "label": str(payload.get("label", "")),
+                "videos": videos,
+                "live_id": live_id,
+            }
+            self._class_index = 0
+            self._class_streams = {}
+            self._streams_loading = True
+            self._streams_error = ""
+            self._processing = False
+            self._want_processing = False
+            self._session_started = False
+            self._class_finished = False
+
+        with self._tree_lock:
+            self._current_class_id = class_id
+        self._apply_tree_state()
+
+        threading.Thread(
+            target=self._resolve_class_streams, daemon=True
+        ).start()
+        self._ctx.ui.refresh("input.class.opened")
+        return {"ok": True, "open_page": "input:session"}
+
+    def _end_open_session(self, reason: str) -> None:
+        hub = self._ctx.streams
+        current = hub.current
+        if current.session_id != "boot" and current.ended_at is None:
+            hub.end_session(reason)
+
+    def _resolve_class_streams(self) -> None:
+        with self._class_lock:
+            cls = dict(self._current_class) if self._current_class else None
+            index = self._class_index
+        if cls is None:
+            return
+
+        streams: dict[str, str] = {}
+        error = ""
+        try:
+            if cls.get("kind") == "live":
+                devices = self._catalog.get_live_devices(
+                    str(cls.get("live_id", ""))
                 )
+                streams = _map_live_streams(devices)
+            else:
+                videos = cls.get("videos") or []
+                if index >= len(videos):
+                    raise InputError("没有更多小节")
+                views = self._catalog.get_recording_streams(
+                    str(cls.get("course", "")), str(videos[index])
+                )
+                streams = _map_view_streams(views)
+            if not streams.get("main"):
+                raise InputError("没有找到可播放的视频流。")
+        except InputError as exc:
+            error = str(exc)
+
+        with self._class_lock:
+            if (
+                self._current_class is None
+                or self._current_class.get("id") != cls.get("id")
+            ):
                 return
+            self._class_streams = streams
+            self._streams_error = error
+            self._streams_loading = False
+            want = self._want_processing
 
-            spec = SourceSpec(
-                kind="live",
-                url=url,
-                title=name or f"直播 {live_id}",
-                course={"live_id": live_id},
+        self._ctx.ui.refresh("input.class.streams")
+        if want and streams.get("main"):
+            self._start_processing_now()
+
+    def _act_start_processing(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._class_lock:
+            if self._current_class is None:
+                return {"ok": False, "message": "未选择课程"}
+            if self._processing:
+                return {"ok": True, "message": "正在处理"}
+            streams = dict(self._class_streams)
+            loading = self._streams_loading
+            error = self._streams_error
+            self._want_processing = True
+
+        if streams.get("main"):
+            self._start_processing_now()
+            return {"ok": True, "message": "开始处理"}
+
+        if loading:
+            self._ctx.ui.refresh("input.class.waiting")
+            return {"ok": True, "message": "正在准备视频…"}
+        if error:
+            with self._class_lock:
+                self._want_processing = False
+            return {"ok": False, "message": error}
+
+        with self._class_lock:
+            self._streams_loading = True
+            self._streams_error = ""
+        threading.Thread(
+            target=self._resolve_class_streams, daemon=True
+        ).start()
+        return {"ok": True, "message": "正在准备视频…"}
+
+    def _start_processing_now(self) -> None:
+        with self._class_lock:
+            cls = dict(self._current_class) if self._current_class else None
+            index = self._class_index
+            streams = dict(self._class_streams)
+            started = self._session_started
+            self._want_processing = False
+        if cls is None:
+            return
+        url = streams.get("main", "")
+        if not url:
+            return
+
+        label = str(cls.get("label", ""))
+        videos = cls.get("videos") or []
+        spec = SourceSpec(
+            kind="live" if cls.get("kind") == "live" else "recording",
+            url=url,
+            title=label or str(cls.get("name", "")),
+            continue_session=started,
+            course={
+                "course_id": str(cls.get("course", "")),
+                "course_name": str(cls.get("name", "")),
+                "class_label": label,
+                "video_id": str(videos[index]) if index < len(videos) else "",
+                "live_id": str(cls.get("live_id", "")),
+            },
+        )
+        self._pending_message = ""
+        try:
+            self._start_source(spec)
+        except Exception as exc:  # noqa: BLE001 - surface startup failures
+            self._ctx.events.emit(
+                "input.error",
+                message=f"启动处理失败：{exc}",
+                source=spec.title,
             )
-            self._pending_message = ""
-            try:
-                self._start_source(spec)
-            except Exception as exc:  # noqa: BLE001 - surface startup failures
-                self._pending_message = ""
-                self._ctx.events.emit(
-                    "input.error",
-                    message=f"启动播放失败：{exc}",
-                    source=spec.title,
-                )
+            return
 
-        threading.Thread(target=_bg, daemon=True).start()
-        self._ctx.ui.refresh("input:live:pending")
-        return {"ok": True, "message": "正在获取直播地址…", "open_page": "input:session"}
+        with self._class_lock:
+            if (
+                self._current_class is not None
+                and self._current_class.get("id") == cls.get("id")
+            ):
+                self._processing = True
+                self._session_started = True
+        self._ctx.ui.refresh("input.class.processing")
+
+    def _act_pause_processing(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._class_lock:
+            if not self._processing:
+                self._processing = False
+                self._want_processing = False
+                return {"ok": True, "message": "已暂停"}
+            kind = (self._current_class or {}).get("kind")
+            self._processing = False
+            self._want_processing = False
+
+        if kind == "live":
+            # A live stream cannot be paused: stop our ingestion and resume at
+            # the live edge later.
+            self._sources.stop()
+        else:
+            self._sources.pause()
+        self._ctx.ui.refresh("input.class.paused")
+        return {"ok": True, "message": "已暂停处理"}
+
+    def _on_class_ended(self) -> None:
+        """Natural end of the current recording period."""
+
+        with self._class_lock:
+            cls = dict(self._current_class) if self._current_class else None
+            index = self._class_index
+            processing = self._processing
+        if cls is None or not processing:
+            return
+
+        videos = cls.get("videos") or []
+        if index + 1 < len(videos):
+            with self._class_lock:
+                self._class_index = index + 1
+                self._class_streams = {}
+                self._streams_loading = True
+                self._streams_error = ""
+                self._want_processing = True
+            self._ctx.ui.refresh("input.class.next")
+            threading.Thread(
+                target=self._resolve_class_streams, daemon=True
+            ).start()
+            return
+        self._finish_class()
+
+    def _finish_class(self) -> None:
+        with self._class_lock:
+            self._processing = False
+            self._want_processing = False
+            self._class_finished = True
+            self._session_started = False
+        self._sources.stop()
+        self._end_open_session("playback finished")
+        self._ctx.ui.refresh("input.class.finished")
 
     def _act_play_url(self, payload: dict[str, Any]) -> dict[str, Any]:
         url = str(payload.get("url", "")).strip()
@@ -931,7 +939,14 @@ class InputPlugin(Plugin):
     def _act_stop(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._pending_message = ""
         self._last_error = ""
+        with self._class_lock:
+            self._processing = False
+            self._want_processing = False
+            self._session_started = False
+            self._class_finished = self._current_class is not None
         self._sources.stop()
+        self._end_open_session("stopped")
+        self._ctx.ui.refresh("input.stopped")
         return {"ok": True, "message": "已停止"}
 
     def _act_pause(self, payload: dict[str, Any]) -> dict[str, Any]:

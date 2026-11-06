@@ -268,6 +268,49 @@ class SJTUCatalog:
             )
         return url
 
+    def get_recording_streams(
+        self, course_id: str, video_id: str
+    ) -> dict[str, str]:
+        """Return per-view stream URLs for one recording.
+
+        The platform publishes several views per class; ``viewNum`` 1 is the
+        classroom camera/blackboard and ``viewNum`` 2 is the shared screen.
+        Keys are stringified view numbers.
+        """
+
+        vc = self._video_client_for(course_id)
+        cid_int = int(course_id)
+        try:
+            vc.resolve_course_video_auth(cid_int)
+            info = vc.get_video_info(cid_int, video_id)
+        except VideoAuthError as exc:
+            raise InputError(f"视频授权失败：{exc}")
+        except (VideoIntegrationError, VideoNetworkError) as exc:
+            raise InputError(f"获取视频信息失败：{exc}")
+
+        views: dict[int, str] = {}
+        for item in getattr(info, "play_items", None) or []:
+            if not isinstance(item, dict):
+                continue
+            url = (
+                item.get("url")
+                or item.get("playUrl")
+                or item.get("videoUrl")
+                or item.get("hlsUrl")
+            )
+            if not url:
+                continue
+            try:
+                view = int(item.get("viewNum") or item.get("view_num") or 0)
+            except (TypeError, ValueError):
+                view = 0
+            views.setdefault(view, str(url))
+        if not views:
+            url = _extract_stream_url(info)
+            if url:
+                views[0] = url
+        return {str(key): value for key, value in views.items()}
+
     # ------------------------------------------------------------------
     # Live token (shared by list_lives and get_live_devices)
     # ------------------------------------------------------------------

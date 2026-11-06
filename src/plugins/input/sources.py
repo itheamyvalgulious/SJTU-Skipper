@@ -33,6 +33,9 @@ class SourceSpec:
     meta: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
     start_at: float = 0.0
+    # Keep appending to the current stream session (used for the next period
+    # of a merged class so one class yields one transcript / one note set).
+    continue_session: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +127,7 @@ class FFmpegSource:
         self._started_at: float = 0.0
         self._running = False
         self._paused = False
+        self._ended_emitted = False
 
         # JPEG frame buffer for incomplete tail bytes
         self._jpeg_buffer = b""
@@ -313,6 +317,19 @@ class FFmpegSource:
                 "url": self.spec.url,
             }
 
+    def _finish_recording(self) -> None:
+        """Emit ``input.ended`` once when a recording reaches its end."""
+
+        with self._lock:
+            if self._ended_emitted:
+                return
+            self._ended_emitted = True
+        self._emit(
+            "input.ended",
+            source=self.spec.title,
+            course=dict(self.spec.course),
+        )
+
     # ------------------------------------------------------------------
     # Reader threads
     # ------------------------------------------------------------------
@@ -347,7 +364,10 @@ class FFmpegSource:
                 # EOF – process exited
                 rc = proc.poll()
                 if rc is not None:
-                    _log.warning("Audio ffmpeg exited with code %s", rc)
+                    _log.info("Audio ffmpeg exited with code %s", rc)
+                    if self.spec.kind == "recording":
+                        self._finish_recording()
+                        break
                     if not self._reconnect or self._audio_stop.is_set():
                         break
                     retries += 1
@@ -451,7 +471,10 @@ class FFmpegSource:
             else:
                 rc = proc.poll()
                 if rc is not None:
-                    _log.warning("Video ffmpeg exited with code %s", rc)
+                    _log.info("Video ffmpeg exited with code %s", rc)
+                    if self.spec.kind == "recording":
+                        self._finish_recording()
+                        break
                     if not self._reconnect or self._video_stop.is_set():
                         break
                     retries += 1
@@ -586,7 +609,14 @@ class SourceManager:
                 self._hub.audio_sample_rate = self._sample_rate
             except Exception:
                 pass
-            self._hub.start_session(meta=meta)
+            current = self._hub.current
+            reuse = (
+                bool(spec.continue_session)
+                and current.session_id != "boot"
+                and current.ended_at is None
+            )
+            if not reuse:
+                self._hub.start_session(meta=meta)
 
             source = FFmpegSource(
                 spec,

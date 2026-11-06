@@ -33,7 +33,11 @@ from plugins.input.ffmpeg import (
     has_complete_frame,
     split_jpeg_frames,
 )
-from plugins.input.plugin import InputPlugin
+from plugins.input.plugin import (
+    InputPlugin,
+    _map_live_streams,
+    _map_view_streams,
+)
 from plugins.input.sources import (
     SourceManager,
     SourceSpec,
@@ -453,6 +457,36 @@ class TestSourceManager:
         # Can't start real ffmpeg, but we verify session lifecycle
         assert mgr.state == "idle"
 
+    def test_continue_session_reuses_stream_session(self, monkeypatch):
+        """A merged class must stay in one stream session across periods."""
+        import plugins.input.sources as sources_mod
+
+        class DummySource:
+            running = True
+
+            def __init__(self, spec, **kwargs):
+                self.spec = spec
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        monkeypatch.setattr(sources_mod, "FFmpegSource", DummySource)
+
+        hub = StreamHub(emit=lambda *a, **kw: None)
+        hub.start_session(meta={"course_name": "高等数学"})
+        sid = hub.current.session_id
+        mgr = SourceManager(hub=hub, emit=lambda *a, **kw: None)
+
+        mgr.start(SourceSpec(kind="recording", url="x", continue_session=True))
+        assert hub.current.session_id == sid, "next period must reuse the session"
+
+        mgr.start(SourceSpec(kind="recording", url="y"))
+        assert hub.current.session_id != sid, "a new class starts a new session"
+        mgr.stop()
+
 
 # ====================================================================
 # Catalog mapping (with FakeSettings)
@@ -634,42 +668,42 @@ class TestInputPluginUI:
         plugin.setup(ctx)
 
         snap = ctx.ui.snapshot()
+        # One left tab: the course tree.  One right tab: the current class.
         assert snap["tabs"]["courses"] == "left"
-        assert snap["tabs"]["live"] == "left"
         assert snap["tabs"]["session"] == "right"
         assert "input.courses" in snap["items"]
-        assert "input.live" in snap["items"]
-        assert "input.manual" in snap["items"]
         assert "input.session" in snap["items"]
-        for page in ("input:session", "input:live", "input:courses", "input:manual"):
+        assert "input.live" not in snap["items"]
+        for page in ("input:session", "input:manual"):
             assert page in snap["pages"]
+        assert "input:courses" not in snap["pages"]
 
-        # Every toolbox item must render non-empty blocks, but they now live
-        # in their own tabs (courses / live / session).
         state = ctx.ui.state()
-        item_ids = {
+        items = {
             item["id"]: item
             for side in ("left_tabs", "right_tabs")
             for tab in state.get(side, [])
             for item in tab.get("toolbox", [])
         }
-        for tid in ("input.courses", "input.live", "input.manual", "input.session"):
-            assert tid in item_ids, f"toolbox item {tid} missing from state"
-            assert item_ids[tid].get("blocks"), f"toolbox item {tid} rendered empty blocks"
+        for tid in ("input.courses", "input.session"):
+            assert tid in items, f"toolbox item {tid} missing from state"
+            assert items[tid].get("blocks"), f"toolbox item {tid} rendered empty blocks"
 
-        # Actions registered
         for action in (
             "input.refresh_courses",
-            "input.refresh_live",
-            "input.open_course",
-            "input.play_recording",
-            "input.watch_live",
+            "input.toggle_course",
+            "input.open_class",
+            "input.start_processing",
+            "input.pause_processing",
             "input.play_url",
             "input.stop",
             "input.pause",
             "input.resume",
         ):
             assert action in snap["actions"], f"action {action} not registered"
+
+        assert "input.refresh" in snap["commands"]
+        assert "input.manual" in snap["commands"]
 
         plugin.teardown()
 
@@ -744,47 +778,36 @@ class TestInputPluginUI:
 
         plugin.teardown()
 
-    def test_action_open_course(self):
+    def test_action_toggle_course(self):
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
 
-        result = ctx.ui.dispatch_action(
-            "input.open_course",
-            {"course": "12345", "name": "测试课程"},
-        )
+        result = ctx.ui.dispatch_action("input.toggle_course", {"course": "12345"})
         assert result.ok
-        assert result.open_page == "input:course:12345"
-
-        snap = ctx.ui.snapshot()
-        assert "input:course:12345" in snap["pages"]
 
         plugin.teardown()
 
-    def test_action_open_course_missing_id(self):
-        ctx = _make_context()
-        plugin = InputPlugin()
-        plugin.setup(ctx)
-        result = ctx.ui.dispatch_action("input.open_course", {})
-        assert not result.ok
-        plugin.teardown()
-
-    def test_play_recording_missing_params(self):
+    def test_action_open_class_missing_videos(self):
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
 
-        result = ctx.ui.dispatch_action("input.play_recording", {})
+        result = ctx.ui.dispatch_action("input.open_class", {"kind": "recording"})
         assert not result.ok
+        assert "录播" in result.message
+
         plugin.teardown()
 
-    def test_watch_live_missing_params(self):
+    def test_action_open_class_live_missing_id(self):
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
 
-        result = ctx.ui.dispatch_action("input.watch_live", {})
+        result = ctx.ui.dispatch_action("input.open_class", {"kind": "live"})
         assert not result.ok
+        assert "直播" in result.message
+
         plugin.teardown()
 
     def test_refresh_courses(self):
@@ -1086,3 +1109,236 @@ class TestLocalTime:
         from plugins.input.plugin import _local_time
         assert _local_time("") == ""
         assert _local_time("not a date") == "not a date"
+
+class TestClassPlayer:
+    """Selecting a class loads streams but never auto-plays."""
+
+    def _open_class(self, ctx, plugin, *, videos=("v1", "v2"), kind="recording"):
+        payload = {
+            "id": "class:1:" + kind,
+            "kind": kind,
+            "course": "1",
+            "name": "高等数学",
+            "label": "11-05 08:00–09:35",
+            "videos": list(videos),
+        }
+        if kind == "live":
+            payload["live_id"] = "L1"
+        return ctx.ui.dispatch_action("input.open_class", payload)
+
+    def test_open_class_does_not_start_playback(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+
+        result = self._open_class(ctx, plugin)
+        assert result.ok
+        assert result.open_page == "input:session"
+        assert plugin._processing is False
+        assert plugin._sources.state == "idle", "selecting a class must not start ffmpeg"
+        assert ctx.streams.current.session_id == "boot", "no session until processing starts"
+        assert plugin._current_class["videos"] == ["v1", "v2"]
+
+        plugin.teardown()
+
+    def test_player_page_shows_both_video_streams(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        self._open_class(ctx, plugin)
+        plugin._class_streams = {
+            "main": "https://example.com/main.m3u8",
+            "screen": "https://example.com/screen.m3u8",
+        }
+        plugin._streams_loading = False
+
+        ctx.ui.open_page("input:session")
+        blocks = ctx.ui.state()["page_content"]["input:session"]
+        player = next(block for block in blocks if block["type"] == "player")
+        assert [src["label"] for src in player["sources"]] == ["课堂", "屏幕"]
+        assert player["processing"] is False
+        assert player["part"] == 1 and player["parts"] == 2
+
+        plugin.teardown()
+
+    def test_start_processing_starts_ingest(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        self._open_class(ctx, plugin)
+        plugin._class_streams = {"main": "https://example.com/main.m3u8"}
+        plugin._streams_loading = False
+        started: list[SourceSpec] = []
+        monkeypatch.setattr(plugin, "_start_source", lambda spec: started.append(spec))
+
+        result = ctx.ui.dispatch_action("input.start_processing", {})
+        assert result.ok
+        assert plugin._processing is True
+        assert started and started[0].url == "https://example.com/main.m3u8"
+        assert started[0].kind == "recording"
+        assert started[0].continue_session is False
+
+        plugin.teardown()
+
+    def test_pause_processing_pauses_recording(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        self._open_class(ctx, plugin)
+        plugin._class_streams = {"main": "u"}
+        plugin._processing = True
+        calls: list[str] = []
+        monkeypatch.setattr(plugin._sources, "pause", lambda: calls.append("pause"))
+        monkeypatch.setattr(plugin._sources, "stop", lambda: calls.append("stop"))
+
+        result = ctx.ui.dispatch_action("input.pause_processing", {})
+        assert result.ok
+        assert plugin._processing is False
+        assert calls == ["pause"]
+
+        plugin.teardown()
+
+    def test_pause_processing_stops_live_ingest(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        self._open_class(ctx, plugin, kind="live")
+        plugin._class_streams = {"main": "u"}
+        plugin._processing = True
+        calls: list[str] = []
+        monkeypatch.setattr(plugin._sources, "pause", lambda: calls.append("pause"))
+        monkeypatch.setattr(plugin._sources, "stop", lambda: calls.append("stop"))
+
+        ctx.ui.dispatch_action("input.pause_processing", {})
+        assert calls == ["stop"], "live must not pause, it stops ingestion"
+
+        plugin.teardown()
+
+    def test_class_ended_advances_to_next_period(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        self._open_class(ctx, plugin)
+        plugin._processing = True
+        resolved: list[bool] = []
+        monkeypatch.setattr(
+            plugin, "_resolve_class_streams", lambda: resolved.append(True)
+        )
+
+        plugin._on_class_ended()
+        assert plugin._class_index == 1
+        assert plugin._want_processing is True
+
+        plugin.teardown()
+
+    def test_last_period_ends_the_session(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        self._open_class(ctx, plugin, videos=("v1",))
+        plugin._processing = True
+        monkeypatch.setattr(plugin._sources, "stop", lambda: None)
+        session = ctx.streams.start_session(meta={"course_name": "高等数学"})
+
+        plugin._on_class_ended()
+        assert plugin._class_finished is True
+        assert plugin._processing is False
+        assert session.ended_at is not None
+        assert session.end_reason == "playback finished"
+
+        plugin.teardown()
+
+    def test_input_ended_event_advances(self, monkeypatch):
+        from types import SimpleNamespace
+        import time
+
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        self._open_class(ctx, plugin)
+        plugin._processing = True
+        advanced: list[bool] = []
+        monkeypatch.setattr(plugin, "_on_class_ended", lambda: advanced.append(True))
+
+        event = SimpleNamespace(type="input.ended", get=lambda key, default=None: default)
+        plugin._on_input_event(event)
+
+        deadline = time.monotonic() + 2.0
+        while not advanced and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert advanced == [True]
+
+        plugin.teardown()
+
+    def test_stop_processing_state(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        self._open_class(ctx, plugin)
+        plugin._processing = True
+        monkeypatch.setattr(plugin._sources, "stop", lambda: None)
+
+        result = ctx.ui.dispatch_action("input.stop", {})
+        assert result.ok
+        assert plugin._processing is False
+        assert plugin._class_finished is True
+
+        plugin.teardown()
+
+    def test_reselecting_finished_class_allows_replay(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        self._open_class(ctx, plugin)
+        plugin._class_finished = True
+
+        result = self._open_class(ctx, plugin)
+        assert result.ok
+        assert plugin._class_finished is False
+        assert plugin._class_index == 0
+
+        plugin.teardown()
+
+    def test_input_ended_without_processing_is_ignored(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        self._open_class(ctx, plugin)
+        advanced: list[bool] = []
+        monkeypatch.setattr(plugin, "_finish_class", lambda: advanced.append(True))
+
+        plugin._on_class_ended()
+        assert plugin._class_index == 0
+        assert advanced == []
+
+        plugin.teardown()
+
+
+class TestStreamMapping:
+    """Recording/live views are mapped to the classroom and screen panes."""
+
+    def test_view_streams_use_view_numbers(self):
+        streams = _map_view_streams({"1": "main-url", "2": "screen-url"})
+        assert streams == {"main": "main-url", "screen": "screen-url"}
+
+    def test_view_streams_fallback_to_first(self):
+        assert _map_view_streams({"0": "only-url"}) == {"main": "only-url"}
+
+    def test_live_streams_use_devices(self):
+        streams = _map_live_streams(
+            [
+                {"name": "camera", "url": "cam", "view_num": 1},
+                {"name": "screen", "url": "scr", "view_num": 2},
+            ]
+        )
+        assert streams == {"main": "cam", "screen": "scr"}
+
+    def test_live_streams_without_view_numbers(self):
+        streams = _map_live_streams([{"url": "a"}, {"url": "b"}])
+        assert streams == {"main": "a", "screen": "b"}
