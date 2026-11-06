@@ -358,11 +358,12 @@ class TestVlmPlugin:
     def test_setup_registers_service(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
         assert vlm_ctx.service("vlm") is not None
 
-    def test_setup_creates_ui_tab_and_page(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
+    def test_setup_creates_debug_page_only(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
         snap = vlm_ctx.ui.snapshot()
-        assert "classroom" in snap["tabs"]
-        assert "vlm.board" in snap["items"]
+        assert "classroom" not in snap["tabs"]
+        assert "vlm.board" not in snap["items"]
         assert "vlm:board" in snap["pages"]
+        assert "vlm.debug" in snap["commands"]
 
     def test_status_returns_dict(self, vlm_plugin: VlmPlugin):
         status = vlm_plugin.status()
@@ -531,11 +532,10 @@ class TestVlmPlugin:
 # ---------------------------------------------------------------------------
 
 class TestUiState:
-    def test_ui_tab_and_page_present(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
+    def test_debug_page_present(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
         snap = vlm_ctx.ui.snapshot()
-        assert snap["tabs"]["classroom"] == "left"
-        assert snap["items"]["vlm.board"] == "classroom"
         assert "vlm:board" in snap["pages"]
+        assert "vlm.debug" in snap["commands"]
 
     def test_render_returns_blocks(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
         page = vlm_ctx.ui._pages.get("vlm:board")

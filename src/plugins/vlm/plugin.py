@@ -189,59 +189,26 @@ class VlmPlugin(Plugin):
     # ----------------------------------------------------------------
     def _setup_ui(self) -> None:
         ui = self._ctx.ui
-        try:
-            ui.add_tab("left", "classroom", "课堂", plugin_id=self.id)
-        except ValueError:
-            pass  # tab already exists (from summarize plugin)
-        try:
-            ui.add_toolbox_item(
-                "classroom",
-                "vlm.board",
-                "板书",
-                description="最新融合图像与板书文字",
-                render=self._render_board_item,
-                plugin_id=self.id,
-            )
-        except ValueError:
-            pass
+        # Debug view only: no sidebar surface, opened from the command palette.
         ui.add_page(
             "vlm:board",
             "板书识别",
             render=self._render_board_page,
+            icon="🖼",
+            order=21,
             plugin_id=self.id,
         )
-
-    def _render_board_item(self) -> list[dict[str, Any]]:
-        status = self.status()
-        blocks: list[dict[str, Any]] = [
-            {
-                "type": "keyvalue",
-                "items": [
-                    ["状态", "运行中" if status.get("worker_alive") else "未启动"],
-                    ["已处理到", f"{float(status.get('cursor', 0.0)):.0f}s"],
-                    ["累计错误", status.get("consecutive_errors", 0)],
-                    ["最近错误", status.get("last_error") or "—"],
-                ],
-            },
-            {
-                "type": "buttons",
-                "buttons": [
-                    {
-                        "label": "打开板书页",
-                        "action": "ui.open_page",
-                        "value": {"page_id": "vlm:board"},
-                        "class": "btn btn-sm btn-primary",
-                    },
-                    {
-                        "label": "VLM 设置",
-                        "action": "ui.open_page",
-                        "value": {"page_id": "settings:main"},
-                        "class": "btn btn-sm",
-                    },
-                ],
-            },
-        ]
-        return blocks
+        ui.register_command(
+            "vlm.debug",
+            "板书识别（调试）",
+            subtitle="查看融合板书图像与识别文本",
+            category="调试",
+            icon="🖼",
+            order=21,
+            page_id="vlm:board",
+            keywords="vlm board blackboard debug 板书",
+            plugin_id=self.id,
+        )
 
     def _render_board_page(self) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []

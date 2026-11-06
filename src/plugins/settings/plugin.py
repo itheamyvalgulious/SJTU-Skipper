@@ -64,15 +64,8 @@ class SettingsPlugin(Plugin):
         self._listener = self.service.add_listener(self._on_settings_changed)
 
         ui = ctx.ui
-        ui.add_tab(
-            "right",
-            TAB_ID,
-            "设置",
-            icon="⚙",
-            order=900,
-            plugin_id=self.id,
-        )
-        self._tab_added = True
+        # Settings live in a page only; no sidebar tab.  Reachable from the
+        # menu bar / command palette (Ctrl+P).
         ui.add_page(
             PAGE_ID,
             "设置",
@@ -88,8 +81,19 @@ class SettingsPlugin(Plugin):
             CLEAR_SECRET_ACTION, self._handle_clear_secret, plugin_id=self.id
         )
         self._clear_action_added = True
+        ui.register_command(
+            "settings.open",
+            "设置",
+            subtitle="Canvas、LLM、转写、板书与笔记",
+            category="视图",
+            icon="⚙",
+            order=10,
+            page_id=PAGE_ID,
+            keywords="settings config canvas token api key",
+            plugin_id=self.id,
+        )
+        self._command_added = True
 
-        self._ensure_sidebar_item()
         ctx.logger.debug("settings plugin ready: %s", self.store.path)
 
     def teardown(self) -> None:
@@ -116,16 +120,12 @@ class SettingsPlugin(Plugin):
                 except Exception:  # noqa: BLE001
                     pass
                 self._page_added = False
-            try:
-                ctx.ui.remove_toolbox_item("settings.open")
-            except Exception:  # noqa: BLE001
-                pass
-            if self._tab_added:
+            if getattr(self, "_command_added", False):
                 try:
-                    ctx.ui.remove_tab(TAB_ID)
+                    ctx.ui.unregister_command("settings.open")
                 except Exception:  # noqa: BLE001
                     pass
-                self._tab_added = False
+                self._command_added = False
         with self._lock:
             self._items.clear()
 
@@ -160,39 +160,6 @@ class SettingsPlugin(Plugin):
             grouped.setdefault(spec.group, []).append(spec)
         return list(grouped.items())
 
-    def _ensure_sidebar_item(self) -> None:
-        """One compact settings entry; the page owns all group editing."""
-
-        ctx = self.ctx
-        if ctx is None:
-            return
-        with self._lock:
-            if "open" in self._items:
-                return
-            self._items["open"] = "settings.open"
-        try:
-            ctx.ui.add_toolbox_item(
-                TAB_ID,
-                "settings.open",
-                "设置",
-                description="Canvas、LLM 连接、转写、板书与笔记",
-                order=0,
-                render=self._render_sidebar,
-                plugin_id=self.id,
-            )
-        except Exception:  # noqa: BLE001 - duplicate/UI gone
-            ctx.logger.exception("failed to add settings entry")
-
-    def _render_sidebar(self) -> list[dict[str, Any]]:
-        groups = self._grouped_specs()
-        total = sum(len(specs) for _group, specs in groups)
-        return [
-            {
-                "type": "markdown",
-                "text": f"按分组编辑设置，保存后立即生效。当前 {len(groups)} 组 / {total} 项。",
-            }
-        ]
-
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
@@ -204,8 +171,7 @@ class SettingsPlugin(Plugin):
                     "type": "markdown",
                     "text": (
                         "### 设置\n\n"
-                        "尚未注册任何设置项。加载 LLM、输入、STT、VLM 等插件后，"
-                        "它们声明的设置会自动出现在这里。"
+                        "暂无设置项。"
                     ),
                 }
             ]

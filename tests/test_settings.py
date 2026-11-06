@@ -261,11 +261,14 @@ def test_plugin_registers_service_and_tab(tmp_path: Path) -> None:
         assert isinstance(service, SettingsService)
         assert service.store.path == tmp_path / "settings.json"
         snapshot = runtime.ui.snapshot()
-        assert snapshot["tabs"]["settings"] == "right"
+        assert "settings" not in snapshot["tabs"], "settings must live in a page, not a tab"
         assert snapshot["pages"]["settings:main"] == "设置"
         assert "settings.save" in snapshot["actions"]
-        tab = next(t for t in runtime.ui.state()["right_tabs"] if t["id"] == "settings")
-        assert tab["title"] == "设置"
+        assert "settings.open" in snapshot["commands"]
+        commands = runtime.ui.state()["commands"]
+        command = next(c for c in commands if c["id"] == "settings.open")
+        assert command["page"] == "settings:main"
+        assert command["category"] == "视图"
     finally:
         runtime.stop()
 
@@ -276,7 +279,7 @@ def test_page_shows_hint_without_specs(tmp_path: Path) -> None:
         runtime.ui.open_page("settings:main")
         blocks = runtime.ui.state()["page_content"]["settings:main"]
         assert blocks and blocks[0]["type"] == "markdown"
-        assert "尚未注册任何设置项" in blocks[0]["text"]
+        assert "暂无设置项" in blocks[0]["text"]
     finally:
         runtime.stop()
 
@@ -290,12 +293,9 @@ def test_ui_state_has_form_per_group_and_toolbox_items(tmp_path: Path) -> None:
         service.set("llm.api_key", "secret-value")
 
         state = runtime.ui.state()
-        tab = next(t for t in state["right_tabs"] if t["id"] == "settings")
-        item_ids = [item["id"] for item in tab["toolbox"]]
-        assert item_ids == ["settings.open"]
-        settings_item = tab["toolbox"][0]
-        assert any(block["type"] == "markdown" for block in settings_item["blocks"])
-        assert not any(block["type"] == "form" for block in settings_item["blocks"])
+        # No settings tab / toolbox item: only the page (opened via palette).
+        assert all(t["id"] != "settings" for t in state["right_tabs"])
+        assert all(i["id"] != "settings.open" for t in state["right_tabs"] for i in t["toolbox"])
 
         runtime.ui.open_page("settings:main")
         blocks = runtime.ui.state()["page_content"]["settings:main"]
