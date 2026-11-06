@@ -1,7 +1,4 @@
-"""STT placeholder plugin package.
-
-There is currently no speech-recognition backend and no ``stt.*`` setting.
-"""
+"""STT plugin package: Google Cloud Speech-to-Text v2 (OAuth)."""
 
 from __future__ import annotations
 
