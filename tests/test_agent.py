@@ -116,6 +116,20 @@ class TestFileWorkspace:
         with pytest.raises(ValueError):
             ws._validate_name(None)  # noqa: SLF001
 
+    def test_hidden_spill_files(self, tmp_path: Path):
+        ws = FileWorkspace({"a.txt": tmp_path / "a.txt"})
+        name = ws.spill("x" * 5000)
+        assert ws.is_hidden(name)
+        assert name not in ws.visible_names
+        assert name in ws.names
+        assert ws.text(name) == "x" * 5000
+
+    def test_hidden_files_stay_hidden_after_copy(self, tmp_path: Path):
+        ws = FileWorkspace({"a.txt": tmp_path / "a.txt"})
+        name = ws.spill("payload")
+        clone = ws.copy()
+        assert clone.is_hidden(name)
+
     def test_read_lines_l_r_m1(self, tmp_path: Path):
         f = tmp_path / "test.txt"
         f.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
@@ -1022,5 +1036,47 @@ class TestAgentSettings:
             assert session.model == "gpt-5"
             assert session.max_steps == 8
             assert session.system_prompt == "custom default"
+        finally:
+            runtime.stop()
+
+# ===================================================================
+# Context trimming
+# ===================================================================
+
+
+class TestHistoryTrimming:
+    def test_old_tool_results_are_spilled(self, tmp_path: Path) -> None:
+        runtime, agent, _llm, _settings = _make_agent_runtime(tmp_path)
+        try:
+            session = agent.create_session(
+                "trim",
+                files={"notes.md": tmp_path / "notes.md"},
+                max_history_chars=100,
+            )
+            session.add_message("user", "go")
+            session.add_message("tool", "A" * 80, tool_call_id="t1")
+            session.add_message("tool", "B" * 80, tool_call_id="t2")
+            session.add_message("tool", "C" * 80, tool_call_id="t3")
+            payload = agent._payload_messages(session)
+            tool_messages = [m for m in payload if m["role"] == "tool"]
+            assert tool_messages[-1]["content"] == "C" * 80
+            assert tool_messages[0]["content"] != "A" * 80
+            assert "隐藏文件" in tool_messages[0]["content"]
+            # Spilled content is readable again through the workspace.
+            name = session.messages[1]["spilled_as"]
+            assert agent.get_session(session.id).workspace.text(name) == "A" * 80
+            # Repeated calls reuse the same spill file.
+            again = agent._payload_messages(session)
+            assert again[1]["content"] == tool_messages[0]["content"]
+        finally:
+            runtime.stop()
+
+    def test_without_budget_history_is_untouched(self, tmp_path: Path) -> None:
+        runtime, agent, _llm, _settings = _make_agent_runtime(tmp_path)
+        try:
+            session = agent.create_session("plain", files={"a.md": tmp_path / "a.md"})
+            session.add_message("tool", "x" * 5000, tool_call_id="t1")
+            payload = agent._payload_messages(session)
+            assert payload[0]["content"] == "x" * 5000
         finally:
             runtime.stop()

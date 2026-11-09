@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -24,8 +25,16 @@ class FileWorkspace:
     logical names; the real paths are never exposed to the LLM.
     """
 
-    def __init__(self, files: Mapping[str, str | Path] | None = None) -> None:
+    def __init__(
+        self,
+        files: Mapping[str, str | Path] | None = None,
+        *,
+        cache_dir: str | Path | None = None,
+    ) -> None:
         self._files: dict[str, Path] = {}
+        self._hidden: set[str] = set()
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else None
+        self._spill_seq = 0
         if files:
             for name, path in files.items():
                 self.register(name, path)
@@ -33,11 +42,22 @@ class FileWorkspace:
     # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
-    def register(self, name: str, path: str | Path) -> None:
-        """Map *name* to *path*, validating the name first."""
+    def register(
+        self, name: str, path: str | Path, *, hidden: bool = False
+    ) -> None:
+        """Map *name* to *path*, validating the name first.
+
+        Hidden files stay readable (by exact name) but are left out of
+        ``info`` listings: they hold spill-over tool output the user should
+        not see.
+        """
         self._validate_name(name)
         resolved = Path(path).resolve()
         self._files[name] = resolved
+        if hidden:
+            self._hidden.add(name)
+        else:
+            self._hidden.discard(name)
 
     def ensure(self, name: str) -> Path:
         """Return the absolute path for *name*, creating an empty file if missing."""
@@ -54,6 +74,31 @@ class FileWorkspace:
     def names(self) -> tuple[str, ...]:
         """Registered logical names in insertion order."""
         return tuple(self._files)
+
+    @property
+    def visible_names(self) -> tuple[str, ...]:
+        """Names shown to the agent (hidden spill files excluded)."""
+        return tuple(name for name in self._files if name not in self._hidden)
+
+    def is_hidden(self, name: str) -> bool:
+        return name in self._hidden
+
+    def spill(self, content: str, *, prefix: str = "tool-output") -> str:
+        """Persist *content* as a hidden workspace file; return its name."""
+
+        self._spill_seq += 1
+        name = f"{prefix}-{int(time.time() * 1000)}-{self._spill_seq:03d}.md"
+        directory = self._cache_dir
+        if directory is None:
+            if self._files:
+                directory = next(iter(self._files.values())).parent / ".agent-cache"
+            else:
+                directory = Path(tempfile.gettempdir()) / "agent-cache"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        self.register(name, path, hidden=True)
+        self.write(name, content)
+        return name
 
     def path(self, name: str) -> Path:
         """Return the absolute path for *name* (never creates)."""
@@ -182,7 +227,9 @@ class FileWorkspace:
     # ------------------------------------------------------------------
     def copy(self) -> "FileWorkspace":
         """Return a shallow clone with the same logical→path mapping."""
-        return FileWorkspace(dict(self._files))
+        clone = FileWorkspace(dict(self._files), cache_dir=self._cache_dir)
+        clone._hidden = set(self._hidden)
+        return clone
 
 
 def _find_line_numbers(text: str, needle: str) -> list[int]:

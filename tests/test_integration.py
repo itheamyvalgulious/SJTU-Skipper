@@ -97,7 +97,7 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
 
 
 def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
-    """The non-instant plugin rewrites a whole note file with ``write``."""
+    """The non-instant plugin lets the agent write the three notes."""
     cfg = load_config(data_dir=tmp_path)
     outline = (
         "# 课堂讲义：知识\n\n"
@@ -110,12 +110,12 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
             tool_calls=[
                 FakeToolCall(
                     "w1",
-                    "write",
+                    "append",
                     {"file": "note_knowledge.md", "text": outline},
                 ),
                 FakeToolCall(
                     "w2",
-                    "write",
+                    "append",
                     {"file": "note_notice.md", "text": "# 通知\n\n## 作业\n\n- 习题 3.1\n"},
                 ),
             ]
@@ -156,3 +156,4 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
         assert llm.calls, "summarize never called the LLM"
     finally:
         runtime.stop()
+

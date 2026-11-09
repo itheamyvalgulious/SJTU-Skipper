@@ -154,7 +154,7 @@ def _build_default_tools(
         def tool_info(**kwargs: Any) -> str:
             session = session_getter()
             files: list[str] = []
-            for fname in workspace.names:
+            for fname in workspace.visible_names:
                 try:
                     p = workspace._files.get(fname)  # noqa: SLF001
                     if p is not None and p.exists():

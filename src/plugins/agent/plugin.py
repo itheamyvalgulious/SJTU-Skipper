@@ -101,6 +101,17 @@ def _normalize_tool_calls(response: Any) -> list[dict[str, Any]]:
             except (json.JSONDecodeError, TypeError):
                 tc_args = {}
 
+        # Some models double-encode the arguments: {"arguments": "<json>"}.
+        if isinstance(tc_args, dict) and len(tc_args) == 1:
+            nested = tc_args.get("arguments")
+            if isinstance(nested, str):
+                try:
+                    parsed = json.loads(nested)
+                except (json.JSONDecodeError, TypeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    tc_args = parsed
+
         result.append(
             {
                 "id": tc_id,
@@ -136,12 +147,14 @@ class AgentService:
         default_max_steps: int,
         default_max_tool_output: int,
         default_system_prompt: str,
+        default_max_history_chars: int = 0,
         settings_getter: Callable[[str, Any], Any] | None = None,
     ) -> None:
         self._ctx = ctx
         self._default_model = default_model
         self._default_max_steps = default_max_steps
         self._default_max_tool_output = default_max_tool_output
+        self._default_max_history_chars = default_max_history_chars
         self._default_system_prompt = default_system_prompt
         self._settings_getter = settings_getter
         self._sessions: dict[str, AgentSession] = {}
@@ -173,6 +186,9 @@ class AgentService:
         model: str | None = None,
         max_steps: int | None = None,
         max_tool_output: int | None = None,
+        max_history_chars: int | None = None,
+        max_tokens: int | None = None,
+        llm_extra: Mapping[str, Any] | None = None,
         extra_instructions: Iterable[str] = (),
         parent_id: str | None = None,
         meta: Mapping[str, Any] | None = None,
@@ -190,6 +206,8 @@ class AgentService:
             max_steps: REPL iteration cap for this session.
             max_tool_output: Per-tool-call output cap in characters; ``None``
                 uses the ``agent.max_tool_output`` setting.
+            max_history_chars: Cap on the tool-result characters kept in the
+                LLM payload; older results are spilled to hidden files.
             extra_instructions: Per-session lines appended after the system prompt.
             parent_id: Session to fork from (for create_subsession).
             meta: Arbitrary caller metadata.
@@ -233,6 +251,22 @@ class AgentService:
                     "agent.max_tool_output", self._default_max_tool_output
                 )
             ),
+            max_history_chars=(
+                max(0, int(max_history_chars))
+                if max_history_chars is not None
+                else max(
+                    0,
+                    int(
+                        self._setting(
+                            "agent.max_history_chars",
+                            self._default_max_history_chars,
+                        )
+                        or 0
+                    ),
+                )
+            ),
+            max_tokens=max(0, int(max_tokens or 0)),
+            llm_extra=dict(llm_extra or {}),
             extra_instructions=tuple(extra_instructions),
             parent_id=parent_id,
             meta=dict(meta or {}),
@@ -262,6 +296,8 @@ class AgentService:
             "tools": list(parent.tools.values()),
             "model": parent.model,
             "max_steps": parent.max_steps,
+            "max_tokens": parent.max_tokens,
+            "llm_extra": dict(parent.llm_extra),
             "extra_instructions": parent.extra_instructions,
             "meta": dict(parent.meta),
         }
@@ -375,6 +411,54 @@ class AgentService:
     # ------------------------------------------------------------------
     # System prompt assembly
     # ------------------------------------------------------------------
+    def _payload_messages(self, session: AgentSession) -> list[dict[str, Any]]:
+        """History for the next LLM call, with oversized tool results trimmed.
+
+        A whole-lecture summarizer reads the same material over many steps; if
+        every ``read`` result stayed in the conversation, the context would grow
+        past the model window.  Results beyond ``max_history_chars`` are spilled
+        to hidden workspace files (the agent can ``read`` them again by name)
+        and replaced with a short pointer.
+        """
+
+        budget = int(getattr(session, "max_history_chars", 0) or 0)
+        with session.lock:
+            messages = [dict(message) for message in session.messages]
+            originals = list(session.messages)
+
+        if budget <= 0:
+            return messages
+
+        kept = 0
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if message.get("role") != "tool":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            size = len(content)
+            if kept + size <= budget:
+                kept += size
+                continue
+            name = originals[index].get("spilled_as")
+            if not name:
+                try:
+                    name = session.spill_tool_output(content)
+                except Exception:  # noqa: BLE001 - fall back to a plain stub
+                    name = ""
+                else:
+                    with session.lock:
+                        originals[index]["spilled_as"] = name
+            if name:
+                message["content"] = (
+                    f"[工具输出已转存为隐藏文件 {name}（{size} 字符）；"
+                    f"需要原文时用 read 读取该文件]"
+                )
+            else:
+                message["content"] = f"[已省略 {size} 字符的工具输出]"
+        return messages
+
     def _build_system_prompt(self, session: AgentSession) -> str:
         """Assemble the full system prompt for a run."""
         parts: list[str] = [session.system_prompt]
@@ -457,16 +541,14 @@ class AgentService:
         tool_schemas = [t.openai_schema() for t in session.tools.values()]
 
         # --- REPL ---
-        while step < session.max_steps:
+        while session.max_steps <= 0 or step < session.max_steps:
             step += 1
 
-            # Build messages for the LLM
+            # Build messages for the LLM (old tool results are trimmed).
             llm_messages: list[dict[str, Any]] = []
             if system:
                 llm_messages.append({"role": "system", "content": system})
-            # Snapshot messages under lock
-            with session.lock:
-                llm_messages.extend(list(session.messages))
+            llm_messages.extend(self._payload_messages(session))
 
             # --- LLM call ---
             try:
@@ -476,6 +558,8 @@ class AgentService:
                     tools=tool_schemas if tool_schemas else None,
                     model=session.model,
                     temperature=0.2,
+                    max_tokens=session.max_tokens or None,
+                    extra=dict(session.llm_extra) or None,
                 )
             except Exception as exc:
                 self._emit(
@@ -742,6 +826,17 @@ class AgentPlugin(Plugin):
                 default=8000,
                 group=_AGENT_SETTINGS_GROUP,
                 description="超过此长度的工具输出会被截断；新建会话生效。",
+            ),
+            SettingsSpec(
+                key="agent.max_history_chars",
+                label="上下文工具结果上限",
+                type="int",
+                default=0,
+                group=_AGENT_SETTINGS_GROUP,
+                description=(
+                    "保留在上下文里的工具结果字符数上限；更早的结果转存为隐藏文件"
+                    "（用 read 可再读）；0 = 不限制。新建会话生效。"
+                ),
             ),
             SettingsSpec(
                 key="agent.system_prompt",

@@ -26,20 +26,20 @@ INSTANT_NOTE_HEADERS: dict[str, str] = {
     "instant_note_knowledge.md": (
         "# 课堂知识笔记（实时）\n\n"
         "> 本文件记录课程知识内容：定义、定理、证明、概念、公式、例题等。\n"
-        "> 结构：按知识逻辑分章节组织，允许整篇重写；不得压缩细节。\n"
+        "> 结构：按知识逻辑分章节组织；增量维护，必要时才重排章节；不得压缩细节。\n"
         "> 公式使用 $...$（行内）或 $$...$$（行间）。\n\n"
     ),
     "instant_note_gossip.md": (
         "# 课堂闲话笔记（实时）\n\n"
         "> 本文件记录与课程知识无关的内容：世界局势、生活趣事、对学生的期待、\n"
         "> AI 对数学的冲击、个人经历分享等。\n"
-        "> 结构：按主题分章节组织，允许整篇重写；不得压缩细节。\n"
+        "> 结构：按主题分章节组织；增量维护，必要时才重排章节；不得压缩细节。\n"
         "> 公式使用 $...$（行内）或 $$...$$（行间）。\n\n"
     ),
     "instant_note_notice.md": (
         "# 课堂通知笔记（实时）\n\n"
         "> 本文件记录作业、考试、考核要求、课程安排等通知。\n"
-        "> 结构：按类型分章节组织，允许整篇重写；不得压缩细节。\n"
+        "> 结构：按类型分章节组织；增量维护，必要时才重排章节；不得压缩细节。\n"
         "> 公式使用 $...$（行内）或 $$...$$（行间）。\n\n"
     ),
 }
@@ -200,7 +200,7 @@ class InstantSummarizePlugin(Plugin):
     }
 
     def _docs(self) -> list[dict[str, str]]:
-        sid = self.ctx.streams.current.session_id
+        sid = self.ctx.streams.notes_session_id
         return [
             {
                 "key": key,
@@ -211,7 +211,7 @@ class InstantSummarizePlugin(Plugin):
         ]
 
     def _render_note_item(self) -> list[dict[str, Any]]:
-        sid = self.ctx.streams.current.session_id
+        sid = self.ctx.streams.notes_session_id
         ready = sum(
             1
             for key in self._DOC_LABELS
@@ -269,7 +269,7 @@ class InstantSummarizePlugin(Plugin):
 
     def _on_summarize_now(self, _payload: dict[str, Any]) -> dict[str, Any]:
         """Action handler: force a summary for the current session."""
-        sid = self.ctx.streams.current.session_id
+        sid = self.ctx.streams.notes_session_id
         streams = self.ctx.streams.current
 
         wm = self._ensure_watermarks(sid)
@@ -353,6 +353,10 @@ class InstantSummarizePlugin(Plugin):
         streams = self.ctx.streams.current
         if streams.session_id != session_id:
             # Session has changed; skip (the old session is no longer current).
+            return False
+        if str(streams.meta.get("mode", "")) == "fast":
+            # Recordings are processed at full speed and summarized once at
+            # the end; incremental notes would just fire on every window.
             return False
 
         # Calculate deltas since last watermark.

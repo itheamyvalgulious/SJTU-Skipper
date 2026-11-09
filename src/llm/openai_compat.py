@@ -12,6 +12,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator
@@ -171,6 +172,10 @@ class OpenAICompatibleProvider:
 
     name: str = "openai-compatible"
     _client: httpx.Client = field(init=False, repr=False)
+    _retired: list[httpx.Client] = field(init=False, repr=False, default_factory=list)
+    _config_lock: threading.RLock = field(
+        init=False, repr=False, default_factory=threading.RLock
+    )
 
     def __post_init__(self) -> None:
         self._client = self._make_client(self.config)
@@ -189,17 +194,21 @@ class OpenAICompatibleProvider:
         )
 
     def reconfigure(self, config: ProviderConfig) -> None:
-        """Apply new settings (base URL/key/headers) without a restart."""
+        """Apply new settings (base URL/key/headers) without a restart.
 
-        if config == self.config:
-            return
-        old = self._client
-        self.config = config
-        self._client = self._make_client(config)
-        try:
-            old.close()
-        except Exception:  # pragma: no cover - best effort
-            pass
+        ``LLMService`` calls this before every request, so it must stay cheap.
+        The old client is *not* closed immediately: a concurrent recording
+        pipeline may still have requests in flight on it.  Retired clients are
+        closed in :meth:`close`.
+        """
+
+        with self._config_lock:
+            if config == self.config:
+                return
+            old = self._client
+            self.config = config
+            self._client = self._make_client(config)
+            self._retired.append(old)
 
     # ------------------------------------------------------------------
     # public API
@@ -265,6 +274,14 @@ class OpenAICompatibleProvider:
         ) from last_exception
 
     def close(self) -> None:
+        with self._config_lock:
+            retired = self._retired
+            self._retired = []
+        for client in retired:
+            try:
+                client.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
         self._client.close()
 
     # ------------------------------------------------------------------

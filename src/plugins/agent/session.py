@@ -43,10 +43,24 @@ class AgentSession:
     """LLM model name for this session."""
 
     max_steps: int = 12
-    """Maximum REPL iterations before the run is cut short."""
+    """Maximum REPL iterations; ``0`` means unlimited (run until the model stops)."""
 
     max_tool_output: int = 8000
     """Tool output longer than this is truncated before being sent to the LLM."""
+
+    max_history_chars: int = 0
+    """Cap (characters) on tool results kept in the LLM payload.
+
+    Older tool results are spilled to hidden workspace files and replaced by a
+    pointer, so a long ``read``-driven run does not blow the context window.
+    ``0`` keeps everything.  Assistant/user messages are always kept.
+    """
+
+    max_tokens: int = 0
+    """Per-call output token cap (0 = provider default)."""
+
+    llm_extra: dict[str, Any] = field(default_factory=dict)
+    """Extra request-body fields (e.g. ``{"reasoning_effort": "max"}``)."""
 
     extra_instructions: tuple[str, ...] = ()
     """Per-session instructions appended to the system prompt on every run."""
@@ -85,6 +99,11 @@ class AgentSession:
                 if msg.get("role") == "assistant":
                     return msg
         return None
+
+    def spill_tool_output(self, content: str) -> str:
+        """Write a tool result to a hidden workspace file; return its name."""
+
+        return self.workspace.spill(content, prefix="tool-output")
 
     def clear_messages(self) -> None:
         """Drop all messages (used by ``reset``)."""
