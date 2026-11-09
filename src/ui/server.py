@@ -8,17 +8,45 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
+from urllib.parse import urlsplit
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from config import SHUTDOWN_TIMEOUT
 from core.runtime import Runtime
 
 logger = logging.getLogger("lecture_agent.server")
 STATIC_DIR = Path(__file__).with_name("static")
+
+# Media URLs are relayed through the server so a browser that cannot reach the
+# campus video portal (e.g. over VPN) still gets the lecture stream.  Only SJTU
+# hosts are accepted to keep this from becoming an open proxy.
+_MEDIA_HOST_SUFFIXES = (".sjtu.edu.cn",)
+_MEDIA_HOSTS = {"sjtu.edu.cn", "live.sjtu.edu.cn", "oc.sjtu.edu.cn"}
+_MEDIA_PASSTHROUGH_HEADERS = (
+    "content-type",
+    "content-length",
+    "content-range",
+    "accept-ranges",
+    "last-modified",
+    "etag",
+    "cache-control",
+)
+
+
+def _allowed_media_url(src: str) -> str:
+    parsed = urlsplit(src)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="unsupported media URL")
+    if host not in _MEDIA_HOSTS and not host.endswith(_MEDIA_HOST_SUFFIXES):
+        raise HTTPException(status_code=400, detail="media host not allowed")
+    return src
 
 
 class ActionRequest(BaseModel):
@@ -115,6 +143,11 @@ def create_app(runtime: Runtime) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owns_runtime = not runtime.started
         broadcaster.bind_loop(asyncio.get_running_loop())
+        app.state.media_client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(30.0, read=120.0),
+            headers={"User-Agent": "sjtu-skipper/0.1"},
+        )
         subscription = runtime.bus.on(
             "ui.changed",
             lambda event: broadcaster.broadcast(event.get("reason", "")),
@@ -128,6 +161,13 @@ def create_app(runtime: Runtime) -> FastAPI:
             yield
         finally:
             subscription.cancel()
+            client: httpx.AsyncClient | None = getattr(app.state, "media_client", None)
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception:  # noqa: BLE001 - shutdown is best effort
+                    pass
+                app.state.media_client = None
             if owns_runtime:
                 _stop_runtime(runtime)
 
@@ -204,6 +244,51 @@ def create_app(runtime: Runtime) -> FastAPI:
     def artifact(session_id: str, subpath: str, request: Request) -> FileResponse:
         path = _safe_artifact(runtime.data_dir, session_id, subpath)
         return FileResponse(path)
+
+    @app.api_route("/api/media", methods=["GET", "HEAD"])
+    async def media(src: str, request: Request) -> StreamingResponse:
+        """Relay a campus media URL so any browser can play it.
+
+        Range requests are forwarded verbatim, so seeking works and the whole
+        file is never buffered in memory.
+        """
+
+        url = _allowed_media_url(src)
+        client: httpx.AsyncClient | None = getattr(request.app.state, "media_client", None)
+        if client is None:
+            raise HTTPException(status_code=503, detail="media relay unavailable")
+
+        headers: dict[str, str] = {}
+        range_header = request.headers.get("range")
+        if range_header:
+            headers["Range"] = range_header
+        if_range = request.headers.get("if-range")
+        if if_range:
+            headers["If-Range"] = if_range
+
+        upstream_request = client.build_request(
+            "HEAD" if request.method == "HEAD" else "GET", url, headers=headers
+        )
+        try:
+            upstream = await client.send(upstream_request, stream=True)
+        except httpx.HTTPError as exc:
+            logger.warning("media relay failed for %s: %s", url, exc)
+            raise HTTPException(status_code=502, detail=f"media relay failed: {exc}")
+
+        passthrough = {
+            name: value
+            for name in _MEDIA_PASSTHROUGH_HEADERS
+            if (value := upstream.headers.get(name))
+        }
+        if request.method == "HEAD":
+            await upstream.aclose()
+            return StreamingResponse(iter(()), status_code=upstream.status_code, headers=passthrough)
+        return StreamingResponse(
+            upstream.aiter_bytes(),
+            status_code=upstream.status_code,
+            headers=passthrough,
+            background=BackgroundTask(upstream.aclose),
+        )
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket) -> None:

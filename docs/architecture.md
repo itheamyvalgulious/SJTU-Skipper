@@ -460,12 +460,20 @@ POST /api/ui/action
 - 长任务（LLM、下载、网络请求）在后台线程执行；action 立即返回，通过 `ui.changed` 刷新。
 - 插件 action 处理器必须捕获异常并返回 `{"ok": false, "message": ...}`。
 
-### 6.4 Web 服务
+### 6.4 流控与并发处理
+
+- `core/streams.py` 的 `BacklogGate` 给 `audio`/`video` 各挂一道闸门：reader 在 append 前 `wait(已摄录时长)`，消费者提交窗口后 `release(窗口结束时间)`。录播全速解码时，未处理媒体被限制在 `窗口 × (并发 + 4)` 以内（1.5h 课程不再把 5GB 帧塞进内存）；直播闸门 limit=0，不生效。
+- 闸门有 stall 看门狗（默认 300 s）：消费者挂死时自动放行并告警，避免 reader 永久阻塞。
+- `core/pipeline.py` 的 `OrderedWindowPool`：线程池并发执行窗口，按窗口序号有序提交；单窗异常封装为 `WindowError` 交给提交回调决定重试/记录。
+- 结束屏障：两个 ffmpeg reader 都 EOF（`session.input_done`）→ input 等待 `stt.busy()`/`vlm.busy()` 变 False → 才 `end_session`；`summarize` 在 `session.stopped` 上跑一次全量讲义。录播不触发 instant-summarize。
+
+### 6.5 Web 服务
 
 - `GET /`：静态前端。
 - `GET /api/ui/state`：完整 UI 状态 + 运行时状态。
 - `POST /api/ui/action`：执行 action。
 - `GET /api/artifacts/{path}`：受限于 data_dir 的静态文件（图片、笔记）。
+- `GET /api/media?src=...`：视频转发代理。只允许 `*.sjtu.edu.cn` 的 URL，透传 `Range`/`Content-Range`，浏览器不必能直连 `live.sjtu.edu.cn`（VPN 场景）；HLS 播放列表不走代理。
 - `WS /ws`：服务端推送 `{"type":"refresh","reason":...}`。
 - 前端每 3 秒兜底轮询 state；WebSocket 断开自动重连。
 
@@ -503,7 +511,8 @@ SettingsSpec(
 ### 7.3 input（输入插件）
 
 - 服务名：`input`。
-- 设置项：Canvas token/base URL、SJTU 视频门户、音频采样率、视频 fps/宽度、播放速度、直播设备选择。
+- 设置项：Canvas token/base URL、SJTU 视频门户、音频采样率、视频 fps/宽度、本地保留录像节数（`input.keep_recordings`）、直播设备选择。
+- 处理模式由课程类型决定：**直播 = 1:1 实时**，**录播 = 全速**（无 `-re`，无变速）；`session.meta["mode"]` 记录 `live`/`fast`。
 - 依赖 `settings`；使用 vendored `integrations/sjtu_canvas_assistant` 的 Canvas/VOD 能力；直播使用新版门户端点：
   - `GET {portal}/v1/vod_live`（时间范围直播列表）
   - `GET {portal}/v1/course_vod_videoinfos?courseId=...&playType=2`（FLV 设备流）
@@ -513,11 +522,13 @@ SettingsSpec(
 - 直播通道：
   - 今日/近期直播列表 -> 选择设备（老师/课件）-> FLV URL。
   - 也支持手动 HLS/RTMP/HTTP URL。
+- 录播先**下载到本地**（`sessions/<sid>/media/<name>.mp4`，`.part` → 原子重命名）再交给 ffmpeg，避免音频/视频两个进程各拉一遍远端；下载失败自动回退为直读远端。本地文件同时用于回看（`/api/artifacts/<sid>/media/<name>`，Starlette `FileResponse` 原生支持 Range）。
 - `FFmpegSource` 同时起两个 ffmpeg 子进程：
   - 音频：`-vn -ac 1 -ar 16000 -f s16le pipe:1`
   - 视频：`-an -vf fps=4 -f image2pipe -vcodec mjpeg pipe:1`（默认保持原分辨率）
-  - 录播加 `-re` 按实时速度；直播加低延迟参数。
+  - 录播全速解码（无 `-re`）；直播加低延迟参数（天然 1:1）。
   - 解析 JPEG SOI/EOI 边界，逐帧 `append_frame`。
+  - 音频、视频两个 reader **都 EOF** 才发 `input.ended` 并置 `session.input_done`；否则全速模式下音频先结束会截断视频与 VLM 结果。
 - 一个 `SourceManager` 保证同一时刻最多一个源；支持 pause/resume/stop/seek（seek 仅录播/本地文件）。
 - UI：
   - 左侧只有一个可折叠的**课程树**（`tree` block）：课程 → 某次课（录播与直播同一条路径）。
@@ -525,33 +536,40 @@ SettingsSpec(
     - 正在直播的课程/节次带 `直播中` 徽章并默认展开，一键进入直播；
     - 展开状态保存在插件内存，`input.toggle_course` 切换。
   - 右侧 tab「本节课」：toolbox「处理控制」。
-  - 页面 `input:session`（标题「课堂」）：`player` block 并排播放两路视频——「课堂」（`viewNum=1`，黑板/讲台）与「屏幕」（`viewNum=2`，大屏共享）；没有第二路时显示占位。
+  - 页面 `input:session`（标题「课堂」）：标题带 `直播`/`录播` 徽章。
+    - **直播**：`player` block 并排播放两路视频——「课堂」（`viewNum=1`，黑板/讲台）与「屏幕」（`viewNum=2`，大屏共享）；没有第二路时显示占位。
+    - **录播**：不渲染播放器，只显示下载/处理进度卡片（`progress` block）与「打开录像」链接（本地 mp4，新窗口播放），避免每秒进度刷新重建 `<video>` 打断播放。
     - 前端按 URL 后缀选择播放器：`.m3u8` → hls.js（Safari 用原生 HLS），`.flv` → mpegts.js，其余交给原生 `<video>`。
+    - 除 `.m3u8` 外的媒体地址一律改写成 `/api/media?src=...`，由服务端转发；浏览器直连失败时 pane 里会显示红色提示。
     - 屏幕流默认静音，避免两路音频叠加。
   - 点击「课程 → 某次课」只**选中并加载**视频地址（`input.open_class`），不创建会话、不启动 ffmpeg、不自动播放。
-  - 「继续处理」按钮（`input.start_processing`）才开始 ffmpeg 摄取与会话；默认暂停。
-  - 「暂停处理」（`input.pause_processing`）：录播暂停摄取并暂停页面视频；直播停止摄取但页面继续播放直播画面，恢复时从直播边缘继续（`continue_session`）。
-  - 录播自然播完由 `input.ended` 驱动：合并节自动切到下一节（浏览器收到新地址自动续播），最后一节结束后 `end_session("playback finished")`，触发课后讲义。
+  - 「开始处理」按钮（`input.start_processing`）才开始摄取与会话；默认暂停。启动在后台线程里完成，下载几分钟也不会阻塞 HTTP 请求。
+  - 「暂停处理」（`input.pause_processing`）：录播暂停 reader（管道反压让 ffmpeg 自动停下）；直播停止摄取但页面继续播放直播画面，恢复时从直播边缘继续。
+  - 录播自然播完由 `input.ended` 驱动：先等待 STT/VLM 把队列排空（`_wait_for_consumers`），再切下一节或 `end_session("playback finished")`，保证总结时所有窗口都已提交。
+  - 处理完成后按 `input.keep_recordings` 只保留最近 N 节的 `media/` 目录，其余删除（讲义不受影响）。
   - 页面 `input:manual`：手动 URL（调试，仅从命令面板打开）。
 - 行为层只看到 `hub.current.audio/video`，看不到 Canvas/SJTU/ffmpeg 对象。
 
 ### 7.4 stt（语音识别插件）
 
-- 服务名：`stt`；依赖 `settings`。
+- 服务名：`stt`；依赖 `settings`；实现 `enabled()` / `busy()` 供 input 插件做"处理完成"屏障。
 - 后端：Google Cloud Speech-to-Text **v2** REST 同步接口 `POST https://{location}-speech.googleapis.com/v2/projects/{project}/locations/{location}/recognizers/_:recognize`（`location=global` 时用 `speech.googleapis.com`）。
 - 认证：**OAuth**（v2 明确拒绝 API Key）。支持粘贴 service-account JSON、authorized-user JSON（gcloud ADC 形状）或凭据文件；都不配置时回退 `GOOGLE_APPLICATION_CREDENTIALS` / ADC。`google-auth` 负责签名与刷新 token，HTTP 走 `httpx`。
-- 设置项（分组「STT」）：`stt.enabled`（默认 true）、`stt.credentials_json`（secret）、`stt.credentials_file`（可用 `GOOGLE_APPLICATION_CREDENTIALS` 种子）、`stt.project_id`（留空取凭据中的 project）、`stt.location`（默认 `us`；chirp_3 支持 `us`/`eu`/`asia-northeast1`/`asia-southeast1`）、`stt.model`（默认 `chirp_3`，另有 `chirp_2`/`long`/`short`/`telephony`/`telephony_short`）、`stt.language_code`（默认 `cmn-Hans-CN`）、`stt.chunk_seconds`（默认 20，限制 1–55 秒；v2 Recognize 硬上限 60 秒 / 10 MB）、`stt.enable_punctuation`、`stt.timeout`。
+- 设置项（分组「STT」）：`stt.enabled`（默认 true）、`stt.credentials_json`（secret）、`stt.credentials_file`（可用 `GOOGLE_APPLICATION_CREDENTIALS` 种子）、`stt.project_id`（留空取凭据中的 project）、`stt.location`（默认 `us`；chirp_3 支持 `us`/`eu`/`asia-northeast1`/`asia-southeast1`，**不支持 `global`**；若配成 `global` 会自动改用 `us` 重试）、`stt.model`（默认 `chirp_3`，另有 `chirp_2`/`long`/`short`/`telephony`/`telephony_short`）、`stt.language_code`（默认 `cmn-Hans-CN`）、`stt.chunk_seconds`（默认 20，限制 1–55 秒；v2 Recognize 硬上限 60 秒 / 10 MB）、`stt.enable_punctuation`、`stt.timeout`。
 - **不使用「模型自适应」**（Model adaptation）：不上传 phrase sets / custom classes 预制名词；只使用 `stt.model` 指定的模型。
 - 音频以 WAV 容器 + `autoDecodingConfig` 发送（chirp 模型首选），`results[*].resultEndOffset` 换算为片段起止时间，追加到 `transcript`（`source="stt"`，`meta` 含 model/confidence/languageCode）。
-- 会话结束或进程退出时 flush 剩余音频（≥1 秒）；失败保留游标并指数退避重试同一块（上限 10 秒），不跳过、不静默丢弃。
+- **录播（`session.meta["mode"] == "fast"`）**：`stt.concurrency`（默认 4）个窗口并发请求，`core.pipeline.OrderedWindowPool` 保证结果按窗口顺序提交；单片 429/5xx/网络超时自动重试 3 次（指数退避），仍失败则记一次窗口缺口并继续。
+- **直播**：单路顺序处理，保持低延迟。
+- 会话结束或进程退出时 flush 剩余音频（≥1 秒；录播由并发池负责，事件线程不再 flush）。
 - 事件：`stt.segment`、`stt.error`。
 - UI：仅调试 page（`stt:*`），不出现在侧边栏，只能从命令面板（调试 → 语音转写）打开；page 显示状态、模型、音频时长、已转写段数/字数与最近转写文本。
 
 ### 7.5 vlm（板书识别插件）
 
 - 服务名：`vlm`。
-- 设置项：enabled（默认 true）、model、window_seconds、fps、max_frames（默认 12）、fusion、dedupe_threshold、完整提示词 prompt。VLM 连接与 API Key 复用 LLM 分组。
+- 设置项：enabled（默认 true）、model、window_seconds、fps、max_frames（默认 12）、fusion、dedupe_threshold、concurrency（录播并发，默认 4）、完整提示词 prompt。VLM 连接与 API Key 复用 LLM 分组。
 - 工作线程：读 `video`，窗口内取帧 -> 融合 -> VLM -> 追加 `visual`。
+- **录播并发**：`vlm.concurrency`（默认 4）个窗口并发（瓶颈是等待模型），结果按窗口顺序提交；空白/仅示意图/与上一窗口重复的判定挪到提交阶段，保证并发下去重仍然正确。直播保持单路。
 - 融合算法来自 `picture_parser`：
   1. 解码 JPEG -> 灰度（保持原始分辨率，不裁剪、不缩放）；
   2. FFT 相位相关配准（可选）；
@@ -590,17 +608,21 @@ SettingsSpec(
 ### 7.7 summarize（非即时，整堂课）
 
 - 依赖：`settings`、`llm-agent`。
-- 设置项：`max_steps`（默认 16）、`max_tool_output`（默认 24000）、`chunk_chars`（默认 6000）、`model`、`notes_dir`、`system_prompt`、`retry_max`、`auto_on_stop`。
-- 每个会话创建三个文件：
+- 设置项：`max_tool_output`（默认 200000，单次 read 上限）、`max_history_chars`（默认 0 = 不裁剪）、`max_tokens`（默认 32000）、`model`、`notes_dir`、`system_prompt`、`retry_max`、`auto_on_stop`。
+- 每个会话创建三个笔记文件 + 一份只读材料：
   - `note_knowledge.md`：课程知识；
   - `note_gossip.md`：与课程知识无关的内容（世界局势、生活趣事、对学生的期待、AI 对数学的冲击等）；
-  - `note_notice.md`：作业、考试、考核等通知。
+  - `note_notice.md`：作业、考试、考核等通知；
+  - `lecture_source.md`：整堂课的 transcript + visual，按时间合并（`[mm:ss] 讲授：…` / `[mm:ss–mm:ss] 板书：…`）。
 - 触发：不在课堂中运行。`session.stopped`（`auto_on_stop=true`）或 UI action `summarize.full` 手动触发。
-- 执行：
-  - 取整堂课的**全部** transcript + visual（不设水位），按 `chunk_chars` 切成顺序批次；
-  - 每批创建子会话，工具为 `info/read/replace/append/write`，文件始终是同一套三个笔记；
-  - 提示词要求：清晰大纲（`##`/`###` 分章节，按知识逻辑排序）、允许用 `write` 整篇重写、禁止压缩细节、禁止时间戳；
-  - 每批结束后若文件未变化，用更严格的提示词重试一次；最后一批追加"全篇整理"指令。
+- 执行（**一次 agent 任务，模型自己 read 材料**）：
+  - 把整堂课写成 `lecture_source.md`，三份笔记与材料一起放进 agent 工作区；
+  - 只给一条任务提示，之后由模型自己 `info` → `read` 分段读材料 → `append`/`replace` 写笔记 → 回头检查；
+  - 会话 **不设步数上限**（`max_steps=0`），模型自己决定何时结束；
+  - 不裁剪工具结果（`max_history_chars=0`，按 1M 上下文设计），单次 `read` 上限 20 万字符；
+  - `reasoning_effort=max`、`max_tokens=32000`（思考 token 不挤占正文）；
+  - 工具里**不提供 `write`**：只允许追加与局部替换，避免模型整篇重写导致内容丢失；
+  - 一次运行后若三份笔记均无变化，用更严格的提示词重试一次。
 - 失败发 `summarize.error`；完成后发 `summarize.finished`。
 - UI：右侧「笔记」tab 的 toolbox「课堂讲义」；三个按钮（知识 / 闲话 / 通知）通过 reader 服务打开 `note_*.md`；「生成完整讲义」触发 `summarize.full`。
 
@@ -616,7 +638,7 @@ SettingsSpec(
 - 执行：
   - 取上次水位之后的文字（语音 + 板书，不注入时间戳），构造中文提示；
   - 创建子会话，工具为 `info/read/replace/append/write`；
-  - 要求把新内容**合并进既有大纲**：已有章节就补充，新主题插到合适位置，需要重排就 `write` 整篇重写；
+  - 要求把新内容**合并进既有大纲**：结构必须清晰，但以增量维护为主——已有章节用 `replace` 补充，新章节用 `append`，只有确需调整结构时才重排受影响章节，不整篇重写；
   - 明确禁止压缩细节、禁止时间戳。
 - 成功后推进水位；失败保留水位，指数退避重试；连续失败发 `instant-summarize.error`。
 - UI：右侧「笔记」tab 的 toolbox「实时笔记」；按钮通过 reader 服务打开 `instant_note_*.md`，支持「立即总结」。

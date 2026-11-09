@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -88,6 +90,49 @@ def test_websocket_sends_refresh(client) -> None:
     with test_client.websocket_connect("/ws") as ws:
         data = ws.receive_json()
         assert data["type"] == "refresh"
+
+
+def test_media_relay_rejects_foreign_hosts(client) -> None:
+    test_client, _cfg = client
+    assert test_client.get("/api/media", params={"src": "https://example.com/a.mp4"}).status_code == 400
+    assert test_client.get("/api/media", params={"src": "ftp://live.sjtu.edu.cn/a.mp4"}).status_code == 400
+
+
+def test_media_relay_forwards_range(tmp_path: Path) -> None:
+    """The relay streams the upstream 206 and passes the byte range through."""
+
+    cfg = load_config(data_dir=tmp_path)
+    runtime = build_runtime(cfg, plugins=[DemoUI()], llm=FakeLLM())
+    app = create_app(runtime)
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["range"] = request.headers.get("range")
+        seen["url"] = str(request.url)
+        return httpx.Response(
+            206,
+            headers={
+                "content-type": "video/mp4",
+                "content-range": "bytes 0-3/100",
+                "content-length": "4",
+            },
+            content=b"JUNK",
+        )
+
+    with TestClient(app) as test_client:
+        test_client.app.state.media_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+        response = test_client.get(
+            "/api/media",
+            params={"src": "https://live.sjtu.edu.cn/record/a.mp4"},
+            headers={"Range": "bytes=0-3"},
+        )
+    assert response.status_code == 206
+    assert response.content == b"JUNK"
+    assert response.headers["content-range"] == "bytes 0-3/100"
+    assert seen["range"] == "bytes=0-3"
+    assert seen["url"] == "https://live.sjtu.edu.cn/record/a.mp4"
 
 
 def test_health(client) -> None:

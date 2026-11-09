@@ -436,16 +436,19 @@
   }
 
   function attachStream(video, source, startAt) {
-    const src = String(source.src || "");
-    if (!src) return;
-    if (src.includes(".flv") && window.mpegts && window.mpegts.isSupported()) {
+    const rawSrc = String(source.src || "");
+    if (!rawSrc) return;
+    // Relay every media URL through this server: the browser may be on a VPN
+    // that cannot reach live.sjtu.edu.cn, while the server can.
+    const src = relayedMediaUrl(rawSrc);
+    if (rawSrc.includes(".flv") && window.mpegts && window.mpegts.isSupported()) {
       const player = window.mpegts.createPlayer({ type: "flv", isLive: true, url: src });
       player.attachMediaElement(video);
       player.load();
       video._mpegts = player;
       return;
     }
-    const isHls = src.includes(".m3u8");
+    const isHls = rawSrc.includes(".m3u8");
     const nativeHls = video.canPlayType("application/vnd.apple.mpegurl");
     if (isHls && !nativeHls && window.Hls && window.Hls.isSupported()) {
       const hls = new window.Hls({
@@ -466,6 +469,14 @@
         { once: true }
       );
     }
+  }
+
+  // HLS playlists carry absolute segment URLs, so only progressive/FLV media is
+  // relayed; those are the formats the SJTU recorder actually returns.
+  function relayedMediaUrl(src) {
+    if (!src) return src;
+    if (String(src).includes(".m3u8")) return src;
+    return `/api/media?src=${encodeURIComponent(src)}`;
   }
 
   function renderPlayer(block) {
@@ -500,8 +511,15 @@
       video.addEventListener("timeupdate", remember);
       video.addEventListener("pause", remember);
       video.addEventListener("seeked", remember);
+      const hint = el("div", { class: "player-error", text: "" });
+      video.addEventListener("error", () => {
+        hint.textContent = video._mpegts || video._hls
+          ? "视频加载失败：转发代理无法连上视频源"
+          : "视频无法播放（服务器转发失败）";
+      });
       videos.push(video);
       pane.appendChild(video);
+      pane.appendChild(hint);
       grid.appendChild(pane);
     }
 

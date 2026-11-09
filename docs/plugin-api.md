@@ -245,7 +245,8 @@ session = agent.create_session(
     files={"notes.md": "/path/notes.md"},
     tools=["info", "read", "replace", "append", "write"],  # write 为可选：整文件覆盖
     max_steps=8,
-    max_tool_output=24000,  # 单次 read 输出上限，整篇重写时需要更大
+    max_tool_output=24000,  # 单次 read 输出上限
+    max_history_chars=0,    # 上下文里保留的工具结果上限；更早的转存为隐藏文件
     extra_instructions=["只修改 notes.md"],
 )
 

@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Literal
 
+from html import escape as html_escape
+
 from markdown_it import MarkdownIt
 
 logger = logging.getLogger("lecture_agent.ui")
@@ -41,6 +43,56 @@ _EVENT_ATTR_RE = re.compile(r"\son[a-z]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", 
 _JS_URL_RE = re.compile(r"\b(href|src)\s*=\s*(['\"])\s*javascript:[^'\"]*\2", re.I)
 
 
+_FENCE_RE = re.compile(
+    r"(^```.*?^```\s*$|^~~~.*?^~~~\s*$|```.+?```|~~~.+?~~~)",
+    re.S | re.M,
+)
+_BLOCK_MATH_RE = re.compile(r"\$\$(.+?)\$\$", re.S)
+_INLINE_MATH_RE = re.compile(r"(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)")
+
+
+def _normalise_math(text: str) -> tuple[str, dict[str, str]]:
+    """Pull math out of Markdown before it is parsed.
+
+    Markdown treats ``_``/``*`` inside formulas as emphasis and splits the
+    surrounding ``$$`` block across nodes, which defeats KaTeX auto-render.
+    Formulas are replaced by inert tokens here and restored after rendering.
+
+    Returns ``(markdown_with_tokens, {token: formula})``.
+    """
+
+    blocked: dict[str, str] = {}
+    counter = 0
+
+    def token(formula: str) -> str:
+        nonlocal counter
+        name = f"MATHTKN{counter}ENDMATH"
+        counter += 1
+        blocked[name] = formula
+        return name
+
+    def block(match: re.Match[str]) -> str:
+        body = re.sub(r"\n\s*\n", "\n", match.group(1)).strip()
+        return "\n\n" + token("$$\n" + body + "\n$$") + "\n\n"
+
+    def inline(match: re.Match[str]) -> str:
+        body = match.group(1).strip()
+        return token("$" + body + "$")
+
+    parts = _FENCE_RE.split(text)
+    for index in range(0, len(parts), 2):
+        segment = _BLOCK_MATH_RE.sub(block, parts[index])
+        segment = _INLINE_MATH_RE.sub(inline, segment)
+        parts[index] = segment
+    return "".join(parts), blocked
+
+
+def _restore_math(html: str, blocked: dict[str, str]) -> str:
+    for name, formula in blocked.items():
+        html = html.replace(name, html_escape(formula))
+    return html
+
+
 def _sanitize_html(html: str) -> str:
     """Small, dependency-free guard for LLM-authored markdown."""
 
@@ -52,7 +104,10 @@ def _sanitize_html(html: str) -> str:
 
 
 def render_markdown(text: str) -> str:
-    return _sanitize_html(_MD.render(text))
+    prepared, blocked = _normalise_math(text)
+    html = _MD.render(prepared)
+    html = _restore_math(html, blocked)
+    return _sanitize_html(html)
 
 
 @dataclass(slots=True)

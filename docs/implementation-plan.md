@@ -197,7 +197,7 @@
   - `list_lives(start, end)`（新版 `/v1/vod_live`）
   - `get_live_devices(live_course_id)`（新版 `/v1/course_vod_videoinfos`）
 - 直播/录播都映射为 `SourceSpec`，交给 `SourceManager`。
-- `FFmpegSource`：两个子进程；音频 s16le 16k mono；视频 mjpeg 默认 4fps、保持原分辨率（不缩放）；JPEG 边界解析；`-re` 用于录播；直播低延迟；支持 stop/pause/resume；状态事件。
+- `FFmpegSource`：两个子进程；音频 s16le 16k mono；视频 mjpeg 默认 4fps、保持原分辨率（不缩放）；JPEG 边界解析；录播全速解码（无 `-re`）并先下载到本地，直播低延迟 1:1；双 reader EOF 才结束；支持 stop/pause/resume；状态事件。
 - UI：
   - 左侧 tab `courses`：toolbox `input.courses`（课程录播）。
   - 左侧 tab `live`：toolbox `input.live`（今日直播）、`input.manual`（手动 URL）。
@@ -206,7 +206,7 @@
   - 页面 `input:live`：只展示正在/即将开始的直播。
   - 页面 `input:session`：状态、音视频时长、暂停/继续/停止。
   - 页面 `input:manual`：手动 URL 表单。
-- 设置：`input.canvas_token`（secret）、`input.canvas_base_url`、`input.video_fps`、`input.video_width`、`input.audio_rate`、`input.playback_speed`、`input.live_device`、`input.reconnect`。
+- 设置：`input.canvas_token`（secret）、`input.canvas_base_url`、`input.video_fps`、`input.video_width`、`input.audio_rate`、`input.keep_recordings`、`input.live_device`、`input.reconnect`。
 - 测试：JPEG 解析、SourceManager 单源互斥、catalog 映射（fake clients）、无 token 错误提示；不启动真实 ffmpeg（可用 `echo` 小样本或 fake source）。
 
 不得修改 P0/P1/P2/P3/P4 文件。SJTU 客户端代码已 vendor 到 `src/integrations/sjtu_canvas_assistant/`。

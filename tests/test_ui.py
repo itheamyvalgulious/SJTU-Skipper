@@ -169,3 +169,33 @@ def test_command_requires_page_or_action() -> None:
     ui = UIManager()
     with pytest.raises(ValueError):
         ui.register_command("bad", "Bad")
+
+
+class TestMathRendering:
+    def test_inline_math_survives_markdown_emphasis(self) -> None:
+        from core.ui import render_markdown
+
+        html = render_markdown("设 $f_1+f_2$ 与 $g$ 的卷积 $f*g$ 存在。")
+        assert "<em>" not in html
+        assert "$f_1+f_2$" in html
+        assert "$f*g$" in html
+
+    def test_inline_display_math_becomes_block(self) -> None:
+        from core.ui import render_markdown
+
+        html = render_markdown("性质 1 $$ a_1 = b_2 $$ 由换元可得。")
+        assert "<em>" not in html
+        assert "<p>$$\na_1 = b_2\n$$</p>" in html
+        assert "由换元可得" in html
+
+    def test_blank_lines_inside_display_math_are_removed(self) -> None:
+        from core.ui import render_markdown
+
+        html = render_markdown("$$\nA\n\nB\n$$")
+        assert "<p>$$\nA\nB\n$$</p>" in html
+
+    def test_code_spans_are_not_touched(self) -> None:
+        from core.ui import render_markdown
+
+        html = render_markdown("代码 `$x$` 不动")
+        assert "<code>$x$</code>" in html

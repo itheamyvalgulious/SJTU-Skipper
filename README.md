@@ -58,6 +58,8 @@ python3.12 -m venv .venv
 4. 选择录播或直播，开始一节课。
 5. 左侧「课堂」查看转写、板书、笔记。
 
+录播与直播走两种模式：**直播**按 1:1 实时摄取、单路转写；**录播**先下载到本地，再全速解码并用 `stt.concurrency` / `vlm.concurrency`（默认各 4）并发识别，全部窗口提交后一次性生成讲义。录播页显示下载/处理进度和「打开录像」链接，本地录像只保留最近 `input.keep_recordings`（默认 4）节。
+
 Canvas token 与 OpenAI 兼容 key 可以放在根 `.env`（git-ignored；OpenCode 套餐则走设置页授权）：
 
 ```dotenv
