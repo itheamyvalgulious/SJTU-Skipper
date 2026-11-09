@@ -237,6 +237,7 @@ class UIManager:
     def __init__(self, *, on_change: Callable[[str], None] | None = None) -> None:
         self._on_change = on_change
         self._status_provider: Callable[[], dict[str, Any]] | None = None
+        self._task_providers: list[Callable[[], list[dict[str, Any]]]] = []
         self._lock = threading.RLock()
         self._tabs: dict[str, _Tab] = {}
         self._items: dict[str, _Item] = {}
@@ -530,6 +531,19 @@ class UIManager:
     def set_status_provider(self, provider: Callable[[], dict[str, Any]] | None) -> None:
         self._status_provider = provider
 
+    def register_task_provider(
+        self, provider: Callable[[], list[dict[str, Any]]]
+    ) -> None:
+        """Register a callable returning the plugin's currently running tasks.
+
+        Each task is ``{"id", "label", "detail", "started"}`` and is shown in
+        the status bar / notes item while it runs.
+        """
+
+        with self._lock:
+            if provider not in self._task_providers:
+                self._task_providers.append(provider)
+
     def _render(self, renderer: Renderer | None, label: str) -> list[dict[str, Any]]:
         if renderer is None:
             return []
@@ -636,6 +650,12 @@ class UIManager:
                 status = dict(self._status_provider())
             except Exception as exc:  # noqa: BLE001
                 status = {"error": str(exc)}
+        tasks: list[dict[str, Any]] = []
+        for provider in list(self._task_providers):
+            try:
+                tasks.extend(provider() or [])
+            except Exception:  # noqa: BLE001 - a broken task provider must not
+                continue
 
         return {
             "version": version,
@@ -654,6 +674,7 @@ class UIManager:
             "open_pages": open_pages,
             "active_page": active,
             "page_content": page_content,
+            "tasks": tasks,
             "commands": self.list_commands(),
             "status": status,
         }

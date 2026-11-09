@@ -543,6 +543,7 @@ class AgentService:
         # --- REPL ---
         while session.max_steps <= 0 or step < session.max_steps:
             step += 1
+            session.meta["step"] = step
 
             # Build messages for the LLM (old tool results are trimmed).
             llm_messages: list[dict[str, Any]] = []

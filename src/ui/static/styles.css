@@ -247,6 +247,8 @@ video { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(63,185,80,.6); }
 .dot.err { background: var(--err); }
+.dot.busy { background: var(--warn, #d29922); box-shadow: 0 0 8px rgba(210,153,34,.7); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
 .toast {
   position: fixed; left: 50%; bottom: 42px; transform: translateX(-50%) translateY(20px);

@@ -127,11 +127,13 @@
   // ------------------------------------------------------------------
   // Blocks
   // ------------------------------------------------------------------
-  function actionButton(label, action, value = undefined, cls = "btn btn-sm") {
+  function actionButton(label, action, value = undefined, cls = "btn btn-sm", disabled = false) {
     const attrs = { class: cls, dataset: { action } };
     if (value !== undefined) attrs.dataset.value = JSON.stringify(value);
     attrs.type = "button";
-    return el("button", { ...attrs, text: String(label) }, []);
+    const btn = el("button", { ...attrs, text: String(label) }, []);
+    if (disabled) btn.disabled = true;
+    return btn;
   }
 
   function renderLog(block) {
@@ -657,7 +659,13 @@
     if (type === "buttons") {
       const row = el("div", { class: "block btn-row" });
       for (const b of block.buttons || []) {
-        row.appendChild(actionButton(b.label || "执行", b.action, b.value, b.class || (b.primary ? "btn btn-primary" : "btn")));
+        row.appendChild(actionButton(
+          b.label || "执行",
+          b.action,
+          b.value,
+          b.class || (b.primary ? "btn btn-primary" : "btn"),
+          Boolean(b.disabled)
+        ));
       }
       return row;
     }
@@ -1035,6 +1043,15 @@
     bar.appendChild(item("板书", `${session.visual_chars ?? 0} 字 / ${session.visual_items ?? 0} 段`));
     bar.appendChild(item("插件", (runtime.plugins_loaded || runtime.plugin_order || []).length || 0, runtime.started ? "ok" : ""));
     bar.appendChild(item("LLM", llm.provider || (llm.registered ? "已注册" : "未配置"), llm.registered ? "ok" : ""));
+    for (const task of state.ui.tasks || []) {
+      bar.appendChild(
+        item(
+          task.label || "任务",
+          task.detail || "运行中",
+          "busy"
+        )
+      );
+    }
 
     const sessionPill = $("#session-pill");
     if (session.session_id) {

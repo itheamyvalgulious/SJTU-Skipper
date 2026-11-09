@@ -269,3 +269,41 @@ def test_ui_state(harness: tuple) -> None:
     result = runtime.ui.dispatch_action("summarize.read", {"doc": "knowledge"})
     assert result.ok
     assert result.open_page == f"reader:notes:{sid}"
+
+
+def test_running_task_is_exposed_and_button_disabled(tmp_path: Path) -> None:
+    agent = FakeAgentService(block=True)
+    runtime = _build(tmp_path, agent)
+    try:
+        sid = _start_session(runtime)
+        runtime.hub.current.transcript.append("任务展示测试。" * 20)
+        runtime.bus.flush(1.0)
+
+        result = runtime.ui.dispatch_action("summarize.full", {})
+        assert result.ok
+        plugin = runtime.services.get("summarize")
+        assert _wait_for(lambda: plugin.busy)
+
+        state = runtime.ui.state()
+        tasks = [task for task in state.get("tasks", []) if task.get("id") == "summarize"]
+        assert tasks, "running summarize task must be listed"
+        assert "生成讲义" in tasks[0]["label"]
+
+        item = next(
+            item
+            for tab in state["right_tabs"]
+            for item in tab["toolbox"]
+            if item["id"] == "summarize.notes"
+        )
+        button = next(
+            b
+            for b in item["blocks"][-1]["buttons"]
+            if b.get("action") == "summarize.full"
+        )
+        assert button.get("disabled") is True
+        assert button["label"] == "生成中…"
+
+        agent.release()
+        assert _wait_for(lambda: not runtime.services.get("summarize").busy)
+    finally:
+        runtime.stop()

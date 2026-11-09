@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from types import SimpleNamespace
 from datetime import datetime
 from pathlib import Path
@@ -86,6 +87,10 @@ class SummarizePlugin(Plugin):
         self._job_lock = threading.Lock()
         self._job_busy = False
         self._pending_session = ""
+        self._running_session = ""
+        self._running_label = ""
+        self._running_started = 0.0
+        self._agent_session_id = ""
         self._stop_event = threading.Event()
         self._status = "尚未生成讲义"
 
@@ -93,6 +98,7 @@ class SummarizePlugin(Plugin):
         ctx.events.define("summarize.finished", "Whole-lecture summary finished")
         ctx.events.define("summarize.error", "Whole-lecture summary failed")
 
+        ctx.ui.register_task_provider(self.running_tasks)
         ctx.events.on(
             "session.started", self._on_session_started, plugin_id=self.id
         )
@@ -196,6 +202,32 @@ class SummarizePlugin(Plugin):
             for key, label in self._DOC_LABELS.items()
         ]
 
+    def running_tasks(self) -> list[dict[str, Any]]:
+        if not self._job_busy:
+            return []
+        step = 0
+        getter = getattr(self._agent_service, "get_session", None)
+        agent_session = (
+            getter(self._agent_session_id)
+            if (getter is not None and self._agent_session_id)
+            else None
+        )
+        if agent_session is not None:
+            try:
+                step = int(agent_session.meta.get("step", 0) or 0)
+            except (TypeError, ValueError):
+                step = 0
+        elapsed = max(0, int(time.time() - self._running_started))
+        detail = f"第 {step} 步 · {elapsed // 60}分{elapsed % 60}秒" if step else f"{elapsed // 60}分{elapsed % 60}秒"
+        return [
+            {
+                "id": "summarize",
+                "label": f"生成讲义 · {self._running_label or '课程'}",
+                "detail": detail,
+                "started": self._running_started,
+            }
+        ]
+
     def _render_note_item(self) -> list[dict[str, Any]]:
         sid = self.ctx.streams.notes_session_id
         ready = sum(
@@ -203,10 +235,18 @@ class SummarizePlugin(Plugin):
             for key in self._DOC_LABELS
             if _has_content(self._note_path(sid, _DOC_FILES[key]), NOTE_HEADERS[_DOC_FILES[key]])
         )
+        running = (
+            self.running_tasks()
+            if self._job_busy and self._running_session == sid
+            else []
+        )
+        status_text = self._status if ready == 0 else f"已生成 {ready}/{len(self._DOC_LABELS)} 篇"
+        if running:
+            status_text = f"正在生成讲义…（{running[0]['detail']}）"
         blocks: list[dict[str, Any]] = [
             {
                 "type": "text",
-                "text": self._status if ready == 0 else f"已生成 {ready}/{len(self._DOC_LABELS)} 篇",
+                "text": status_text,
             },
             {
                 "type": "buttons",
@@ -224,9 +264,10 @@ class SummarizePlugin(Plugin):
                 "type": "buttons",
                 "buttons": [
                     {
-                        "label": "生成完整讲义",
+                        "label": "生成中…" if running else "生成完整讲义",
                         "action": "summarize.full",
                         "class": "btn btn-sm btn-primary",
+                        "disabled": bool(running),
                     }
                 ],
             },
@@ -332,11 +373,15 @@ class SummarizePlugin(Plugin):
 
         with self._job_lock:
             if self._job_busy:
+                if session_id == self._running_session:
+                    return True
                 # One handout job at a time; run this session afterwards
                 # (its lecture_source.md is already on disk).
                 self._pending_session = session_id
                 return True
             self._job_busy = True
+            self._running_session = session_id
+            self._running_started = time.time()
 
         # Snapshot everything the job needs now: the current stream may be
         # replaced by a new session as soon as the old one stops.
@@ -345,6 +390,7 @@ class SummarizePlugin(Plugin):
         )
         duration = streams.audio.duration if streams.session_id == session_id else 0.0
 
+        self._running_label = course_name
         self._status = "正在生成完整讲义…"
         thread = threading.Thread(
             target=self._run_full,
@@ -384,6 +430,9 @@ class SummarizePlugin(Plugin):
         finally:
             with self._job_lock:
                 self._job_busy = False
+                self._running_session = ""
+                self._running_label = ""
+                self._running_started = 0.0
                 pending = self._pending_session
                 self._pending_session = ""
 
@@ -453,7 +502,9 @@ class SummarizePlugin(Plugin):
             max_tokens=self._max_tokens,
             llm_extra={"reasoning_effort": "max"},
         )
+        self._agent_session_id = session.id
         agent.run(session.id, prompt)
+        self._agent_session_id = ""
 
         hashes_after = {
             filename: _file_md5(str(file_paths[filename]))

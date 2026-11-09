@@ -134,6 +134,7 @@ class InputPlugin(Plugin):
         self._class_finished = False
         self._download: dict[str, Any] = {}
         self._total_seconds = 0.0
+        self._processing_started = 0.0
         self._class_sessions: dict[str, dict[str, Any]] = {}
         self._class_session_meta: dict[str, Any] = {}
         self._class_session_id: str = ""
@@ -182,6 +183,7 @@ class InputPlugin(Plugin):
 
         # ---- Register UI ----
         self._setup_ui(ctx)
+        ctx.ui.register_task_provider(self.running_tasks)
         ctx.events.on("session.started", self._on_session_event, plugin_id=self.id)
         ctx.events.on("session.stopped", self._on_session_event, plugin_id=self.id)
         self._load_session_index()
@@ -222,6 +224,24 @@ class InputPlugin(Plugin):
                 if status == "playing":
                     self._last_error = ""
         self._ctx.ui.refresh(f"input:{event.type}")
+
+    def running_tasks(self) -> list[dict[str, Any]]:
+        with self._class_lock:
+            if not self._processing:
+                return []
+            cls = self._current_class or {}
+            label = str(cls.get("name") or cls.get("label") or "")
+            started = self._processing_started
+        session = self._ctx.streams.current
+        ingested = float(session.video.duration or session.audio.duration)
+        return [
+            {
+                "id": "input",
+                "label": f"处理课程 · {label or '—'}",
+                "detail": f"已摄录 {_fmt_clock(ingested)}",
+                "started": started,
+            }
+        ]
 
     # ------------------------------------------------------------------
     # Session index (survives restarts)
@@ -1197,6 +1217,7 @@ class InputPlugin(Plugin):
                 and self._current_class.get("id") == cls.get("id")
             ):
                 self._processing = True
+                self._processing_started = time.time()
                 self._session_started = True
                 self._class_finished = False
         self._ctx.ui.refresh("input.class.processing")

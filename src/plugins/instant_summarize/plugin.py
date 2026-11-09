@@ -84,6 +84,8 @@ class InstantSummarizePlugin(Plugin):
         # Worker guard: only one summary runs at a time across all sessions.
         self._worker_lock = threading.Lock()
         self._worker_busy = False
+        self._running_started = 0.0
+        self._running_course = ""
         self._stop_event = threading.Event()
 
         # --- events ---------------------------------------------------------
@@ -208,6 +210,22 @@ class InstantSummarizePlugin(Plugin):
                 "path": str(self._note_path(sid, _DOC_FILES[key])),
             }
             for key, label in self._DOC_LABELS.items()
+        ]
+
+    def running_tasks(self) -> list[dict[str, Any]]:
+        with self._worker_lock:
+            if not self._worker_busy:
+                return []
+            started = self._running_started
+            course = self._running_course
+        elapsed = max(0, int(time.time() - started))
+        return [
+            {
+                "id": "instant-summarize",
+                "label": f"实时笔记 · {course or '课程'}",
+                "detail": f"{elapsed // 60}分{elapsed % 60}秒",
+                "started": started,
+            }
         ]
 
     def _render_note_item(self) -> list[dict[str, Any]]:
@@ -407,6 +425,8 @@ class InstantSummarizePlugin(Plugin):
             if self._worker_busy:
                 return False
             self._worker_busy = True
+            self._running_started = time.time()
+            self._running_course = _course_name(self.ctx.streams.current)
         finally:
             self._worker_lock.release()
 
@@ -465,6 +485,8 @@ class InstantSummarizePlugin(Plugin):
 
         with self._worker_lock:
             self._worker_busy = False
+        self._running_started = 0.0
+        self._running_course = ""
 
         if success:
             self._watermarks[session_id] = target_wm
