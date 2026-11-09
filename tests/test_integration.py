@@ -67,6 +67,8 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
         llm=llm,
     )
     runtime.start()
+    runtime.services.require("settings").set("instant-summarize.trigger_chars", 100)
+    runtime.services.require("settings").set("instant-summarize.trigger_audio_seconds", 1)
     try:
         session = runtime.hub.start_session(meta={"course": "集成测试"})
         session.transcript.append(
@@ -129,6 +131,8 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
         llm=llm,
     )
     runtime.start()
+    runtime.services.require("settings").set("instant-summarize.trigger_chars", 100)
+    runtime.services.require("settings").set("instant-summarize.trigger_audio_seconds", 1)
     try:
         session = runtime.hub.start_session(meta={"course": "集成测试"})
         session.transcript.append(

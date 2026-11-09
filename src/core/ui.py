@@ -368,6 +368,13 @@ class UIManager:
         with self._lock:
             return id in self._actions
 
+    def set_page_title(self, id: str, title: str) -> None:
+        with self._lock:
+            page = self._pages.get(id)
+            if page is None:
+                raise KeyError(f"unknown UI page {id!r}")
+            page.title = str(title)
+
     def set_page_render(self, id: str, render: Renderer) -> None:
         with self._lock:
             page = self._pages.get(id)

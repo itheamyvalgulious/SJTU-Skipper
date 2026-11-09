@@ -176,6 +176,9 @@ def harness(tmp_path: Path) -> tuple[Any, Any, FakeAgentService]:
     runtime.start()
     settings = runtime.services.get("settings")
     assert settings is not None
+    # Keep the old trigger thresholds in tests; the product default is 10 min.
+    settings.set("instant-summarize.trigger_chars", 600)
+    settings.set("instant-summarize.trigger_audio_seconds", 120)
     yield runtime, settings, agent
     runtime.stop()
 
@@ -185,6 +188,13 @@ def _start_session(runtime: Any, meta: dict[str, Any] | None = None) -> str:
     ss = runtime.hub.start_session(meta=meta)
     runtime.bus.flush(2.0)
     return ss.session_id
+
+
+def _tune_triggers(runtime: Any) -> None:
+    settings = runtime.services.get("settings")
+    if settings is not None:
+        settings.set("instant-summarize.trigger_chars", 600)
+        settings.set("instant-summarize.trigger_audio_seconds", 120)
 
 
 def _wait_for_agent_runs(agent: FakeAgentService, count: int) -> bool:
@@ -363,6 +373,7 @@ def test_failure_retry(harness: tuple) -> None:
             ],
         )
         rt.start()
+        _tune_triggers(rt)
         try:
             _start_session(rt)
 
@@ -458,11 +469,13 @@ def test_ui_state(harness: tuple) -> None:
     )
     assert item["blocks"], "note toolbox item rendered empty blocks"
 
+    sid = runtime.hub.current.session_id
     result = runtime.ui.dispatch_action("instant-summarize.read", {"doc": "gossip"})
     assert result.ok
-    assert result.open_page == "reader:main"
-    assert runtime.ui.state()["active_page"] == "reader:main"
-    reader_blocks = runtime.ui.state()["page_content"]["reader:main"]
+    page_id = f"reader:notes:{sid}"
+    assert result.open_page == page_id
+    assert runtime.ui.state()["active_page"] == page_id
+    reader_blocks = runtime.ui.state()["page_content"][page_id]
     tabs = next(block for block in reader_blocks if block["type"] == "tabs")
     assert [tab["title"] for tab in tabs["tabs"]] == ["知识", "生活趣事", "通知"]
 
@@ -560,8 +573,9 @@ def test_settings_registered(harness: tuple) -> None:
     for key in expected_keys:
         val = settings.get(key)
         assert val is not None, f"setting {key} not registered"
-    assert settings.get("instant-summarize.trigger_chars") == 600
-    assert settings.get("instant-summarize.trigger_audio_seconds") == 120
+    specs = settings.specs_map
+    assert specs["instant-summarize.trigger_chars"].default == 100000
+    assert specs["instant-summarize.trigger_audio_seconds"].default == 600
     assert settings.get("instant-summarize.min_chars") == 80
     assert settings.get("instant-summarize.max_steps") == 12
     assert settings.get("instant-summarize.max_tool_output") == 24000
@@ -607,6 +621,7 @@ def test_no_change_retry(harness: tuple) -> None:
             ],
         )
         rt.start()
+        _tune_triggers(rt)
         try:
             _start_session(rt)
             streams = rt.hub.current
@@ -654,6 +669,7 @@ def test_exhausted_retries(harness: tuple) -> None:
             ],
         )
         rt.start()
+        _tune_triggers(rt)
         error_events: list[Any] = []
 
         def on_error(event: Any) -> None:

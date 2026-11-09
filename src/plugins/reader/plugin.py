@@ -1,8 +1,9 @@
-"""Reader plugin: display markdown documents (lecture notes) in a shared page.
+"""Reader plugin: display markdown documents (lecture notes) in reader pages.
 
 Notes plugins (summarize / instant-summarize) own their files; they hand the
-reader a list of ``{key, label, path}`` documents and the reader renders them
-with tabs, KaTeX and per-document scrolling.
+reader a list of ``{key, label, path}`` documents.  Every notes session gets
+its **own page** (``reader:notes:<session_id>``), so several courses' handouts
+can stay open at the same time instead of sharing one page.
 """
 
 from __future__ import annotations
@@ -13,27 +14,25 @@ from typing import Any
 from core.plugin import Plugin, PluginContext
 
 PAGE_ID = "reader:main"
+PAGE_PREFIX = "reader:notes:"
 OPEN_ACTION = "reader.open"
 
 
 class ReaderPlugin(Plugin):
-    """A single reusable document reader page."""
+    """One reader page per notes session (plus a fallback ``reader:main``)."""
 
     id = "reader"
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
-        self._title = ""
-        self._docs: list[dict[str, str]] = []
-        self._active = ""
-        self._sequence = 0
+        self._states: dict[str, dict[str, Any]] = {}
 
         ctx.register_service("reader", self)
 
         ctx.ui.add_page(
             PAGE_ID,
             "阅读",
-            render=self._render,
+            render=lambda: self._render_page(PAGE_ID),
             icon="📖",
             order=5,
         )
@@ -51,10 +50,12 @@ class ReaderPlugin(Plugin):
         title: str,
         docs: list[dict[str, str]],
         active: str = "",
+        page_key: str = "",
         open_page: bool = True,
-    ) -> None:
-        """Display *docs* (``{key,label,path}``) in the reader page."""
+    ) -> str:
+        """Display *docs* in the page for *page_key*; returns the page id."""
 
+        page_id = self._page_id(page_key)
         cleaned: list[dict[str, str]] = []
         for doc in docs:
             path = str(doc.get("path", "") or "")
@@ -63,45 +64,73 @@ class ReaderPlugin(Plugin):
             if not path:
                 continue
             cleaned.append({"key": key, "label": label, "path": path})
-        self._title = str(title or "")
-        self._docs = cleaned
-        self._active = str(active or "") or (cleaned[0]["key"] if cleaned else "")
+
+        state = self._states.setdefault(page_id, {})
+        state["title"] = str(title or "")
+        state["docs"] = cleaned
+        state["active"] = str(active or "") or (cleaned[0]["key"] if cleaned else "")
         # New sequence → new client tab key, so the requested document is
         # selected on open while later user tab clicks survive refreshes.
-        self._sequence += 1
+        state["sequence"] = int(state.get("sequence", 0)) + 1
+
+        if not self.ctx.ui.has_page(page_id):
+            self.ctx.ui.add_page(
+                page_id,
+                str(title or "阅读"),
+                render=lambda pid=page_id: self._render_page(pid),
+                icon="📖",
+                order=5,
+            )
+        else:
+            self.ctx.ui.set_page_title(page_id, str(title or "阅读"))
+
         self.ctx.ui.refresh("reader.show")
         if open_page:
-            self.ctx.ui.open_page(PAGE_ID)
+            self.ctx.ui.open_page(page_id)
+        return page_id
 
-    def clear(self) -> None:
-        self._title = ""
-        self._docs = []
-        self._active = ""
+    def clear(self, page_key: str = "") -> None:
+        page_id = self._page_id(page_key)
+        self._states.pop(page_id, None)
+
+    @staticmethod
+    def page_id_for(page_key: str) -> str:
+        return f"{PAGE_PREFIX}{page_key}" if page_key else PAGE_ID
+
+    def _page_id(self, page_key: str) -> str:
+        return self.page_id_for(str(page_key or ""))
 
     # ------------------------------------------------------------------
     # Action
     # ------------------------------------------------------------------
     def _act_open(self, payload: dict[str, Any]) -> dict[str, Any]:
-        title = str(payload.get("title", "") or self._title)
         docs = payload.get("docs")
         if not isinstance(docs, list) or not docs:
             return {"ok": False, "message": "没有可显示的文稿"}
-        self.show(
-            title=title,
+        page_key = str(payload.get("page_key", "") or payload.get("session_id", ""))
+        page_id = self.show(
+            title=str(payload.get("title", "") or ""),
             docs=[dict(doc) for doc in docs if isinstance(doc, dict)],
             active=str(payload.get("active", "") or ""),
+            page_key=page_key,
         )
-        return {"ok": True, "open_page": PAGE_ID}
+        return {"ok": True, "open_page": page_id}
 
     # ------------------------------------------------------------------
     # Render
     # ------------------------------------------------------------------
-    def _render(self) -> list[dict[str, Any]]:
-        if not self._docs:
+    def _render_page(self, page_id: str) -> list[dict[str, Any]]:
+        state = self._states.get(page_id) or {}
+        docs = state.get("docs") or []
+        if not docs:
             return [{"type": "text", "text": "没有可显示的文稿"}]
 
+        title = str(state.get("title") or "")
+        active = str(state.get("active") or "")
+        sequence = int(state.get("sequence") or 0)
+
         tabs: list[dict[str, Any]] = []
-        for doc in self._docs:
+        for doc in docs:
             text = _read_text(doc["path"])
             blocks: list[dict[str, Any]] = []
             if not text.strip():
@@ -114,20 +143,20 @@ class ReaderPlugin(Plugin):
             tabs.append(
                 {
                     "title": doc["label"],
-                    "active": doc["key"] == self._active,
+                    "active": doc["key"] == active,
                     "blocks": blocks,
                 }
             )
 
         return [
             *(
-                [{"type": "markdown", "text": f"### {self._title}"}]
-                if self._title
+                [{"type": "markdown", "text": f"### {title}"}]
+                if title
                 else []
             ),
             {
                 "type": "tabs",
-                "id": f"{PAGE_ID}:{self._sequence}",
+                "id": f"{page_id}:{sequence}",
                 "tabs": tabs,
             },
         ]

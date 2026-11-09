@@ -167,7 +167,9 @@ def test_manual_action_runs_one_agent(harness: tuple) -> None:
 
     prompt = agent.run_calls[0]["user_input"]
     assert SOURCE_FILENAME in prompt
-    assert "read" in prompt and "info" in prompt
+    system_prompt = session_call["system_prompt"]
+    assert "read(file" in system_prompt and "info()" in system_prompt
+    assert "200,000" in system_prompt
 
     material = (runtime.data_dir / "sessions" / sid / SOURCE_FILENAME).read_text("utf-8")
     assert "柯西积分公式" in material and "留数定理" in material
@@ -263,6 +265,7 @@ def test_ui_state(harness: tuple) -> None:
     snap = runtime.ui.snapshot()
     assert snap["items"]["summarize.notes"] == "note"
     assert "summarize.full" in snap["actions"]
+    sid = runtime.hub.current.session_id
     result = runtime.ui.dispatch_action("summarize.read", {"doc": "knowledge"})
     assert result.ok
-    assert result.open_page == "reader:main"
+    assert result.open_page == f"reader:notes:{sid}"

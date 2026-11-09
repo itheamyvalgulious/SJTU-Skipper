@@ -629,11 +629,11 @@ SettingsSpec(
 ### 7.8 instant-summarize（即时，增量）
 
 - 依赖：`settings`、`llm-agent`。
-- 设置项：`trigger_chars`（默认 600）、`trigger_audio_seconds`（默认 120）、`min_chars`（默认 80）、`max_steps`（默认 12）、`max_tool_output`（默认 24000）、`model`、`notes_dir`、`system_prompt`、`retry_max`。
+- 设置项：`trigger_chars`（默认 100000，实际由时间触发）、`trigger_audio_seconds`（默认 600 = 10 分钟）、`min_chars`（默认 80）、`max_steps`（默认 12）、`max_tool_output`（默认 24000）、`model`、`notes_dir`、`system_prompt`、`retry_max`。
 - 每个会话创建三个文件：`instant_note_knowledge.md`、`instant_note_gossip.md`、`instant_note_notice.md`（与 summarize 共用 `notes/` 目录，互不覆盖）。
 - 触发：
   - 监听 `stream.appended`（transcript / visual / audio）；
-  - 文字增量达到 `trigger_chars`，或音频增量达到 `trigger_audio_seconds` 且已有足够文字；
+  - 默认每 10 分钟音频触发一次（`trigger_audio_seconds=600`）；文字增量达到 `trigger_chars` 也可触发，但默认值很大，几乎只按时间走；
   - 串行执行；运行中到达的增量在下一轮处理。
 - 执行：
   - 取上次水位之后的文字（语音 + 板书，不注入时间戳），构造中文提示；
@@ -647,9 +647,9 @@ SettingsSpec(
 
 - 依赖：无（内置插件，始终加载）。
 - 服务：`reader.show(title, docs=[{key,label,path}], active=...)`。
-- 页面：`reader:main`，按文档分 tab 渲染 Markdown（`split_markdown` 分块 + KaTeX）。
+- 页面：每个笔记会话一个独立页 `reader:notes:<session_id>`（`reader:main` 作为无会话时的兜底），按文档分 tab 渲染 Markdown（`split_markdown` 分块 + KaTeX）。多门课的讲义可以同时打开、各自独立。
 - 实时刷新：agent 每次 `write` / `append` / `replace` 成功后都会 `ui.refresh`，前端通过 WebSocket 立刻重取状态，正在阅读的笔记随写随更新。
-- summarize / instant-summarize 的「笔记」工具箱按钮调用各自 action → `reader.show(...)`，不再各自维护阅读页。
+- summarize / instant-summarize 的「笔记」工具箱按钮调用各自 action → `reader.show(..., page_key=<notes session>)`，每门课一个页；不再所有课程共用一页。
 
 
 

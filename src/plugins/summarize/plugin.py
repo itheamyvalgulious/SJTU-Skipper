@@ -238,12 +238,13 @@ class SummarizePlugin(Plugin):
         if doc not in _DOC_FILES:
             doc = "knowledge"
         reader = self.ctx.require("reader")
-        reader.show(
+        page_id = reader.show(
             title=f"课堂讲义 · {self._course_name()}",
             docs=self._docs(),
             active=doc,
+            page_key=self.ctx.streams.notes_session_id,
         )
-        return {"ok": True, "open_page": "reader:main"}
+        return {"ok": True, "open_page": page_id}
 
     def _course_name(self) -> str:
         meta = self.ctx.streams.notes_meta

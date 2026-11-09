@@ -52,7 +52,7 @@ _DOC_FILES = {
     "notice": "instant_note_notice.md",
 }
 
-_TOOLS = ["info", "read", "replace", "append", "write"]
+_TOOLS = ["info", "read", "replace", "append"]
 
 
 # ---------------------------------------------------------------------------
@@ -119,14 +119,14 @@ class InstantSummarizePlugin(Plugin):
     @property
     def _trigger_chars(self) -> int:
         return int(
-            self._settings_service.get("instant-summarize.trigger_chars", 600)
+            self._settings_service.get("instant-summarize.trigger_chars", 100000)
         )
 
     @property
     def _trigger_audio_seconds(self) -> int:
         return int(
             self._settings_service.get(
-                "instant-summarize.trigger_audio_seconds", 120
+                "instant-summarize.trigger_audio_seconds", 600
             )
         )
 
@@ -251,12 +251,13 @@ class InstantSummarizePlugin(Plugin):
         if doc not in _DOC_FILES:
             doc = "knowledge"
         reader = self.ctx.require("reader")
-        reader.show(
+        page_id = reader.show(
             title=f"实时笔记 · {_course_name(self.ctx.streams.current)}",
             docs=self._docs(),
             active=doc,
+            page_key=self.ctx.streams.notes_session_id,
         )
-        return {"ok": True, "open_page": "reader:main"}
+        return {"ok": True, "open_page": page_id}
 
     def _note_path(self, session_id: str, filename: str) -> Path:
         return (
@@ -648,17 +649,17 @@ _SETTING_SPECS: list[SettingsSpec] = [
         key="instant-summarize.trigger_chars",
         label="触发字符数",
         type="int",
-        default=600,
+        default=100000,
         group="Instant Summarize",
-        description="新增文字达到此数量时触发总结",
+        description="新增文字达到此数量时触发总结（默认很大，主要由时间触发）",
     ),
     SettingsSpec(
         key="instant-summarize.trigger_audio_seconds",
         label="触发音频秒数",
         type="int",
-        default=120,
+        default=600,
         group="Instant Summarize",
-        description="新增音频达到此时长且文字足够时触发",
+        description="新增音频达到此时长且文字足够时触发（默认 10 分钟一次）",
     ),
     SettingsSpec(
         key="instant-summarize.min_chars",
