@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import time
 import difflib
 import io
 import logging
@@ -379,6 +380,39 @@ class TestVlmPlugin:
         assert "vlm.enabled" in spec_keys
         assert "vlm.model" in spec_keys
         assert "vlm.window_seconds" in spec_keys
+
+    def test_recording_session_commits_windows_in_order(
+        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
+    ):
+        settings = vlm_ctx.service("settings")
+        settings.set("vlm.enabled", True)
+        settings.set("vlm.window_seconds", 5.0)
+        settings.set("vlm.concurrency", 3)
+        settings.set("vlm.dedupe_threshold", 0.92)
+        settings.set("vlm.fusion", False)
+
+        session = vlm_ctx.streams.current
+        session.meta["mode"] = "fast"
+        session.video_gate.configure(60.0)
+        for index in range(10):
+            session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1.0)
+        session.input_done = True
+
+        # Bypass image fusion/LLM: return text derived from the window start.
+        def run_window(start, end, frames):
+            time.sleep(0.02 if start % 10 == 0 else 0.0)
+            return {"image_path": "", "text": f"第{int(start)}秒板书"}
+
+        vlm_plugin._run_window = run_window  # type: ignore[assignment]
+        try:
+            vlm_plugin._run_recording_session()
+            items = list(session.visual)
+            assert [item.start for item in items] == [0.0, 5.0]
+            assert vlm_plugin.status()["cursor"] == 10.0
+            assert session.video_gate.released == 10.0
+            assert vlm_plugin.busy() is False
+        finally:
+            vlm_plugin.teardown()
 
     def test_process_window_with_fake_llm(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
         """process_window should call LLM, emit vlm.segment, and append visual."""

@@ -37,8 +37,8 @@ GROUPED = [
         placeholder="key...",
     ),
     SettingsSpec(
-        key="input.playback_speed",
-        label="播放速度",
+        key="input.keep_recordings",
+        label="本地保留录像",
         type="float",
         default=1.0,
         group="输入",
@@ -338,7 +338,7 @@ def test_action_save_converts_and_keeps_secret(tmp_path: Path) -> None:
                 "values": {
                     "llm.model": "deepseek-reasoner",
                     "llm.api_key": SECRET_MASK,
-                    "input.playback_speed": "1.5",
+                    "input.keep_recordings": "3",
                 }
             },
         )
@@ -346,7 +346,7 @@ def test_action_save_converts_and_keeps_secret(tmp_path: Path) -> None:
         assert "已保存" in result.message
         assert service.get("llm.model") == "deepseek-reasoner"
         assert service.get("llm.api_key") == "secret-value"
-        assert service.get("input.playback_speed") == 1.5
+        assert service.get("input.keep_recordings") == 3
 
         # An empty secret means "keep existing", not "clear".
         kept = runtime.ui.dispatch_action(
@@ -363,11 +363,11 @@ def test_action_save_converts_and_keeps_secret(tmp_path: Path) -> None:
 
         bad = runtime.ui.dispatch_action(
             "settings.save",
-            {"values": {"input.playback_speed": "fast"}},
+            {"values": {"input.keep_recordings": "fast"}},
         )
         assert bad.ok is False
-        assert "播放速度" in bad.message
-        assert service.get("input.playback_speed") == 1.5
+        assert "本地保留录像" in bad.message
+        assert service.get("input.keep_recordings") == 3
 
         empty = runtime.ui.dispatch_action("settings.save", {"values": {}})
         assert empty.ok is True

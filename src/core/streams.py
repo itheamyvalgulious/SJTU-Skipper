@@ -15,6 +15,7 @@ Design notes
 from __future__ import annotations
 
 import bisect
+import logging
 import secrets
 import threading
 import time
@@ -24,6 +25,7 @@ from types import MappingProxyType
 from typing import Any, Callable
 
 Notify = Callable[..., None]
+_log = logging.getLogger("lecture_agent.streams")
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +154,39 @@ class _TimeIndexedStream:
                 first_index=new_count - 1,
                 chars=chars,
             )
+
+    def trim(self, before: float) -> int:
+        """Drop chunks that end at or before *before* (already consumed).
+
+        Media streams are append-only for reads, but processed audio/video has
+        no remaining consumer: without trimming a 2-hour lecture keeps every
+        decoded frame in RAM (several GB).  ``duration`` keeps growing as if
+        nothing was dropped, so timestamps and cursors stay valid.
+        """
+
+        before = float(before)
+        if before <= 0.0:
+            return 0
+        with self._lock:
+            count = 0
+            for chunk in self._chunks:
+                if chunk.end > before + 1e-9:
+                    break
+                count += 1
+            if count <= 0:
+                return 0
+            del self._chunks[:count]
+            del self._starts[:count]
+            return count
+
+    @property
+    def kept_seconds(self) -> float:
+        """Media seconds still buffered (after trimming)."""
+
+        with self._lock:
+            if not self._chunks:
+                return 0.0
+            return max(0.0, self._total - self._chunks[0].start)
 
     def _overlapping(self, start: float, end: float) -> list[Any]:
         start = max(0.0, float(start))
@@ -392,6 +427,90 @@ class TextStream(Sequence[TextItem]):
             return separator.join(item.text for item in self._items)
 
 
+class BacklogGate:
+    """Throttle a producer so unprocessed media stays bounded.
+
+    Recording mode ingests media as fast as ffmpeg can decode it.  Without a
+    gate a whole lecture (hours of PCM/MJPEG) would pile up in memory before
+    the (slower) STT/VLM consumers catch up.  Readers call :meth:`wait` before
+    appending; consumers call :meth:`release` after committing a window.
+
+    ``limit <= 0`` disables the gate (live playback stays realtime anyway).
+    A stalled consumer trips ``stall_timeout`` and the gate disables itself
+    instead of blocking the session forever.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        limit: float = 0.0,
+        stall_timeout: float = 300.0,
+    ) -> None:
+        self.name = name
+        self._limit = max(0.0, float(limit))
+        self._stall_timeout = max(0.0, float(stall_timeout))
+        self._lock = threading.Condition(threading.Lock())
+        self._released = 0.0
+        self._last_release = time.monotonic()
+        self._closed = False
+
+    @property
+    def limit(self) -> float:
+        with self._lock:
+            return self._limit
+
+    @property
+    def released(self) -> float:
+        with self._lock:
+            return self._released
+
+    def configure(self, limit: float) -> None:
+        with self._lock:
+            self._limit = max(0.0, float(limit))
+            self._released = 0.0
+            self._last_release = time.monotonic()
+            self._closed = False
+            self._lock.notify_all()
+
+    def release(self, seconds: float) -> None:
+        with self._lock:
+            self._released = max(self._released, float(seconds))
+            self._last_release = time.monotonic()
+            self._lock.notify_all()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._lock.notify_all()
+
+    def wait(self, media_end: float) -> bool:
+        """Block until ``media_end - released <= limit``.
+
+        Returns False when the gate was closed (producer should stop).
+        """
+
+        with self._lock:
+            while not self._closed:
+                if self._limit <= 0:
+                    return True
+                if float(media_end) - self._released <= self._limit + 1e-9:
+                    return True
+                if (
+                    self._stall_timeout > 0
+                    and time.monotonic() - self._last_release > self._stall_timeout
+                ):
+                    _log.warning(
+                        "backlog gate %s stalled for %.0fs; disabling",
+                        self.name,
+                        self._stall_timeout,
+                    )
+                    self._limit = 0.0
+                    return True
+                self._lock.wait(0.2)
+            return False
+
+
 @dataclass(slots=True)
 class StreamSet:
     session_id: str
@@ -403,6 +522,16 @@ class StreamSet:
     visual: TextStream
     ended_at: float | None = None
     end_reason: str = ""
+    audio_gate: BacklogGate = field(
+        default_factory=lambda: BacklogGate("audio")
+    )
+    video_gate: BacklogGate = field(
+        default_factory=lambda: BacklogGate("video")
+    )
+    # Set by the input plugin once all ffmpeg readers reached EOF; consumers
+    # use it to drain their queues before the session is ended.
+    input_done: bool = False
+    input_done_at: float | None = None
 
     def stream(self, name: str) -> AudioStream | VideoStream | TextStream:
         value = getattr(self, name, None)
@@ -427,6 +556,9 @@ class StreamSet:
             "transcript_chars": self.transcript.char_count,
             "visual_items": len(self.visual),
             "visual_chars": self.visual.char_count,
+            "input_done": self.input_done,
+            "buffered_audio_seconds": round(self.audio.kept_seconds, 1),
+            "buffered_video_seconds": round(self.video.kept_seconds, 1),
         }
 
 
@@ -467,6 +599,10 @@ class StreamHub:
         self._lock = threading.RLock()
         self._sessions: list[StreamSet] = []
         self._last_emit: dict[tuple[str, str], float] = {}
+        # Session whose notes the UI should show.  Normally the live session;
+        # after a restart it points at the most recent session on disk.
+        self._notes_session_id: str = ""
+        self._notes_meta: dict[str, Any] = {}
         self._current = self._create("boot", {})
         self._sessions.append(self._current)
         if self._emit is not None:
@@ -509,6 +645,28 @@ class StreamHub:
         with self._lock:
             return self._current
 
+    @property
+    def notes_session_id(self) -> str:
+        """Session id used by the notes pages (may differ from ``current``)."""
+
+        with self._lock:
+            if self._notes_session_id:
+                return self._notes_session_id
+            return self._current.session_id
+
+    @property
+    def notes_meta(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._notes_meta)
+
+    def set_notes_session(
+        self, session_id: str, meta: Mapping[str, Any] | None = None
+    ) -> None:
+        with self._lock:
+            self._notes_session_id = str(session_id or "")
+            if meta is not None:
+                self._notes_meta = dict(meta)
+
     def start_session(self, *, meta: Mapping[str, Any] | None = None) -> StreamSet:
         previous_stopped: StreamSet | None = None
         with self._lock:
@@ -526,6 +684,8 @@ class StreamHub:
                 previous_id = previous.session_id if previous.session_id != "boot" else None
             new_set = self._create(self._new_session_id(), meta or {})
             self._current = new_set
+            self._notes_session_id = new_set.session_id
+            self._notes_meta = dict(new_set.meta)
             self._sessions.append(new_set)
         if previous_stopped is not None and self._emit is not None:
             self._emit(
@@ -561,6 +721,9 @@ class StreamHub:
     def _end_locked(self, session: StreamSet, reason: str) -> None:
         session.ended_at = time.time()
         session.end_reason = reason
+        # Unblock producers still waiting for backlog space.
+        session.audio_gate.close()
+        session.video_gate.close()
         # Flush coalesced audio/video notifications.
         for stream_name in ("audio", "video"):
             stream = session.stream(stream_name)

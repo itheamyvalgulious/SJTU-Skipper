@@ -6,7 +6,9 @@ per-class playback toolbox item and the related actions.
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -16,6 +18,7 @@ from core.plugin import Plugin, PluginContext
 from integrations.sjtu_canvas import InputError
 from plugins.settings.spec import SettingsSpec
 from .catalog import Catalog
+from .ffmpeg import probe_duration
 from .sources import SourceManager, SourceSpec
 from .tree import build_tree, live_state, local_time
 
@@ -33,6 +36,26 @@ def _live_state(begin: str, end: str) -> str:
     """Return 直播中 / 未开始 / 已结束 for a local-time range."""
 
     return live_state(begin, end)
+
+
+def _fmt_size(value: int | float) -> str:
+    size = float(value or 0)
+    if size >= 1 << 30:
+        return f"{size / (1 << 30):.1f}GB"
+    if size >= 1 << 20:
+        return f"{size / (1 << 20):.1f}MB"
+    if size >= 1 << 10:
+        return f"{size / (1 << 10):.0f}KB"
+    return f"{int(size)}B"
+
+
+def _fmt_clock(seconds: float) -> str:
+    total = max(0, int(seconds or 0))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 def _map_view_streams(views: dict[str, str]) -> dict[str, str]:
@@ -109,6 +132,11 @@ class InputPlugin(Plugin):
         self._want_processing = False
         self._session_started = False
         self._class_finished = False
+        self._download: dict[str, Any] = {}
+        self._total_seconds = 0.0
+        self._class_sessions: dict[str, dict[str, Any]] = {}
+        self._class_session_meta: dict[str, Any] = {}
+        self._class_session_id: str = ""
 
         # ---- Register settings ----
         for spec in _INPUT_SETTINGS:
@@ -124,8 +152,8 @@ class InputPlugin(Plugin):
             sample_rate=int(settings.get("input.audio_rate", 16000)),
             video_fps=float(settings.get("input.video_fps", 4.0)),
             video_width=int(settings.get("input.video_width", 0)),
-            playback_speed=float(settings.get("input.playback_speed", 1.0)),
             reconnect=bool(settings.get("input.reconnect", True)),
+            media_root=ctx.data_dir / "sessions",
         )
 
         # ---- Register input service ----
@@ -154,7 +182,11 @@ class InputPlugin(Plugin):
 
         # ---- Register UI ----
         self._setup_ui(ctx)
+        ctx.events.on("session.started", self._on_session_event, plugin_id=self.id)
+        ctx.events.on("session.stopped", self._on_session_event, plugin_id=self.id)
+        self._load_session_index()
         ctx.events.on("input.status", self._on_input_event, plugin_id=self.id)
+        ctx.events.on("input.download", self._on_input_event, plugin_id=self.id)
         ctx.events.on("input.error", self._on_input_event, plugin_id=self.id)
         ctx.events.on("input.ended", self._on_input_event, plugin_id=self.id)
         ctx.events.on("settings.changed", self._on_settings_changed, plugin_id=self.id)
@@ -166,10 +198,22 @@ class InputPlugin(Plugin):
         self._catalog.close()
 
     def _on_input_event(self, event: Any) -> None:
+        if event.type == "input.download":
+            status = str(event.get("status", ""))
+            with self._class_lock:
+                self._download = {
+                    "status": status,
+                    "received": int(event.get("received", 0) or 0),
+                    "total": int(event.get("total", 0) or 0),
+                    "error": str(event.get("error", "") or ""),
+                }
+            self._ctx.ui.refresh("input.download")
+            return
         if event.type == "input.error":
             self._pending_message = ""
             self._last_error = str(event.get("message", "") or "输入源错误")
         elif event.type == "input.ended":
+            _log.info("input.ended received; draining consumers")
             threading.Thread(target=self._on_class_ended, daemon=True).start()
         elif event.type == "input.status":
             status = str(event.get("status", ""))
@@ -178,6 +222,109 @@ class InputPlugin(Plugin):
                 if status == "playing":
                     self._last_error = ""
         self._ctx.ui.refresh(f"input:{event.type}")
+
+    # ------------------------------------------------------------------
+    # Session index (survives restarts)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _class_key(course: Any, video: Any) -> str:
+        course_text = str(course or "").strip()
+        video_text = str(video or "").strip()
+        if course_text and video_text:
+            return f"{course_text}:{video_text}"
+        return ""
+
+    def _session_meta_path(self, session_id: str) -> Path:
+        return self._ctx.data_dir / "sessions" / session_id / "meta.json"
+
+    def _load_session_index(self) -> None:
+        """Rebuild class → last session from ``meta.json`` files on disk."""
+
+        root = self._ctx.data_dir / "sessions"
+        entries: list[dict[str, Any]] = []
+        try:
+            paths = list(root.glob("*/meta.json"))
+        except OSError:
+            return
+        for path in paths:
+            try:
+                data = json.loads(path.read_text("utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            meta = data.get("meta") or {}
+            if not isinstance(meta, dict):
+                continue
+            sid = str(data.get("session_id") or path.parent.name)
+            key = self._class_key(meta.get("course_id"), meta.get("video_id"))
+            entry = {
+                "session_id": sid,
+                "ended_at": data.get("ended_at") or 0,
+                "meta": meta,
+                "at": float(data.get("started_at") or 0),
+            }
+            entries.append(entry)
+            if key:
+                current = self._class_sessions.get(key)
+                if current is None or entry["at"] >= current["at"]:
+                    self._class_sessions[key] = entry
+        if entries:
+            latest = max(entries, key=lambda item: item["at"])
+            self._ctx.streams.set_notes_session(
+                latest["session_id"], latest.get("meta") or {}
+            )
+
+    def _on_session_event(self, event: Any) -> None:
+        sid = str(event.get("session_id") or "")
+        if not sid:
+            return
+        path = self._session_meta_path(sid)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if event.type == "session.started":
+                meta = dict(event.get("meta") or {})
+                payload = {
+                    "session_id": sid,
+                    "started_at": float(event.get("started_at") or 0),
+                    "ended_at": 0,
+                    "meta": meta,
+                }
+                path.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), "utf-8"
+                )
+                key = self._class_key(meta.get("course_id"), meta.get("video_id"))
+                if key:
+                    self._class_sessions[key] = {
+                        "session_id": sid,
+                        "ended_at": 0,
+                        "meta": meta,
+                        "at": payload["started_at"],
+                    }
+            else:
+                data: dict[str, Any] = {}
+                if path.exists():
+                    try:
+                        data = json.loads(path.read_text("utf-8"))
+                    except (OSError, ValueError):
+                        data = {}
+                data["ended_at"] = float(event.get("ended_at") or time.time())
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2), "utf-8"
+                )
+                for entry in self._class_sessions.values():
+                    if entry["session_id"] == sid:
+                        entry["ended_at"] = data["ended_at"]
+        except OSError:
+            return
+
+    def _find_finished_class(self, cls: dict[str, Any]) -> dict[str, Any] | None:
+        videos = cls.get("videos") or []
+        key = self._class_key(cls.get("course"), videos[0] if videos else "")
+        entry = self._class_sessions.get(key)
+        if entry and entry.get("ended_at"):
+            return entry
+        return None
 
     def _on_settings_changed(self, event: Any) -> None:
         key = str(event.get("key", ""))
@@ -195,7 +342,6 @@ class InputPlugin(Plugin):
             sample_rate=int(settings.get("input.audio_rate", 16000)),
             video_fps=float(settings.get("input.video_fps", 4.0)),
             video_width=int(settings.get("input.video_width", 0)),
-            playback_speed=float(settings.get("input.playback_speed", 1.0)),
             reconnect=bool(settings.get("input.reconnect", True)),
         )
 
@@ -303,6 +449,7 @@ class InputPlugin(Plugin):
             ("input.toggle_course", self._act_toggle_course),
             ("input.open_class", self._act_open_class),
             ("input.start_processing", self._act_start_processing),
+            ("input.reprocess", self._act_reprocess),
             ("input.pause_processing", self._act_pause_processing),
             ("input.play_url", self._act_play_url),
             ("input.stop", self._act_stop),
@@ -553,33 +700,45 @@ class InputPlugin(Plugin):
             items.append(["错误", error])
 
         blocks: list[dict[str, Any]] = [{"type": "keyvalue", "items": items}]
-        if not finished:
-            if processing:
-                blocks.append(
-                    {
-                        "type": "buttons",
-                        "buttons": [
-                            {
-                                "label": "暂停处理",
-                                "action": "input.pause_processing",
-                                "class": "btn btn-sm",
-                            }
-                        ],
-                    }
-                )
-            else:
-                blocks.append(
-                    {
-                        "type": "buttons",
-                        "buttons": [
-                            {
-                                "label": "继续处理",
-                                "action": "input.start_processing",
-                                "class": "btn btn-sm btn-primary",
-                            }
-                        ],
-                    }
-                )
+        if finished:
+            blocks.append(
+                {
+                    "type": "buttons",
+                    "buttons": [
+                        {
+                            "label": "重新处理",
+                            "action": "input.reprocess",
+                            "class": "btn btn-sm",
+                        }
+                    ],
+                }
+            )
+        elif processing:
+            blocks.append(
+                {
+                    "type": "buttons",
+                    "buttons": [
+                        {
+                            "label": "暂停处理",
+                            "action": "input.pause_processing",
+                            "class": "btn btn-sm",
+                        }
+                    ],
+                }
+            )
+        else:
+            blocks.append(
+                {
+                    "type": "buttons",
+                    "buttons": [
+                        {
+                            "label": "继续处理",
+                            "action": "input.start_processing",
+                            "class": "btn btn-sm btn-primary",
+                        }
+                    ],
+                }
+            )
         return blocks
 
     def _render_session(self) -> list[dict[str, Any]]:
@@ -591,6 +750,7 @@ class InputPlugin(Plugin):
             streams = dict(self._class_streams)
             loading = self._streams_loading
             error = self._streams_error
+            download = dict(self._download)
 
         if cls is None:
             return [
@@ -601,11 +761,13 @@ class InputPlugin(Plugin):
             ]
 
         parts = len(cls.get("videos") or []) or 1
+        live = cls.get("kind") == "live"
         title = str(cls.get("label", "") or cls.get("name", "") or "课堂")
         name = str(cls.get("name", "") or "")
         heading = f"### {name} · {title}" if name else f"### {title}"
         if parts > 1:
             heading += f" · 第 {index + 1}/{parts} 节"
+        heading += "  `直播`" if live else "  `录播`"
         blocks: list[dict[str, Any]] = [{"type": "markdown", "text": heading}]
 
         if loading:
@@ -613,11 +775,37 @@ class InputPlugin(Plugin):
         if error:
             blocks.append({"type": "text", "text": f"⚠️ {error}"})
 
+        if live:
+            blocks.extend(
+                self._render_live_player(
+                    cls, index, parts, streams, processing, finished, loading, error
+                )
+            )
+        else:
+            with self._class_lock:
+                session_id = self._class_session_id
+                session_meta = dict(self._class_session_meta)
+            blocks.extend(
+                self._render_recording_page(
+                    processing, finished, download, session_id, session_meta
+                )
+            )
+        return blocks
+
+    def _render_live_player(
+        self,
+        cls: dict[str, Any],
+        index: int,
+        parts: int,
+        streams: dict[str, str],
+        processing: bool,
+        finished: bool,
+        loading: bool,
+        error: str,
+    ) -> list[dict[str, Any]]:
         sources: list[dict[str, Any]] = []
         if streams.get("main"):
-            sources.append(
-                {"key": "main", "label": "课堂", "src": streams["main"]}
-            )
+            sources.append({"key": "main", "label": "课堂", "src": streams["main"]})
         if streams.get("screen"):
             sources.append(
                 {
@@ -627,27 +815,159 @@ class InputPlugin(Plugin):
                     "muted": True,
                 }
             )
+        if not sources:
+            if loading or error:
+                return []
+            return [{"type": "text", "text": "没有可用的视频流。"}]
+        return [
+            {
+                "type": "player",
+                "id": f"input:session:{cls.get('id', '')}:{index}",
+                "sources": sources,
+                "mode": "live",
+                "live": True,
+                "processing": processing,
+                "finished": finished,
+                "part": index + 1,
+                "parts": parts,
+                "screen_missing": bool(streams.get("main"))
+                and not streams.get("screen"),
+                "start_action": "input.start_processing",
+                "pause_action": "input.pause_processing",
+            }
+        ]
 
-        if sources:
+    def _render_recording_page(
+        self,
+        processing: bool,
+        finished: bool,
+        download: dict[str, Any],
+        session_id: str = "",
+        session_meta: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Recordings are processed at full speed: progress instead of a player."""
+
+        blocks: list[dict[str, Any]] = []
+        session = self._ctx.streams.current
+        meta = dict(session_meta or {})
+        if not meta:
+            meta = dict(session.meta)
+        if not session_id:
+            session_id = session.session_id
+        ingested = float(session.video.duration or session.audio.duration)
+        total = float(self._total_seconds or 0.0)
+
+        status = str(download.get("status", ""))
+        if status in {"started", "progress"}:
+            received = int(download.get("received", 0) or 0)
+            size = int(download.get("total", 0) or 0)
+            pct = f"{received * 100 / size:.1f}%" if size else f"{received / 1e6:.0f}MB"
             blocks.append(
                 {
-                    "type": "player",
-                    "id": f"input:session:{cls.get('id', '')}:{index}",
-                    "sources": sources,
-                    "live": cls.get("kind") == "live",
-                    "processing": processing,
-                    "finished": finished,
-                    "part": index + 1,
-                    "parts": parts,
-                    "screen_missing": bool(streams.get("main"))
-                    and not streams.get("screen"),
-                    "start_action": "input.start_processing",
-                    "pause_action": "input.pause_processing",
+                    "type": "progress",
+                    "label": f"下载录像 {_fmt_size(received)} / {_fmt_size(size) if size else '…'}",
+                    "value": (received / size) if size else 0.0,
                 }
             )
-        elif not loading and not error:
-            blocks.append({"type": "text", "text": "没有可用的视频流。"})
+            blocks.append({"type": "text", "text": f"正在下载：{pct}"})
+            return blocks
+        if status == "failed":
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": f"⚠️ 本地保存失败，改为直接读取远端流：{download.get('error', '')}",
+                }
+            )
+
+        if processing or (finished and ingested > 0):
+            consumed = self._consumed_seconds()
+            denom = total if total > 0 else max(ingested, consumed, 1.0)
+            value = min(1.0, max(0.0, consumed / denom)) if denom else 0.0
+            processed_label = (
+                f"{_fmt_clock(consumed)} / {_fmt_clock(total) if total else '…'}"
+            )
+            label = "处理完成" if finished else "正在处理"
+            if finished:
+                value = 1.0
+            blocks.append(
+                {"type": "progress", "label": f"{label} {processed_label}", "value": value}
+            )
+            if not finished:
+                detail = (
+                    f"已摄录 {_fmt_clock(ingested)}"
+                    f"，语音 {_fmt_clock(self._consumer_cursor('stt'))}"
+                    f"，板书 {_fmt_clock(self._consumer_cursor('vlm'))}"
+                )
+                blocks.append({"type": "text", "text": detail})
+
+        media_name = str(meta.get("media_name", "") or "")
+        if media_name and (processing or finished):
+            blocks.append(
+                {
+                    "type": "markdown",
+                    "text": (
+                        f"[打开录像](/api/artifacts/{session_id}/media/{media_name})"
+                        "（本地文件，可在新窗口直接播放或下载）"
+                    ),
+                }
+            )
+
+        if finished:
+            blocks.append({"type": "text", "text": "处理完成，讲义已生成。"})
+            blocks.append(
+                {
+                    "type": "buttons",
+                    "buttons": [
+                        {
+                            "label": "重新处理",
+                            "action": "input.reprocess",
+                            "class": "btn btn-sm",
+                        }
+                    ],
+                }
+            )
+        elif processing:
+            blocks.append(
+                {
+                    "type": "buttons",
+                    "buttons": [
+                        {
+                            "label": "暂停处理",
+                            "action": "input.pause_processing",
+                            "class": "btn btn-sm",
+                        }
+                    ],
+                }
+            )
+        else:
+            blocks.append(
+                {
+                    "type": "buttons",
+                    "buttons": [
+                        {
+                            "label": "开始处理",
+                            "action": "input.start_processing",
+                            "class": "btn btn-sm btn-primary",
+                        }
+                    ],
+                }
+            )
         return blocks
+
+    def _consumer_cursor(self, service_id: str) -> float:
+        service = self._ctx.service(service_id)
+        if service is None:
+            return 0.0
+        try:
+            return float(service.status().get("cursor", 0.0) or 0.0)
+        except Exception:  # noqa: BLE001 - status is best effort
+            return 0.0
+
+    def _consumed_seconds(self) -> float:
+        cursors = [
+            self._consumer_cursor(name) for name in ("stt", "vlm")
+        ]
+        return max(cursors) if cursors else 0.0
 
     # ------------------------------------------------------------------
     # Actions
@@ -700,6 +1020,9 @@ class InputPlugin(Plugin):
         self._sources.stop()
         self._end_open_session("class switched")
 
+        record = self._find_finished_class(
+            {"course": payload.get("course", ""), "videos": videos}
+        )
         with self._class_lock:
             self._current_class = {
                 "id": class_id,
@@ -710,14 +1033,23 @@ class InputPlugin(Plugin):
                 "videos": videos,
                 "live_id": live_id,
             }
-            self._class_index = 0
+            self._class_index = (len(videos) - 1) if record else 0
             self._class_streams = {}
-            self._streams_loading = True
+            self._streams_loading = record is None
             self._streams_error = ""
             self._processing = False
             self._want_processing = False
             self._session_started = False
-            self._class_finished = False
+            self._class_finished = record is not None
+            self._download = {}
+            self._total_seconds = 0.0
+            self._class_session_meta = dict(record["meta"]) if record else {}
+            self._class_session_id = record["session_id"] if record else ""
+        if record:
+            # Let the notes pages show this class's handout.
+            self._ctx.streams.set_notes_session(
+                record["session_id"], record.get("meta") or {}
+            )
 
         with self._tree_lock:
             self._current_class_id = class_id
@@ -778,6 +1110,14 @@ class InputPlugin(Plugin):
         if want and streams.get("main"):
             self._start_processing_now()
 
+    def _act_reprocess(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._class_lock:
+            self._class_finished = False
+            self._class_index = 0
+            self._class_session_meta = {}
+            self._class_session_id = ""
+        return self._act_start_processing(payload)
+
     def _act_start_processing(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._class_lock:
             if self._current_class is None:
@@ -816,19 +1156,32 @@ class InputPlugin(Plugin):
             streams = dict(self._class_streams)
             started = self._session_started
             self._want_processing = False
+            self._download = {}
         if cls is None:
             return
         url = streams.get("main", "")
         if not url:
             return
 
+        live = cls.get("kind") == "live"
         label = str(cls.get("label", ""))
         videos = cls.get("videos") or []
         spec = SourceSpec(
-            kind="live" if cls.get("kind") == "live" else "recording",
+            kind="live" if live else "recording",
             url=url,
             title=label or str(cls.get("name", "")),
             continue_session=started,
+            # Recordings are always processed at full speed; live is 1:1.
+            realtime=live,
+            download=not live and not url.startswith(("file://", "/")),
+            audio_gate_limit=(
+                self._gate_limit("stt", "stt.chunk_seconds", 50.0) if not live else 0.0
+            ),
+            video_gate_limit=(
+                self._gate_limit("vlm", "vlm.window_seconds", 20.0)
+                if not live
+                else 0.0
+            ),
             course={
                 "course_id": str(cls.get("course", "")),
                 "course_name": str(cls.get("name", "")),
@@ -838,16 +1191,6 @@ class InputPlugin(Plugin):
             },
         )
         self._pending_message = ""
-        try:
-            self._start_source(spec)
-        except Exception as exc:  # noqa: BLE001 - surface startup failures
-            self._ctx.events.emit(
-                "input.error",
-                message=f"启动处理失败：{exc}",
-                source=spec.title,
-            )
-            return
-
         with self._class_lock:
             if (
                 self._current_class is not None
@@ -855,7 +1198,60 @@ class InputPlugin(Plugin):
             ):
                 self._processing = True
                 self._session_started = True
+                self._class_finished = False
         self._ctx.ui.refresh("input.class.processing")
+
+        def _run() -> None:
+            try:
+                self._start_source(spec)
+                self._total_seconds = self._probe_total_seconds(spec, live)
+            except Exception as exc:  # noqa: BLE001 - surface startup failures
+                self._ctx.events.emit(
+                    "input.error",
+                    message=f"启动处理失败：{exc}",
+                    source=spec.title,
+                )
+                with self._class_lock:
+                    self._processing = False
+            self._ctx.ui.refresh("input.class.started")
+
+        # Downloading + starting ffmpeg can take minutes; never block the
+        # HTTP action that triggered it.
+        threading.Thread(target=_run, name="input-start", daemon=True).start()
+
+    def _gate_limit(self, service_id: str, window_key: str, default_window: float) -> float:
+        """Backlog limit so one session cannot buffer the whole lecture."""
+
+        service = self._ctx.service(service_id)
+        try:
+            enabled = bool(service.enabled()) if service is not None else False
+        except Exception:  # noqa: BLE001 - status is best effort
+            enabled = False
+        if not enabled:
+            return 0.0
+        settings = self._ctx.require("settings")
+        try:
+            concurrency = int(settings.get(f"{service_id}.concurrency", 4))
+        except Exception:  # noqa: BLE001
+            concurrency = 4
+        try:
+            window = float(settings.get(window_key, default_window))
+        except Exception:  # noqa: BLE001
+            window = default_window
+        window = max(5.0, window)
+        return window * (max(1, concurrency) + 4)
+
+    def _probe_total_seconds(self, spec: SourceSpec, live: bool) -> float:
+        if live:
+            return 0.0
+        session = self._ctx.streams.current
+        media_path = str(session.meta.get("media_path", "") or "")
+        if not media_path:
+            return 0.0
+        try:
+            return float(probe_duration(media_path) or 0.0)
+        except Exception:  # noqa: BLE001 - progress is best effort
+            return 0.0
 
     def _act_pause_processing(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._class_lock:
@@ -883,8 +1279,25 @@ class InputPlugin(Plugin):
             cls = dict(self._current_class) if self._current_class else None
             index = self._class_index
             processing = self._processing
-        if cls is None or not processing:
+        if not processing:
             return
+        if cls is None:
+            # Manual URL playback: nothing to advance to, just finish cleanly.
+            self._wait_for_consumers()
+            with self._class_lock:
+                self._processing = False
+                self._want_processing = False
+                self._class_finished = True
+            self._sources.stop()
+            self._end_open_session("playback finished")
+            self._prune_media()
+            self._ctx.ui.refresh("input.finished")
+            return
+
+        if cls.get("kind") != "live":
+            # full-speed ingest: wait until STT/VLM committed every window
+            # before closing the session (summarize runs on session.stopped).
+            self._wait_for_consumers()
 
         videos = cls.get("videos") or []
         if index + 1 < len(videos):
@@ -901,6 +1314,34 @@ class InputPlugin(Plugin):
             return
         self._finish_class()
 
+    def _wait_for_consumers(self, timeout: float = 3600.0) -> bool:
+        """Block until the recording's STT/VLM queues are drained."""
+
+        services = []
+        for name in ("stt", "vlm"):
+            service = self._ctx.service(name)
+            if service is not None and hasattr(service, "busy"):
+                services.append(service)
+        if not services:
+            return True
+        deadline = time.monotonic() + max(1.0, float(timeout))
+        _log.info("draining STT/VLM before closing the session")
+        while time.monotonic() < deadline:
+            with self._class_lock:
+                if not self._processing:
+                    return True
+            busy = [type(s).__name__ for s in services if s.busy()]
+            if not busy:
+                _log.info("consumers drained")
+                return True
+            time.sleep(0.5)
+        self._ctx.events.emit(
+            "input.error",
+            message="板书/语音处理超时，将按已完成的内容生成讲义。",
+            source="",
+        )
+        return False
+
     def _finish_class(self) -> None:
         with self._class_lock:
             self._processing = False
@@ -909,7 +1350,35 @@ class InputPlugin(Plugin):
             self._session_started = False
         self._sources.stop()
         self._end_open_session("playback finished")
+        self._prune_media()
         self._ctx.ui.refresh("input.class.finished")
+
+    def _prune_media(self) -> None:
+        """Keep only the most recent N recording folders."""
+
+        try:
+            keep = int(self._ctx.require("settings").get("input.keep_recordings", 4))
+        except Exception:  # noqa: BLE001
+            keep = 4
+        keep = max(0, keep)
+        root = self._ctx.data_dir / "sessions"
+        try:
+            folders = [
+                path
+                for path in root.glob("*/media")
+                if path.is_dir()
+            ]
+        except OSError:
+            return
+        folders.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        current = self._ctx.streams.current.session_id
+        for old in folders[keep:]:
+            if old.parent.name == current:
+                continue
+            try:
+                shutil.rmtree(old, ignore_errors=True)
+            except Exception:  # noqa: BLE001 - cleanup is best effort
+                pass
 
     def _act_play_url(self, payload: dict[str, Any]) -> dict[str, Any]:
         url = str(payload.get("url", "")).strip()
@@ -920,20 +1389,39 @@ class InputPlugin(Plugin):
         # Map "url" -> auto-detect; we just pass it through
         kind: Any = kind_raw if kind_raw in ("live", "recording") else "url"
 
+        live = kind == "live"
         spec = SourceSpec(
             kind=kind,
             url=url,
             title=title,
+            realtime=live,
+            download=not live and url.startswith(("http://", "https://")),
+            audio_gate_limit=(
+                self._gate_limit("stt", "stt.chunk_seconds", 50.0) if not live else 0.0
+            ),
+            video_gate_limit=(
+                self._gate_limit("vlm", "vlm.window_seconds", 20.0)
+                if not live
+                else 0.0
+            ),
         )
-        try:
-            self._start_source(spec)
-        except Exception as exc:  # noqa: BLE001 - surface startup failures
-            self._ctx.events.emit(
-                "input.error",
-                message=f"启动播放失败：{exc}",
-                source=title,
-            )
-            return {"ok": False, "message": f"启动播放失败：{exc}"}
+        with self._class_lock:
+            self._processing = True
+            self._class_finished = False
+
+        def _run() -> None:
+            try:
+                self._start_source(spec)
+            except Exception as exc:  # noqa: BLE001 - surface startup failures
+                self._ctx.events.emit(
+                    "input.error",
+                    message=f"启动播放失败：{exc}",
+                    source=title,
+                )
+                self._ctx.ui.refresh("input.error")
+
+        # Downloading + starting ffmpeg must never block the action request.
+        threading.Thread(target=_run, name="input-start-url", daemon=True).start()
         return {"ok": True, "message": "开始播放", "open_page": "input:session"}
 
     def _act_stop(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1014,12 +1502,15 @@ _INPUT_SETTINGS: list[SettingsSpec] = [
         order=12,
     ),
     SettingsSpec(
-        key="input.playback_speed",
-        label="播放速度",
-        type="float",
-        default=1.0,
-        group="播放",
-        description="播放速度倍率（1.0 = 正常）；下次播放生效。",
+        key="input.keep_recordings",
+        label="本地保留录像",
+        type="int",
+        default=4,
+        group="录播",
+        description=(
+            "录播先下载到会话目录再全速处理，便于回看；"
+            "只保留最近 N 节，超出按时间从旧到新删除（0 = 全部删除）。"
+        ),
         order=13,
     ),
     SettingsSpec(

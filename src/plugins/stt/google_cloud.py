@@ -14,15 +14,26 @@ terms) is not used.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 import httpx
 
 from .errors import SttError
 
+logger = logging.getLogger("lecture_agent.plugin.stt")
+
 DEFAULT_LOCATION = "us"
 DEFAULT_MODEL = "chirp_3"
+# ``chirp_*`` models are not served from the ``global`` endpoint; they live in
+# regional ones.  When a chirp model is paired with ``global`` we retry against
+# this region before giving up.
+CHIRP_FALLBACK_LOCATION = "us"
+# Last-resort model: it exists in every location and supports the languages we
+# care about (including cmn-Hans-CN), so transcripts keep flowing even when the
+# requested model/region pair is rejected.
+FALLBACK_MODEL = "long"
 
 MODEL_OPTIONS: tuple[tuple[str, str], ...] = (
     ("chirp_3", "chirp_3（最新多语言模型，推荐）"),
@@ -67,10 +78,17 @@ class GoogleSpeechClient:
     ) -> None:
         self._config = config
         self._access_token = access_token
+        self._used_config: SpeechConfig = config
         self._client = httpx.Client(
             timeout=max(1.0, float(config.timeout)),
             transport=transport,
         )
+
+    @property
+    def used_config(self) -> SpeechConfig:
+        """The model/location actually accepted by the last request."""
+
+        return self._used_config
 
     def close(self) -> None:
         self._client.close()
@@ -88,20 +106,52 @@ class GoogleSpeechClient:
     def location(self) -> str:
         return self._config.location.strip() or DEFAULT_LOCATION
 
-    def endpoint_base(self) -> str:
-        location = self.location.lower()
+    def endpoint_base(self, location: str | None = None) -> str:
+        location = (location or self.location).strip().lower() or DEFAULT_LOCATION
         if location == "global":
             return "https://speech.googleapis.com"
         return f"https://{location}-speech.googleapis.com"
 
-    def recognize_url(self) -> str:
-        project = self._config.project_id.strip()
+    def recognize_url(self, config: SpeechConfig | None = None) -> str:
+        config = config or self._config
+        project = config.project_id.strip()
         if not project:
             raise SttError("缺少 Google Cloud project ID（凭据里没有或设置项为空）")
+        location = config.location.strip() or DEFAULT_LOCATION
         return (
-            f"{self.endpoint_base()}/v2/projects/{project}"
-            f"/locations/{self.location}/recognizers/_:recognize"
+            f"{self.endpoint_base(location)}/v2/projects/{project}"
+            f"/locations/{location}/recognizers/_:recognize"
         )
+
+    def _candidates(self) -> list[SpeechConfig]:
+        """Configurations to try, in order.
+
+        Google rejects a model that is not served in the configured location
+        with HTTP 400.  ``chirp_*`` models are regional, so a stored
+        ``global`` location silently breaks transcription.  Retry with a
+        regional endpoint and finally with the always-available ``long``
+        model so audio is still transcribed.
+        """
+
+        config = self._config
+        model = config.model.strip() or DEFAULT_MODEL
+        location = config.location.strip() or DEFAULT_LOCATION
+        out: list[SpeechConfig] = [replace(config, model=model, location=location)]
+        if model.lower().startswith("chirp") and location.lower() == "global":
+            out.append(
+                replace(config, model=model, location=CHIRP_FALLBACK_LOCATION)
+            )
+        if model.lower() != FALLBACK_MODEL:
+            out.append(replace(config, model=FALLBACK_MODEL, location=location))
+        seen: set[tuple[str, str]] = set()
+        unique: list[SpeechConfig] = []
+        for candidate in out:
+            key = (candidate.location.lower(), candidate.model.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique
 
     # ------------------------------------------------------------------
     # Request
@@ -120,20 +170,46 @@ class GoogleSpeechClient:
         if not token:
             raise SttError("未获取到 Google OAuth token")
 
+        candidates = self._candidates()
+        last_error: SttError | None = None
+        for index, config in enumerate(candidates):
+            try:
+                data = self._post(config, token, wav)
+            except SttError as exc:
+                if not _is_model_location_error(str(exc)) or index + 1 >= len(candidates):
+                    raise
+                last_error = exc
+                following = candidates[index + 1]
+                logger.warning(
+                    "STT %s@%s unavailable (%s); retrying with %s@%s",
+                    config.model,
+                    config.location,
+                    exc,
+                    following.model,
+                    following.location,
+                )
+                continue
+            self._used_config = config
+            return _parse_results(data, duration)
+        if last_error is not None:  # pragma: no cover - loop always raises
+            raise last_error
+        return []
+
+    def _post(self, config: SpeechConfig, token: str, wav: bytes) -> Any:
         payload = {
             "config": {
                 "autoDecodingConfig": {},
-                "languageCodes": [self._config.language_code],
-                "model": self._config.model,
+                "languageCodes": [config.language_code],
+                "model": config.model,
                 "features": {
-                    "enableAutomaticPunctuation": bool(self._config.punctuation),
+                    "enableAutomaticPunctuation": bool(config.punctuation),
                 },
             },
             "content": base64.b64encode(wav).decode("ascii"),
         }
         try:
             response = self._client.post(
-                self.recognize_url(),
+                self.recognize_url(config),
                 json=payload,
                 headers={
                     "Authorization": f"Bearer {token}",
@@ -146,7 +222,7 @@ class GoogleSpeechClient:
         data = _parse_json(response)
         if response.status_code >= 400:
             raise SttError(_error_message(response.status_code, data))
-        return _parse_results(data, duration)
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +236,20 @@ def _parse_json(response: httpx.Response) -> Any:
         raise SttError(
             f"Google STT v2 返回了非 JSON 响应（HTTP {response.status_code}）"
         ) from exc
+
+
+def _is_model_location_error(text: str) -> bool:
+    """True when Google rejected the model/region combination."""
+
+    message = str(text).lower()
+    markers = (
+        "does not exist in the location",
+        "not supported in the location",
+        "is not available in",
+        "unsupported model",
+        "unknown model",
+    )
+    return any(marker in message for marker in markers)
 
 
 def _error_message(status: int, data: Any) -> str:
@@ -180,9 +270,17 @@ def _error_message(status: int, data: Any) -> str:
             "；请确认已启用 Speech-to-Text API，且账号有 "
             "speech.recognizers.recognize 权限"
         )
+    elif status == 404:
+        hint = "；请确认 project ID / location / recognizer 是否正确"
     elif status == 429:
         hint = "；配额或速率超限"
+    elif status == 400 and _is_model_location_error(message):
+        hint = (
+            "；该模型在当前区域不可用（chirp_* 不支持 global），"
+            "请把区域改成 us 或 asia-southeast1 等区域"
+        )
     return f"Google STT v2 HTTP {status}：{message}{hint}"
+
 
 
 def _parse_duration(value: Any) -> float:

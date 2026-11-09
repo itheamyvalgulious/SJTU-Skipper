@@ -15,8 +15,10 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from typing import Any
 
+from core.pipeline import OrderedWindowPool, WindowError
 from core.plugin import Plugin, PluginContext
 from plugins.settings.spec import SettingsSpec
 
@@ -72,6 +74,12 @@ class STTService:
 
         return self._plugin.transcribe_range(start, end)
 
+    def enabled(self) -> bool:
+        return self._plugin.enabled()
+
+    def busy(self) -> bool:
+        return self._plugin.busy()
+
 
 class SttPlugin(Plugin):
     """Google Cloud Speech-to-Text v2 worker over the audio stream."""
@@ -95,7 +103,15 @@ class SttPlugin(Plugin):
         self._chars = 0
         self._last_error = ""
         self._reported_error = ""
+        self._effective_model = ""
+        self._effective_location = ""
         self._consecutive_errors = 0
+        self._recording_sessions: set[str] = set()
+        self._recording_cursor: dict[str, float] = {}
+        self._recording_active = False
+        self._processing_session: Any = None
+        self._client: GoogleSpeechClient | None = None
+        self._client_signature: tuple[str, str, str, str, float] | None = None
         self._page_added = False
         self._item_added = False
         self._tab_added = False
@@ -127,6 +143,11 @@ class SttPlugin(Plugin):
             auth = self._auth
             self._auth = None
             self._auth_signature = None
+            client = self._client
+            self._client = None
+            self._client_signature = None
+        if client is not None:
+            client.close()
         if auth is not None:
             auth.close()
         ctx = self._ctx
@@ -209,7 +230,8 @@ class SttPlugin(Plugin):
                 group="STT",
                 description=(
                     "v2 recognizer 区域，例如 us、eu、asia-northeast1、"
-                    "asia-southeast1；chirp_3 需在支持的区域使用。"
+                    "asia-southeast1。注意：chirp_* 模型不在 global 提供服务，"
+                    "配成 global 会自动改用 us 区域重试。"
                 ),
                 order=4,
             ),
@@ -261,6 +283,18 @@ class SttPlugin(Plugin):
                 group="STT",
                 description="请求 Google 自动添加标点。",
                 order=8,
+            ),
+            SettingsSpec(
+                key="stt.concurrency",
+                label="录播并发数",
+                type="int",
+                default=4,
+                group="STT",
+                description=(
+                    "录播全速处理时同时进行的转写请求数。瓶颈是等待 Google，"
+                    "与 CPU 核数无关；直播始终为 1。"
+                ),
+                order=9,
             ),
             SettingsSpec(
                 key="stt.timeout",
@@ -366,6 +400,8 @@ class SttPlugin(Plugin):
             chars = self._chars
             cursor = self._cursor
             last_error = self._last_error
+            effective_model = self._effective_model
+            effective_location = self._effective_location
             alive = self._worker is not None and self._worker.is_alive()
 
         if not enabled:
@@ -384,12 +420,20 @@ class SttPlugin(Plugin):
             state = "idle"
             error = ""
 
+        requested_model = str(
+            self._setting("stt.model", DEFAULT_MODEL) or DEFAULT_MODEL
+        )
+        requested_location = str(
+            self._setting("stt.location", DEFAULT_LOCATION) or DEFAULT_LOCATION
+        )
         return {
             "state": state,
             "error": error,
             "backend": BACKEND,
-            "model": str(self._setting("stt.model", DEFAULT_MODEL) or DEFAULT_MODEL),
-            "location": str(self._setting("stt.location", DEFAULT_LOCATION) or DEFAULT_LOCATION),
+            "model": effective_model or requested_model,
+            "location": effective_location or requested_location,
+            "requested_model": requested_model,
+            "requested_location": requested_location,
             "session_id": session.session_id if session is not None else "",
             "audio_seconds": (
                 round(session.audio.duration, 3) if session is not None else 0.0
@@ -464,8 +508,14 @@ class SttPlugin(Plugin):
         config, provider = self._speech_config()
         with GoogleSpeechClient(config, provider.token) as client:
             segments = client.recognize(wav, duration=finish - begin)
+            used = client.used_config
 
-        appended, chars = self._append_segments(segments, base=begin, model=config.model)
+        with self._lock:
+            self._effective_model = used.model
+            self._effective_location = used.location
+        appended, chars = self._append_segments(segments, base=begin, model=used.model)
+        # Consumed audio is no longer needed: bound live-mode memory too.
+        session.audio.trim(max(0.0, float(finish) - 30.0))
         if appended:
             ctx.events.emit(
                 "stt.segment",
@@ -474,7 +524,7 @@ class SttPlugin(Plugin):
                 end=finish,
                 segments=appended,
                 chars=chars,
-                model=config.model,
+                model=used.model,
             )
             ctx.ui.refresh("stt.segment")
         return {
@@ -552,7 +602,10 @@ class SttPlugin(Plugin):
         self._logger.info("STT worker started")
         while not self._stop_event.is_set():
             try:
-                self._process_next_window()
+                if self._is_recording_session():
+                    self._run_recording_session()
+                else:
+                    self._process_next_window()
             except Exception as exc:  # noqa: BLE001 - worker must survive
                 self._handle_error(exc)
         try:
@@ -560,6 +613,194 @@ class SttPlugin(Plugin):
         except Exception:  # noqa: BLE001 - best effort on shutdown
             self._logger.exception("STT flush on shutdown failed")
         self._logger.info("STT worker stopped")
+
+    # ------------------------------------------------------------------
+    # Recording mode (full-speed ingest + concurrent windows)
+    # ------------------------------------------------------------------
+    def enabled(self) -> bool:
+        return bool(self._setting("stt.enabled", True))
+
+    def busy(self) -> bool:
+        if not self.enabled():
+            return False
+        with self._lock:
+            if self._recording_active:
+                return True
+            ctx = self._ctx
+            session = ctx.streams.current if ctx is not None else None
+            if session is None or not session.input_done:
+                return False
+            if str(session.meta.get("mode", "")) != "fast":
+                return False
+            cursor = float(self._recording_cursor.get(session.session_id, 0.0))
+            return cursor + 1.0 < session.audio.duration
+
+    def _concurrency(self) -> int:
+        try:
+            value = int(self._setting("stt.concurrency", 4))
+        except (TypeError, ValueError):
+            value = 4
+        return max(1, min(32, value))
+
+    def _is_recording_session(self) -> bool:
+        ctx = self._ctx
+        if ctx is None:
+            return False
+        return str(ctx.streams.current.meta.get("mode", "")) == "fast"
+
+    def _speech_client(self) -> tuple[GoogleSpeechClient, str]:
+        """One shared HTTP client for all concurrent windows."""
+
+        config, provider = self._speech_config()
+        signature = (
+            config.project_id,
+            config.location,
+            config.model,
+            config.language_code,
+            round(float(config.timeout), 3),
+        )
+        with self._auth_lock:
+            if self._client is None or self._client_signature != signature:
+                old = self._client
+                self._client = None
+                self._client_signature = None
+                if old is not None:
+                    old.close()
+                self._client = GoogleSpeechClient(config, provider.token)
+                self._client_signature = signature
+            return self._client, config.model
+
+    def _process_window(self, start: float, end: float) -> dict[str, Any]:
+        session = self._processing_session or self._ctx.streams.current
+        wav = session.audio.read_as_wav(start, end)
+        if not wav:
+            return {"segments": [], "model": ""}
+        client, model = self._speech_client()
+        attempts = 3
+        for attempt in range(attempts):
+            try:
+                segments = client.recognize(wav, duration=max(0.1, end - start))
+            except SttError as exc:
+                retryable = _retryable_stt_error(str(exc))
+                if not retryable or attempt + 1 >= attempts:
+                    raise
+                delay = 1.0 * (2 ** attempt)
+                self._logger.warning(
+                    "STT window %.1f-%.1f retry %d/%d in %.1fs: %s",
+                    start, end, attempt + 1, attempts - 1, delay, exc,
+                )
+                time.sleep(delay)
+                continue
+            used = client.used_config
+            return {"segments": segments, "model": used.model or model}
+        return {"segments": [], "model": model}
+
+    def _run_recording_session(self) -> None:
+        """Drain the current fast recording with N concurrent windows."""
+
+        ctx = self._ctx
+        if ctx is None:
+            return
+        session = ctx.streams.current
+        sid = session.session_id
+        with self._lock:
+            if sid in self._recording_sessions and (
+                session.input_done or session.ended_at is not None
+            ):
+                self._stop_event.wait(0.5)
+                return
+            self._recording_sessions.discard(sid)
+            start_at = float(self._recording_cursor.get(sid, 0.0))
+            self._recording_active = True
+
+        self._processing_session = session
+        window = self._chunk_seconds()
+        pool = OrderedWindowPool(
+            name="stt",
+            window=window,
+            concurrency=self._concurrency(),
+            process=self._process_window,
+            commit=self._commit_window,
+            start=start_at,
+        )
+        try:
+            while not self._stop_event.is_set():
+                if ctx.streams.current.session_id != sid:
+                    break
+                available = session.audio.duration
+                cursor = pool.next_start
+                if available - cursor >= window - 1e-6:
+                    if not pool.submit(cursor, cursor + window):
+                        pool.poll(0.1)
+                    continue
+                if session.input_done or session.ended_at is not None:
+                    # The tail window may be refused while the pool is
+                    # saturated; retry instead of silently losing it.
+                    while available - cursor >= _MIN_FLUSH_SECONDS:
+                        if pool.submit(cursor, available):
+                            break
+                        pool.poll(0.1)
+                    break
+                pool.poll(0.2)
+            pool.drain()
+        finally:
+            pool.close()
+            with self._lock:
+                self._recording_cursor[sid] = max(
+                    float(self._recording_cursor.get(sid, 0.0)),
+                    pool.committed_end,
+                )
+                self._cursor = pool.committed_end
+                self._recording_sessions.add(sid)
+                self._recording_active = False
+
+    def _commit_window(self, start: float, end: float, result: Any) -> None:
+        session = self._processing_session or self._ctx.streams.current
+        if isinstance(result, WindowError):
+            message = f"{type(result.error).__name__}: {result.error}"
+            with self._lock:
+                self._last_error = message
+            self._logger.warning(
+                "STT window %.1f-%.1f failed: %s", start, end, message
+            )
+            with self._lock:
+                self._recording_cursor[session.session_id] = max(
+                    float(self._recording_cursor.get(session.session_id, 0.0)),
+                    float(end),
+                )
+            session.audio_gate.release(end)
+            session.audio.trim(max(0.0, float(end) - 30.0))
+            return
+        segments = result.get("segments", []) if isinstance(result, dict) else []
+        model = str(result.get("model", "") or "")
+        self._logger.info(
+            "STT window %s–%s: %d segments (%d chars)",
+            _fmt_time(start), _fmt_time(end), len(segments),
+            sum(len(getattr(s, "text", "") or "") for s in segments),
+        )
+        appended, chars = self._append_segments(segments, base=start, model=model)
+        with self._lock:
+            self._cursor = max(self._cursor, float(end))
+            self._recording_cursor[session.session_id] = max(
+                float(self._recording_cursor.get(session.session_id, 0.0)),
+                float(end),
+            )
+        session.audio_gate.release(end)
+        # Processed audio has no consumer left: keep memory bounded.
+        session.audio.trim(max(0.0, float(end) - 30.0))
+        if not appended:
+            return
+        ctx = self._ctx
+        ctx.events.emit(
+            "stt.segment",
+            session_id=session.session_id,
+            start=start,
+            end=end,
+            segments=appended,
+            chars=chars,
+            model=model,
+        )
+        ctx.ui.refresh("stt.segment")
 
     def _process_next_window(self) -> None:
         ctx = self._ctx
@@ -648,6 +889,13 @@ class SttPlugin(Plugin):
             self._consecutive_errors = 0
 
     def _on_session_stopped(self, _event: Any) -> None:
+        ctx = self._ctx
+        if ctx is not None and str(ctx.streams.current.meta.get("mode", "")) == "fast":
+            # The recording pool already committed every window.
+            return
+        with self._lock:
+            if self._recording_active:
+                return
         try:
             self._flush_remaining()
         except Exception:  # noqa: BLE001 - session teardown is best effort
@@ -735,13 +983,40 @@ class SttPlugin(Plugin):
             ["状态", _STATE_LABELS.get(str(status["state"]), str(status["state"]))],
             ["后端", "Google Cloud Speech-to-Text v2"],
             ["模型", f"{status['model']} @ {status['location']}"],
+            *(
+                [
+                    [
+                        "已回退",
+                        f"设置的是 {status['requested_model']} @ "
+                        f"{status['requested_location']}，该组合不可用",
+                    ]
+                ]
+                if status.get("requested_model")
+                and (
+                    status.get("requested_model") != status.get("model")
+                    or status.get("requested_location") != status.get("location")
+                )
+                else []
+            ),
             ["会话", status["session_id"] or "—"],
             ["音频", f"{float(status['audio_seconds']):.1f}s"],
             [
                 "已转写",
                 f"{status['segments']} 段 / {status['chars']} 字",
             ],
+            ["游标", f"{float(status['cursor']):.1f}s / 音频 {float(status['audio_seconds']):.1f}s"],
         ]
+
+
+def _retryable_stt_error(message: str) -> bool:
+    """Transient Google failures (5xx / 429 / network) are worth retrying."""
+
+    lowered = message.lower()
+    if "http 429" in lowered or "http 500" in lowered or "http 502" in lowered:
+        return True
+    if "http 503" in lowered or "http 504" in lowered:
+        return True
+    return "请求 google stt v2 失败" in lowered
 
 
 def _fmt_time(seconds: float) -> str:

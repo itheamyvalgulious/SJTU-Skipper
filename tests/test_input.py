@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -153,7 +154,7 @@ class FakeSource:
 # helpers
 # ---------------------------------------------------------------------------
 
-def _make_context() -> PluginContext:
+def _make_context(data_dir: Any = None) -> PluginContext:
     """Minimal PluginContext with all required attributes."""
     bus = EventBus()
     hub = StreamHub(emit=bus.emit)
@@ -164,7 +165,7 @@ def _make_context() -> PluginContext:
     import logging
     return PluginContext(
         plugin_id="input",
-        data_dir=mock.MagicMock(),
+        data_dir=data_dir if data_dir is not None else mock.MagicMock(),
         events=bus,
         streams=hub,
         llm=mock.MagicMock(),
@@ -463,6 +464,7 @@ class TestSourceManager:
 
         class DummySource:
             running = True
+            finished = True
 
             def __init__(self, spec, **kwargs):
                 self.spec = spec
@@ -832,7 +834,7 @@ class TestInputPluginUI:
             "input.video_fps",
             "input.video_width",
             "input.audio_rate",
-            "input.playback_speed",
+            "input.keep_recordings",
             "input.live_device",
             "input.reconnect",
         ):
@@ -962,6 +964,170 @@ class TestFFmpegSourceInternals:
             assert "-headers" in audio_cmd, (
                 f"HTTP URL should pass headers: {audio_cmd}"
             )
+
+
+# ====================================================================
+# Recording mode: double EOF, gates, download, retention
+# ====================================================================
+
+class TestRecordingIngest:
+    def _source(self, hub=None, **kwargs):
+        from plugins.input.sources import FFmpegSource
+
+        hub = hub or StreamHub(emit=lambda *a, **kw: None)
+        events: list[dict] = []
+
+        def emit(event_type: str, **kw: Any) -> None:
+            events.append({"type": event_type, **kw})
+
+        spec = SourceSpec(kind="recording", url="/tmp/x.mp4", title="t", **kwargs)
+        src = FFmpegSource(spec, hub=hub, emit=emit, reconnect=False)
+        return src, hub, events
+
+    def test_ended_waits_for_both_readers(self) -> None:
+        """Audio EOF alone must not end a full-speed recording."""
+
+        src, hub, events = self._source()
+        hub.start_session(meta={"mode": "fast"})
+        src._mark_reader_done("audio")
+        assert not [e for e in events if e["type"] == "input.ended"]
+        assert hub.current.input_done is False
+
+        src._mark_reader_done("video")
+        ended = [e for e in events if e["type"] == "input.ended"]
+        assert len(ended) == 1
+        assert hub.current.input_done is True
+
+        # Repeated EOFs must not emit twice.
+        src._mark_reader_done("video")
+        assert len([e for e in events if e["type"] == "input.ended"]) == 1
+
+    def test_gate_limits_come_from_the_spec(self) -> None:
+        hub = StreamHub(emit=lambda *a, **kw: None)
+        mgr = SourceManager(hub=hub, emit=lambda *a, **kw: None)
+        spec = SourceSpec(
+            kind="recording",
+            url="x",
+            title="t",
+            realtime=False,
+            audio_gate_limit=120.0,
+            video_gate_limit=60.0,
+        )
+        with mock.patch("plugins.input.sources.subprocess.Popen") as popen:
+            popen.return_value.stdout = None
+            popen.return_value.poll.return_value = 1
+            mgr.start(spec)
+            mgr.stop()
+        assert hub.current.audio_gate.limit == 120.0
+        assert hub.current.video_gate.limit == 60.0
+
+    def test_session_meta_records_mode(self) -> None:
+        hub = StreamHub(emit=lambda *a, **kw: None)
+        mgr = SourceManager(hub=hub, emit=lambda *a, **kw: None)
+        with mock.patch("plugins.input.sources.subprocess.Popen") as popen:
+            popen.return_value.stdout = None
+            popen.return_value.poll.return_value = 1
+            mgr.start(
+                SourceSpec(kind="recording", url="x", title="t", realtime=False)
+            )
+            mgr.stop()
+        assert hub.current.meta["mode"] == "fast"
+
+    def test_download_is_used_for_remote_recordings(self, tmp_path) -> None:
+        from plugins.input.sources import FFmpegSource
+
+        hub = StreamHub(emit=lambda *a, **kw: None)
+        hub.start_session(meta={})
+        downloaded: list[str] = []
+
+        class FakeDownloader:
+            def download(self, url, dest, *, stop_event=None, on_progress=None):
+                from plugins.input.download import DownloadResult
+
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(b"media")
+                downloaded.append(str(dest))
+                if on_progress:
+                    on_progress(5, 5)
+                return DownloadResult(path=dest, total=5, ok=True)
+
+        spec = SourceSpec(
+            kind="recording",
+            url="https://live.sjtu.edu.cn/x/rec.mp4?key=1",
+            title="t",
+            download=True,
+            realtime=False,
+        )
+        src = FFmpegSource(
+            spec,
+            hub=hub,
+            emit=lambda *a, **kw: None,
+            downloader=FakeDownloader(),
+            media_dir=tmp_path,
+        )
+        with mock.patch("plugins.input.sources.subprocess.Popen") as popen:
+            popen.return_value.stdout = None
+            popen.return_value.poll.return_value = 1
+            src.start()
+        assert downloaded, "recording should be downloaded first"
+        assert hub.current.meta["media_name"] == "rec.mp4"
+        assert src._input_url.startswith(str(tmp_path))
+        assert hub.current.meta["media_path"].startswith(str(tmp_path))
+
+    def test_download_failure_falls_back_to_remote(self, tmp_path) -> None:
+        from plugins.input.download import DownloadResult
+        from plugins.input.sources import FFmpegSource
+
+        hub = StreamHub(emit=lambda *a, **kw: None)
+        hub.start_session(meta={})
+        events: list[dict] = []
+
+        class BrokenDownloader:
+            def download(self, url, dest, *, stop_event=None, on_progress=None):
+                return DownloadResult(path=None, total=0, ok=False, error="nope")
+
+        spec = SourceSpec(
+            kind="recording",
+            url="https://live.sjtu.edu.cn/x/rec.mp4",
+            title="t",
+            download=True,
+            realtime=False,
+        )
+        src = FFmpegSource(
+            spec,
+            hub=hub,
+            emit=lambda event_type, **kw: events.append({"type": event_type, **kw}),
+            downloader=BrokenDownloader(),
+            media_dir=tmp_path,
+        )
+        with mock.patch("plugins.input.sources.subprocess.Popen") as popen:
+            popen.return_value.stdout = None
+            popen.return_value.poll.return_value = 1
+            src.start()
+        assert src._input_url == spec.url
+        assert any(e.get("status") == "failed" for e in events)
+
+
+class TestMediaPrune:
+    def test_keeps_recent_media_folders(self, tmp_path) -> None:
+        from plugins.input.plugin import InputPlugin
+
+        ctx = _make_context(tmp_path)
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        sessions = tmp_path / "sessions"
+        for index in range(6):
+            folder = sessions / f"s{index}" / "media"
+            folder.mkdir(parents=True)
+            (folder / "a.mp4").write_bytes(b"x")
+            os.utime(folder, (index + 1, index + 1))
+        ctx.require("settings").set("input.keep_recordings", 2)
+
+        plugin._prune_media()
+
+        left = sorted(path.parent.name for path in sessions.glob("*/media"))
+        assert left == ["s4", "s5"]
+        plugin.teardown()
 
 
 # ====================================================================
@@ -1147,7 +1313,7 @@ class TestClassPlayer:
         plugin = InputPlugin()
         plugin.setup(ctx)
         monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
-        self._open_class(ctx, plugin)
+        self._open_class(ctx, plugin, kind="live")
         plugin._class_streams = {
             "main": "https://example.com/main.m3u8",
             "screen": "https://example.com/screen.m3u8",
@@ -1160,6 +1326,36 @@ class TestClassPlayer:
         assert [src["label"] for src in player["sources"]] == ["课堂", "屏幕"]
         assert player["processing"] is False
         assert player["part"] == 1 and player["parts"] == 2
+
+        plugin.teardown()
+
+    def test_recording_page_has_no_player_but_shows_progress(self, monkeypatch):
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        self._open_class(ctx, plugin, kind="recording")
+        plugin._class_streams = {"main": "https://example.com/main.mp4"}
+        plugin._streams_loading = False
+        plugin._processing = True
+        plugin._total_seconds = 3600.0
+
+        ctx.ui.open_page("input:session")
+        blocks = ctx.ui.state()["page_content"]["input:session"]
+        assert not [b for b in blocks if b["type"] == "player"], (
+            "recordings are processed at full speed: no in-page player"
+        )
+        progress = [b for b in blocks if b["type"] == "progress"]
+        assert progress, "recording page must show processing progress"
+
+        ctx.streams.current.meta["media_name"] = "clip.mp4"
+        ctx.ui.open_page("input:session")
+        blocks = ctx.ui.state()["page_content"]["input:session"]
+        links = [
+            b for b in blocks
+            if b["type"] == "markdown" and "/api/artifacts/" in b.get("text", "")
+        ]
+        assert links, "a local media link must be offered"
 
         plugin.teardown()
 
@@ -1177,9 +1373,14 @@ class TestClassPlayer:
         result = ctx.ui.dispatch_action("input.start_processing", {})
         assert result.ok
         assert plugin._processing is True
+        deadline = time.monotonic() + 5
+        while not started and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert started and started[0].url == "https://example.com/main.m3u8"
         assert started[0].kind == "recording"
         assert started[0].continue_session is False
+        assert started[0].realtime is False, "recordings are ingested at full speed"
+        assert started[0].download is True
 
         plugin.teardown()
 

@@ -139,3 +139,34 @@ def test_stream_set_status() -> None:
     assert status["transcript_chars"] == 3
     assert status["visual_chars"] == 4
     assert status["meta"]["course"] == "topology"
+
+
+class TestTrim:
+    def test_audio_trim_drops_consumed_chunks(self) -> None:
+        from core.streams import AudioStream
+
+        stream = AudioStream("s1", sample_rate=16000)
+        for _ in range(4):
+            stream.append(b"\x00\x00" * 16000)  # 1 s each
+        assert stream.duration == pytest.approx(4.0)
+
+        dropped = stream.trim(2.0)
+        assert dropped == 2
+        assert stream.duration == pytest.approx(4.0)  # timeline unchanged
+        assert stream.kept_seconds == pytest.approx(2.0)
+        # Reads after the trim still return the remaining data.
+        assert len(stream.read(2.0, 4.0)) == 64000
+        # Reads in the dropped region return nothing / the next chunk.
+        assert stream.read(0.0, 1.0) in (b"", b"\x00\x00" * 16000)
+
+    def test_video_trim_keeps_timeline(self) -> None:
+        from core.streams import VideoStream
+
+        stream = VideoStream("s1", fps=1.0)
+        for _ in range(5):
+            stream.append_frame(b"jpg", duration=1.0)
+        assert stream.duration == pytest.approx(5.0)
+        assert stream.trim(3.0) == 3
+        assert stream.duration == pytest.approx(5.0)
+        assert stream.kept_seconds == pytest.approx(2.0)
+        assert [f.start for f in stream.read_frames(3.0, 5.0)] == [3.0, 4.0]

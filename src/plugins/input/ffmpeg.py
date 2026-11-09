@@ -191,3 +191,33 @@ def build_reconnect_args(
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", str(max(1, int(max_retries))),
     ]
+
+def probe_duration(path: str, *, timeout: float = 20.0) -> float | None:
+    """Return the media duration in seconds via ffprobe, or None."""
+
+    import json
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                str(path),
+            ],
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout.decode("utf-8", "replace") or "{}")
+        value = float((data.get("format") or {}).get("duration") or 0.0)
+    except (ValueError, TypeError):
+        return None
+    return value if value > 0 else None

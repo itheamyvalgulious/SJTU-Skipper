@@ -284,7 +284,7 @@ class TestGoogleCloudBackend:
             return httpx.Response(200, json={"results": []})
 
         client = GoogleSpeechClient(
-            SpeechConfig(project_id="proj-1", location="global"),
+            SpeechConfig(project_id="proj-1", location="global", model="long"),
             lambda: "TEST-TOKEN",
             transport=httpx.MockTransport(handler),
         )
@@ -295,6 +295,99 @@ class TestGoogleCloudBackend:
         assert seen["url"].startswith(
             "https://speech.googleapis.com/v2/projects/proj-1/locations/global/"
         )
+
+    def test_chirp_model_on_global_retries_in_region(self) -> None:
+        """``chirp_*`` is unavailable on ``global``; retry in ``us``."""
+
+        urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            urls.append(url)
+            if "/locations/global/" in url:
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": (
+                                'The model "chirp_3" does not exist in the '
+                                'location named "global".'
+                            )
+                        }
+                    },
+                )
+            return httpx.Response(200, json=speech_response("你好。"))
+
+        client = GoogleSpeechClient(
+            SpeechConfig(project_id="proj-1", location="global", model="chirp_3"),
+            lambda: "TEST-TOKEN",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            segments = client.recognize(b"RIFF")
+            used = client.used_config
+        finally:
+            client.close()
+
+        assert len(urls) == 2
+        assert "/locations/us/" in urls[1]
+        assert used.location == "us"
+        assert used.model == "chirp_3"
+        assert [segment.text for segment in segments] == ["你好。"]
+
+    def test_unknown_model_falls_back_to_long(self) -> None:
+        models: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            model = json.loads(request.content)["config"]["model"]
+            models.append(model)
+            if model != "long":
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": (
+                                f'The model "{model}" does not exist in the '
+                                'location named "us".'
+                            )
+                        }
+                    },
+                )
+            return httpx.Response(200, json=speech_response("好的。"))
+
+        client = GoogleSpeechClient(
+            SpeechConfig(project_id="proj-1", location="us", model="chirp_2"),
+            lambda: "TEST-TOKEN",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            segments = client.recognize(b"RIFF")
+            used = client.used_config
+        finally:
+            client.close()
+
+        assert models == ["chirp_2", "long"]
+        assert used.model == "long"
+        assert [segment.text for segment in segments] == ["好的。"]
+
+    def test_error_is_not_retried_when_unrelated(self) -> None:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            return httpx.Response(403, json={"error": {"message": "denied"}})
+
+        client = GoogleSpeechClient(
+            SpeechConfig(project_id="proj-1", location="global", model="chirp_3"),
+            lambda: "TEST-TOKEN",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            with pytest.raises(SttError):
+                client.recognize(b"RIFF")
+        finally:
+            client.close()
+        assert len(calls) == 1
 
     def test_multiple_results_get_sequential_offsets(self) -> None:
         client = make_client(
@@ -653,6 +746,54 @@ class TestWorker:
             plugin._process_next_window()
             assert len(ctx.streams.current.transcript) == 2
             assert plugin.status()["cursor"] == pytest.approx(4.0)
+        finally:
+            plugin.teardown()
+
+    def test_recording_session_uses_concurrent_windows(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fast recordings transcribe all windows and commit them in order."""
+
+        values = {
+            "stt.enabled": False,
+            "stt.project_id": "proj-1",
+            "stt.credentials_json": "{}",
+            "stt.chunk_seconds": 2.0,
+            "stt.concurrency": 3,
+        }
+        ctx = make_ctx(tmp_path, values=values)
+        plugin = SttPlugin()
+        plugin.setup(ctx)
+        ctx.services.require("settings").set("stt.enabled", True)
+        monkeypatch.setattr(
+            "plugins.stt.plugin.GoogleSpeechClient",
+            lambda config, token: GoogleSpeechClient(
+                config,
+                lambda: "TEST-TOKEN",
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(
+                        200, json=speech_response("窗口。")
+                    )
+                ),
+            ),
+        )
+        session = ctx.streams.current
+        session.meta["mode"] = "fast"
+        session.audio_gate.configure(60.0)
+        session.audio.append(b"\x00\x00" * 128000)  # 8 s
+        session.input_done = True
+        try:
+            plugin._run_recording_session()
+            items = list(session.transcript)
+            assert len(items) == 4, "four 2s windows"
+            assert [item.start for item in items] == pytest.approx(
+                [0.0, 2.0, 4.0, 6.0]
+            )
+            assert plugin.status()["cursor"] == pytest.approx(8.0)
+            assert session.audio_gate.released == pytest.approx(8.0)
+            assert plugin.busy() is False
         finally:
             plugin.teardown()
 

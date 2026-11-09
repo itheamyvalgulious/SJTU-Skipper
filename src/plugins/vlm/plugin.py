@@ -20,6 +20,7 @@ from typing import Any
 from PIL import Image
 
 from core.events import Event
+from core.pipeline import OrderedWindowPool, WindowError
 from core.plugin import Plugin, PluginContext
 from core.streams import TextItem, VideoFrame
 from plugins.settings.spec import SettingsSpec
@@ -59,6 +60,11 @@ class VlmPlugin(Plugin):
         self._last_visual_text: str = ""
         self._latest_image_path: str = ""
         self._last_error: str = ""
+        self._last_window: dict[str, Any] = {}
+        self._recording_sessions: set[str] = set()
+        self._recording_cursor: dict[str, float] = {}
+        self._recording_active = False
+        self._processing_session: Any = None
         self._shutting_down = False
 
         self._register_settings()
@@ -137,6 +143,17 @@ class VlmPlugin(Plugin):
                 description="启用图片融合（含配准与去遮挡）；关闭时只取最后一帧",
             ),
             SettingsSpec(
+                key="vlm.concurrency",
+                label="录播并发数",
+                type="int",
+                default=4,
+                group="VLM",
+                description=(
+                    "录播全速处理时同时进行的板书识别窗口数；"
+                    "瓶颈是等待模型，直播始终为 1。"
+                ),
+            ),
+            SettingsSpec(
                 key="vlm.dedupe_threshold",
                 label="去重阈值",
                 type="float",
@@ -170,6 +187,7 @@ class VlmPlugin(Plugin):
                 "cursor": self._cursor,
                 "session_id": self._last_session,
                 "latest_image": self._latest_image_path,
+                "last_window": dict(self._last_window),
                 "consecutive_errors": self._consecutive_errors,
                 "last_error": self._last_error,
                 "worker_alive": self._worker is not None and self._worker.is_alive(),
@@ -215,6 +233,7 @@ class VlmPlugin(Plugin):
         image_path = ""
         with self._lock:
             image_path = self._latest_image_path
+            last = dict(self._last_window)
 
         if image_path:
             blocks.append(
@@ -222,6 +241,15 @@ class VlmPlugin(Plugin):
                     "type": "image",
                     "src": f"/api/artifacts/{self._ctx.streams.current.session_id}/vlm/{Path(image_path).name}",
                     "alt": "最新融合板书",
+                }
+            )
+        if last:
+            stamp = f"{_fmt_time(last.get('start', 0))}–{_fmt_time(last.get('end', 0))}"
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": f"最近窗口 {stamp}：{last.get('note', '')}"
+                    + (f"\n\n模型原始回复：\n{last['text']}" if last.get("text") else ""),
                 }
             )
 
@@ -315,7 +343,10 @@ class VlmPlugin(Plugin):
         logger.info("VLM worker started")
         while not self._stop_event.is_set():
             try:
-                self._process_next_window()
+                if self._is_recording_session():
+                    self._run_recording_session()
+                else:
+                    self._process_next_window()
             except Exception as exc:
                 logger.exception("VLM worker iteration failed")
                 self._last_error = f"{type(exc).__name__}: {exc}"
@@ -410,6 +441,146 @@ class VlmPlugin(Plugin):
             with self._lock:
                 self._cursor = end_time
 
+    def _sample_frames(self, frames: list[VideoFrame]) -> list[VideoFrame]:
+        max_frames_val = int(self._setting("vlm.max_frames", 12))
+        if max_frames_val <= 0 or len(frames) <= max_frames_val:
+            return frames
+        step = len(frames) / max_frames_val
+        indices = [int(i * step) for i in range(max_frames_val)]
+        return [frames[i] for i in indices if i < len(frames)]
+
+    def _run_window(
+        self, start: float, end: float, frames: list[VideoFrame]
+    ) -> dict[str, Any]:
+        """Fuse + save + ask the model.  Safe to run on pool threads."""
+
+        if not frames:
+            return {"image_path": "", "text": "", "empty": True}
+        frames = self._sample_frames(frames)
+
+        do_fusion = self._setting("vlm.fusion", True)
+        if do_fusion:
+            fused = fuse_frames(
+                frames, crop=(0.0, 0.0, 1.0, 1.0), max_width=0, align=True
+            )
+        else:
+            fused = _decode_single(frames[-1].data)
+
+        session = self._processing_session or self._ctx.streams.current
+        vlm_dir = self._ctx.data_dir / "sessions" / session.session_id / "vlm"
+        vlm_dir.mkdir(parents=True, exist_ok=True)
+        image_path = vlm_dir / f"{int(start):06d}-{int(end):06d}.jpg"
+        Image.fromarray(fused).save(str(image_path), quality=92)
+
+        with self._lock:
+            self._latest_image_path = str(image_path)
+
+        timestamp = f"{_fmt_time(start)}–{_fmt_time(end)}"
+        try:
+            text = self._ask_image(image_path.read_bytes(), timestamp)
+        except Exception as exc:  # noqa: BLE001 - reported by commit
+            with self._lock:
+                self._last_error = f"{type(exc).__name__}: {exc}"
+            raise
+        return {"image_path": str(image_path), "text": text}
+
+    def _commit_window(self, start: float, end: float, result: Any) -> dict[str, Any]:
+        """Deduplicate and append one window, in delivery order."""
+
+        ctx = self._ctx
+        session = self._processing_session or ctx.streams.current
+        if isinstance(result, WindowError):
+            with self._lock:
+                self._recording_cursor[session.session_id] = max(
+                    float(self._recording_cursor.get(session.session_id, 0.0)),
+                    float(end),
+                )
+            session.video_gate.release(end)
+            session.video.trim(max(0.0, float(end) - 30.0))
+            ctx.events.emit(
+                "vlm.error",
+                session_id=session.session_id,
+                start=start,
+                end=end,
+                error=f"{type(result.error).__name__}: {result.error}",
+            )
+            ctx.ui.refresh("vlm.error")
+            return {"ok": False, "start": start, "end": end, "error": str(result.error)}
+
+        text = str(result.get("text", "") or "")
+        image_path = str(result.get("image_path", "") or "")
+
+        ctx.events.emit(
+            "vlm.segment",
+            session_id=session.session_id,
+            start=start,
+            end=end,
+            chars=len(text),
+            model=self._setting("vlm.model", "deepseek-flash"),
+        )
+
+        threshold = self._setting("vlm.dedupe_threshold", 0.92)
+        with self._lock:
+            last_text = self._last_visual_text
+
+        if not text:
+            note = "模型返回空"
+        elif text == BLANK_BOARD_MARKER or is_trivial_board_text(text):
+            note = "未识别到板书（空白黑板或仅示意图）"
+        elif last_text and difflib.SequenceMatcher(None, last_text, text).ratio() >= threshold:
+            note = "与上一窗口重复，已跳过"
+        else:
+            note = "已写入板书"
+
+        with self._lock:
+            self._last_window = {
+                "start": start,
+                "end": end,
+                "note": note,
+                "chars": len(text),
+                "text": text[:400],
+            }
+        logger.info(
+            "VLM window %s–%s: %s (%d chars)",
+            _fmt_time(start),
+            _fmt_time(end),
+            note,
+            len(text),
+        )
+
+        if note == "已写入板书":
+            visual = session.visual
+            visual.append(
+                text,
+                start=start,
+                end=end,
+                source="vlm",
+                meta={
+                    "image_path": image_path,
+                    "model": self._setting("vlm.model", "deepseek-flash"),
+                },
+            )
+            with self._lock:
+                self._last_visual_text = text
+
+        with self._lock:
+            self._cursor = max(self._cursor, float(end))
+            self._recording_cursor[session.session_id] = max(
+                float(self._recording_cursor.get(session.session_id, 0.0)),
+                float(end),
+            )
+        session.video_gate.release(end)
+        # Drop processed frames: a 2h lecture is several GB of MJPEG.
+        session.video.trim(max(0.0, float(end) - 30.0))
+        return {
+            "ok": True,
+            "start": start,
+            "end": end,
+            "chars": len(text),
+            "skipped": note != "已写入板书",
+            "note": note,
+        }
+
     def _process_window(
         self,
         start: float,
@@ -419,35 +590,9 @@ class VlmPlugin(Plugin):
         force: bool = False,
     ) -> dict[str, Any]:
         ctx = self._ctx
-
-        # --- Fuse ---
-        # Full frame at native resolution: no board crop, no down-scale.
-        do_fusion = self._setting("vlm.fusion", True)
-
-        if do_fusion:
-            fused = fuse_frames(
-                frames, crop=(0.0, 0.0, 1.0, 1.0), max_width=0, align=True
-            )
-        else:
-            fused = _decode_single(frames[-1].data)
-
-        # --- Save image ---
-        session_dir = ctx.session_dir()
-        vlm_dir = session_dir / "vlm"
-        vlm_dir.mkdir(parents=True, exist_ok=True)
-        ts_start = int(start)
-        ts_end = int(end)
-        image_filename = f"{ts_start:06d}-{ts_end:06d}.jpg"
-        image_path = vlm_dir / image_filename
-        Image.fromarray(fused).save(str(image_path), quality=92)
-
-        with self._lock:
-            self._latest_image_path = str(image_path)
-
-        # --- Call LLM ---
-        timestamp = f"{_fmt_time(start)}–{_fmt_time(end)}"
+        self._processing_session = ctx.streams.current
         try:
-            text = self._ask_image(image_path.read_bytes(), timestamp)
+            result = self._run_window(start, end, frames)
         except Exception as exc:
             self._last_error = f"{type(exc).__name__}: {exc}"
             ctx.events.emit(
@@ -459,47 +604,101 @@ class VlmPlugin(Plugin):
             )
             ctx.ui.refresh("vlm.error")
             raise
+        return self._commit_window(start, end, result)
 
-        # --- Emit segment ---
-        ctx.events.emit(
-            "vlm.segment",
-            session_id=ctx.streams.current.session_id,
-            start=start,
-            end=end,
-            chars=len(text),
-            model=self._setting("vlm.model", "deepseek-flash"),
-        )
+    # ------------------------------------------------------------------
+    # Recording mode (full-speed ingest + concurrent windows)
+    # ------------------------------------------------------------------
+    def enabled(self) -> bool:
+        return bool(self._setting("vlm.enabled", True))
 
-        # --- Dedupe ---
-        threshold = self._setting("vlm.dedupe_threshold", 0.92)
+    def busy(self) -> bool:
+        if not self.enabled():
+            return False
         with self._lock:
-            last_text = self._last_visual_text
-        if last_text and text:
-            ratio = difflib.SequenceMatcher(None, last_text, text).ratio()
-            if ratio >= threshold:
-                logger.debug(
-                    "dedupe: skipping window %.0f-%.0f (ratio=%.3f)",
-                    start, end, ratio,
-                )
-                return {"ok": True, "start": start, "end": end, "skipped": True}
+            if self._recording_active:
+                return True
+            ctx = self._ctx
+            session = ctx.streams.current if ctx is not None else None
+            if session is None or not session.input_done:
+                return False
+            if str(session.meta.get("mode", "")) != "fast":
+                return False
+            cursor = float(self._recording_cursor.get(session.session_id, 0.0))
+            return cursor + 1.0 < session.video.duration
 
-        # --- Append visual ---
-        if text and text != BLANK_BOARD_MARKER and not is_trivial_board_text(text):
-            visual = ctx.streams.current.visual
-            visual.append(
-                text,
-                start=start,
-                end=end,
-                source="vlm",
-                meta={
-                    "image_path": str(image_path),
-                    "model": self._setting("vlm.model", "deepseek-flash"),
-                },
-            )
+    def _concurrency(self) -> int:
+        try:
+            value = int(self._setting("vlm.concurrency", 4))
+        except (TypeError, ValueError):
+            value = 4
+        return max(1, min(32, value))
+
+    def _is_recording_session(self) -> bool:
+        ctx = self._ctx
+        if ctx is None:
+            return False
+        return str(ctx.streams.current.meta.get("mode", "")) == "fast"
+
+    def _process_recording_window(self, start: float, end: float) -> dict[str, Any]:
+        session = self._processing_session or self._ctx.streams.current
+        frames = session.video.read_frames(start, end)
+        return self._run_window(start, end, frames)
+
+    def _run_recording_session(self) -> None:
+        ctx = self._ctx
+        if ctx is None:
+            return
+        session = ctx.streams.current
+        sid = session.session_id
+        with self._lock:
+            if sid in self._recording_sessions and (
+                session.input_done or session.ended_at is not None
+            ):
+                self._stop_event.wait(0.5)
+                return
+            self._recording_sessions.discard(sid)
+            start_at = float(self._recording_cursor.get(sid, 0.0))
+            self._recording_active = True
+        self._processing_session = session
+
+        window = max(5.0, float(self._setting("vlm.window_seconds", 20.0)))
+        pool = OrderedWindowPool(
+            name="vlm",
+            window=window,
+            concurrency=self._concurrency(),
+            process=self._process_recording_window,
+            commit=self._commit_window,
+            start=start_at,
+        )
+        try:
+            while not self._stop_event.is_set():
+                if ctx.streams.current.session_id != sid:
+                    break
+                available = session.video.duration
+                cursor = pool.next_start
+                if available - cursor >= window - 1e-6:
+                    if not pool.submit(cursor, cursor + window):
+                        pool.poll(0.1)
+                    continue
+                if session.input_done or session.ended_at is not None:
+                    while available - cursor > 1.0:
+                        if pool.submit(cursor, available):
+                            break
+                        pool.poll(0.1)
+                    break
+                pool.poll(0.2)
+            pool.drain()
+        finally:
+            pool.close()
             with self._lock:
-                self._last_visual_text = text
-
-        return {"ok": True, "start": start, "end": end, "chars": len(text)}
+                self._recording_cursor[sid] = max(
+                    float(self._recording_cursor.get(sid, 0.0)),
+                    pool.committed_end,
+                )
+                self._cursor = pool.committed_end
+                self._recording_sessions.add(sid)
+                self._recording_active = False
 
     # ----------------------------------------------------------------
     # Event handlers
@@ -510,9 +709,17 @@ class VlmPlugin(Plugin):
             self._last_session = event.get("session_id", "")
             self._last_visual_text = ""
             self._latest_image_path = ""
+            self._last_window = {}
             self._consecutive_errors = 0
 
     def _on_session_stopped(self, event: Event) -> None:
+        ctx = self._ctx
+        if ctx is not None and str(ctx.streams.current.meta.get("mode", "")) == "fast":
+            # The recording pool already committed every window.
+            return
+        with self._lock:
+            if self._recording_active:
+                return
         try:
             self._flush_remaining()
         except Exception:
