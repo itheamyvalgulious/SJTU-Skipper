@@ -52,11 +52,12 @@ python3.12 -m venv .venv
 
 打开页面后：
 
-1. 右侧「设置」填入 Canvas Token、LLM API Key / Base URL；模型在 Agent / VLM 分组中设置。语音转写在「STT」分组粘贴 Google 服务账号 JSON（或填写凭据文件路径），然后选择 v2 模型与区域。
-2. LLM 连接方式二选一：OpenAI 兼容接口（Base URL + API Key），或在设置里点「关联 OpenCode 套餐」完成设备授权。OpenCode 凭据独立保存在本应用，不依赖本机 OpenCode。
-3. 左侧课程树中展开课程（可点「刷新」重新拉取）。
-4. 选择录播或直播，开始一节课。
-5. 左侧「课堂」查看转写、板书、笔记。
+1. 首次启动会生成 `data/agent/auth.json`（用户名 `admin`，随机密码只打印一次在启动日志里），浏览器会先跳转到登录页；改成自己的密码后重启即可。登录态是签名 cookie，有效期由 `session_ttl_hours` 控制（默认 7 天）。
+2. 右侧「设置」填入 Canvas Token、LLM API Key / Base URL；模型在 Agent / VLM 分组中设置。语音转写在「STT」分组粘贴 Google 服务账号 JSON（或填写凭据文件路径），然后选择 v2 模型与区域。
+3. LLM 连接方式二选一：OpenAI 兼容接口（Base URL + API Key），或在设置里点「关联 OpenCode 套餐」完成设备授权。OpenCode 凭据独立保存在本应用，不依赖本机 OpenCode。
+4. 左侧课程树中展开课程（可点「刷新」重新拉取）。
+5. 选择录播或直播，开始一节课。
+6. 左侧「课堂」查看转写、板书、笔记。
 
 录播与直播走两种模式：**直播**按 1:1 实时摄取、单路转写；**录播**先下载到本地，再全速解码并用 `stt.concurrency` / `vlm.concurrency`（默认各 4）并发识别，全部窗口提交后一次性生成讲义。录播页显示下载/处理进度和「打开录像」链接，本地录像只保留最近 `input.keep_recordings`（默认 4）节。
 
@@ -112,10 +113,11 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 | input | `input` | Canvas/SJTU 录播、直播、ffmpeg 源 |
 | stt | `stt` | Google Cloud Speech-to-Text **v2**（OAuth / chirp_3）音频流 -> 转写文字流 |
 | vlm | `vlm` | 视频流 -> 融合板书 -> 文字流 |
-| llm-agent | `llm-agent` | 多会话 REPL Agent，info/read/replace/append（+ 可选 write） |
+| llm-agent | `llm-agent` | 多会话 REPL Agent；具名 agent profile + 工具参数声明；info/read/search/replace/append（+ 可选 write）；支持流式 |
 | summarize | `summarize` | 非即时：课后/手动一次性整理整堂课，写 note_*.md 结构完整讲义 |
-| reader | `reader` | 通用 Markdown 阅读页，summarize/instant 共用 |
-| instant-summarize | `instant-summarize` | 即时：按 N 字符/秒增量合并，写 instant_note_*.md |
+| ask | `ask` | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存 |
+| reader | `reader` | 通用 Markdown 阅读页（每门课一页），持有选中菜单与内联问答块 |
+| instant-summarize | `instant-summarize` | 即时：按 N 字符/秒增量合并，写 instant_note_*.md；由笔记面板的开关控制累积与否 |
 
 ## 旧板书流水线
 

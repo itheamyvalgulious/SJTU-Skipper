@@ -12,12 +12,14 @@ adaptation" (uploading phrase sets / custom classes) is not used.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
 from typing import Any
 
+from core.coverage import CoverageStore, skip_coverage
 from core.pipeline import OrderedWindowPool, WindowError
 from core.plugin import Plugin, PluginContext
 from plugins.settings.spec import SettingsSpec
@@ -38,6 +40,12 @@ LOGGER_NAME = "lecture_agent.plugin.stt"
 TAB_ID = "classroom"
 ITEM_ID = "stt.transcript"
 PAGE_ID = "stt:transcript"
+
+# The STT plugin owns this file exclusively: one JSON object per committed
+# transcript line, under ``data_dir/sessions/<session>/``.  The summarize
+# plugin reads it later to rebuild the lecture material, so text that was
+# already transcribed survives a crash, an early stop or a handout rerun.
+TRANSCRIPT_LOG = "transcript.jsonl"
 
 BACKEND = "google-cloud-stt-v2"
 
@@ -93,6 +101,7 @@ class SttPlugin(Plugin):
         self._logger = logging.getLogger(LOGGER_NAME)
         self._lock = threading.RLock()
         self._auth_lock = threading.RLock()
+        self._persist_lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._auth: GoogleTokenProvider | None = None
@@ -109,7 +118,11 @@ class SttPlugin(Plugin):
         self._recording_sessions: set[str] = set()
         self._recording_cursor: dict[str, float] = {}
         self._recording_active = False
+        # True while the stop-time tail flush runs; the summarize plugin waits
+        # for it before reading transcript.jsonl.
+        self._flushing = False
         self._processing_session: Any = None
+        self._coverage_cache: dict[str, CoverageStore] = {}
         self._client: GoogleSpeechClient | None = None
         self._client_signature: tuple[str, str, str, str, float] | None = None
         self._page_added = False
@@ -426,6 +439,15 @@ class SttPlugin(Plugin):
         requested_location = str(
             self._setting("stt.location", DEFAULT_LOCATION) or DEFAULT_LOCATION
         )
+        covered = 0.0
+        if session is not None and self._ctx is not None:
+            try:
+                covered = self._coverage(session).covered_seconds("audio")
+            except Exception:  # noqa: BLE001 - status must never fail
+                covered = 0.0
+        audio_seconds = (
+            round(session.audio.duration, 3) if session is not None else 0.0
+        )
         return {
             "state": state,
             "error": error,
@@ -435,10 +457,10 @@ class SttPlugin(Plugin):
             "requested_model": requested_model,
             "requested_location": requested_location,
             "session_id": session.session_id if session is not None else "",
-            "audio_seconds": (
-                round(session.audio.duration, 3) if session is not None else 0.0
-            ),
+            "audio_seconds": audio_seconds,
             "cursor": round(cursor, 3),
+            "covered_seconds": round(covered, 3),
+            "uncovered_seconds": round(max(0.0, audio_seconds - covered), 3),
             "segments": segments,
             "chars": chars,
             "worker_alive": alive,
@@ -460,6 +482,23 @@ class SttPlugin(Plugin):
     # ------------------------------------------------------------------
     # Transcription
     # ------------------------------------------------------------------
+    def _coverage(self, session: Any) -> CoverageStore:
+        """Per-session coverage of processed audio."""
+
+        sid = str(getattr(session, "session_id", "") or "")
+        with self._lock:
+            store = self._coverage_cache.get(sid)
+            if store is None:
+                store = CoverageStore(self._ctx.data_dir, sid)
+                self._coverage_cache[sid] = store
+            return store
+
+    @staticmethod
+    def _should_skip(session: Any, start: float, end: float) -> bool:
+        return skip_coverage(getattr(session, "meta", None), "audio").covers(
+            start, end
+        )
+
     def transcribe_range(
         self, start: float | None = None, end: float | None = None
     ) -> dict[str, Any]:
@@ -514,6 +553,8 @@ class SttPlugin(Plugin):
             self._effective_model = used.model
             self._effective_location = used.location
         appended, chars = self._append_segments(segments, base=begin, model=used.model)
+        # This range has been looked at, whether or not it produced text.
+        self._coverage(session).mark("audio", begin, finish)
         # Consumed audio is no longer needed: bound live-mode memory too.
         session.audio.trim(max(0.0, float(finish) - 30.0))
         if appended:
@@ -535,6 +576,29 @@ class SttPlugin(Plugin):
             "chars": chars,
         }
 
+    def _persist_item(self, session_id: str, item: Any) -> None:
+        """Append one committed line to ``sessions/<id>/transcript.jsonl``."""
+
+        ctx = self._ctx
+        if ctx is None or not session_id:
+            return
+        path = ctx.data_dir / "sessions" / session_id / TRANSCRIPT_LOG
+        record = {
+            "start": None if item.start is None else round(float(item.start), 3),
+            "end": None if item.end is None else round(float(item.end), 3),
+            "text": item.text,
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with self._persist_lock:
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            # Losing the on-disk copy must never break live transcription.
+            self._logger.warning(
+                "failed to persist transcript for %s", session_id, exc_info=True
+            )
+
     def _append_segments(
         self,
         segments: list[SpeechSegment],
@@ -545,7 +609,8 @@ class SttPlugin(Plugin):
         ctx = self._ctx
         if ctx is None:
             return 0, 0
-        transcript = ctx.streams.current.transcript
+        session = ctx.streams.current
+        transcript = session.transcript
         appended = 0
         chars = 0
         for segment in segments:
@@ -567,6 +632,7 @@ class SttPlugin(Plugin):
             )
             if item is None:
                 continue
+            self._persist_item(session.session_id, item)
             appended += 1
             chars += len(item.text)
         with self._lock:
@@ -634,6 +700,12 @@ class SttPlugin(Plugin):
                 return False
             cursor = float(self._recording_cursor.get(session.session_id, 0.0))
             return cursor + 1.0 < session.audio.duration
+
+    def flushing(self) -> bool:
+        """True while the stop-time tail flush is still writing the log."""
+
+        with self._lock:
+            return self._flushing
 
     def _concurrency(self) -> int:
         try:
@@ -704,11 +776,16 @@ class SttPlugin(Plugin):
         session = ctx.streams.current
         sid = session.session_id
         with self._lock:
-            if sid in self._recording_sessions and (
+            done = sid in self._recording_sessions and (
                 session.input_done or session.ended_at is not None
-            ):
-                self._stop_event.wait(0.5)
-                return
+            )
+        if done:
+            # Never idle while holding the lock: the worker re-enters this
+            # branch immediately, and a held lock starves ``status()`` — which
+            # the UI calls on every state poll — for many seconds.
+            self._stop_event.wait(0.5)
+            return
+        with self._lock:
             self._recording_sessions.discard(sid)
             start_at = float(self._recording_cursor.get(sid, 0.0))
             self._recording_active = True
@@ -730,6 +807,14 @@ class SttPlugin(Plugin):
                 available = session.audio.duration
                 cursor = pool.next_start
                 if available - cursor >= window - 1e-6:
+                    if self._should_skip(session, cursor, cursor + window):
+                        # Already processed in an earlier pass: drop the audio
+                        # from memory instead of paying for it twice.
+                        if pool.advance(cursor + window):
+                            session.audio.trim(max(0.0, cursor + window - 30.0))
+                            continue
+                        pool.poll(0.05)
+                        continue
                     if not pool.submit(cursor, cursor + window):
                         pool.poll(0.1)
                     continue
@@ -779,6 +864,7 @@ class SttPlugin(Plugin):
             sum(len(getattr(s, "text", "") or "") for s in segments),
         )
         appended, chars = self._append_segments(segments, base=start, model=model)
+        self._coverage(session).mark("audio", start, end)
         with self._lock:
             self._cursor = max(self._cursor, float(end))
             self._recording_cursor[session.session_id] = max(
@@ -896,10 +982,15 @@ class SttPlugin(Plugin):
         with self._lock:
             if self._recording_active:
                 return
+        with self._lock:
+            self._flushing = True
         try:
             self._flush_remaining()
         except Exception:  # noqa: BLE001 - session teardown is best effort
             self._logger.exception("STT flush on session stop failed")
+        finally:
+            with self._lock:
+                self._flushing = False
 
     def _on_settings_changed(self, event: Any) -> None:
         if event.get("key") != "stt.enabled":

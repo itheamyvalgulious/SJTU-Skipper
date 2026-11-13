@@ -181,3 +181,71 @@ def test_live_state_labels() -> None:
     assert live_state("2026-11-05 10:00:00", "2026-11-05 11:00:00", now=now) == "未开始"
     assert live_state("2026-11-05 06:00:00", "2026-11-05 07:00:00", now=now) == "已结束"
     assert live_state("", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# Live periods must merge like recordings
+# ---------------------------------------------------------------------------
+
+
+def _live(live_id: str, begin: str, end: str, name: str = "高等数学（A）") -> dict:
+    return {
+        "id": live_id,
+        "name": name,
+        "begin": begin,
+        "end": end,
+        "classroom": "东中院 101",
+    }
+
+
+def test_two_upcoming_live_periods_merge_into_one_class() -> None:
+    lives = [
+        _live("L9", "2026-11-05 15:55:00", "2026-11-05 16:50:00"),
+        _live("L10", "2026-11-05 16:50:20", "2026-11-05 17:45:00"),
+    ]
+    nodes = build_tree(
+        COURSES, {"1": [], "2": []}, lives, now=datetime(2026, 11, 5, 15, 0)
+    )
+    children = nodes[0]["children"]
+    assert len(children) == 1
+    child = children[0]
+    assert child["badge"] == "未开始"
+    assert "2 节" in child["subtitle"]
+    # Opening it targets the first upcoming period.
+    assert child["action"]["value"]["live_id"] == "L9"
+    assert child["action"]["value"]["parts"] == 2
+
+
+def test_three_live_periods_merge_and_follow_the_active_part() -> None:
+    lives = [
+        _live("L9", "2026-11-05 13:55:00", "2026-11-05 14:50:00"),
+        _live("L10", "2026-11-05 14:50:20", "2026-11-05 15:45:00"),
+        _live("L11", "2026-11-05 15:55:00", "2026-11-05 16:50:00"),
+    ]
+    nodes = build_tree(
+        COURSES, {"1": [], "2": []}, lives, now=datetime(2026, 11, 5, 15, 0)
+    )
+    child = nodes[0]["children"][0]
+    assert child["badge"] == "直播中"
+    assert child["action"]["value"]["live_id"] == "L10"
+    assert child["action"]["value"]["parts"] == 3
+    assert "13:55" in child["label"] and "16:50" in child["label"]
+
+
+def test_a_recorded_part_does_not_hide_the_remaining_live_part() -> None:
+    recordings = {
+        "1": [_rec("a", "2026-11-05 15:55:00", "2026-11-05 16:50:00")],
+        "2": [],
+    }
+    lives = [
+        _live("L9", "2026-11-05 15:55:00", "2026-11-05 16:50:00"),
+        _live("L10", "2026-11-05 16:50:20", "2026-11-05 17:45:00"),
+    ]
+    nodes = build_tree(
+        COURSES, recordings, lives, now=datetime(2026, 11, 5, 17, 0)
+    )
+    children = nodes[0]["children"]
+    live_children = [c for c in children if c["action"]["value"]["kind"] == "live"]
+    assert len(live_children) == 1
+    assert live_children[0]["action"]["value"]["live_id"] == "L10"
+    assert live_children[0]["action"]["value"]["parts"] == 1

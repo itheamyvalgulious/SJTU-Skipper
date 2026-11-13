@@ -11,8 +11,10 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -645,6 +647,41 @@ class TestAgentService:
         finally:
             runtime.stop()
 
+    def test_last_step_forces_an_answer(self, tmp_path: Path):
+        """On the last allowed step the tools are removed, so a model that
+        keeps reading still produces an answer instead of ``max_steps``."""
+        f = tmp_path / "notes.md"
+        f.write_text("content", encoding="utf-8")
+        script = [
+            FakeResponse(
+                content="let me check",
+                tool_calls=[FakeToolCall(id="c1", name="info", arguments={})],
+            ),
+            FakeResponse(content="final answer"),
+        ]
+        fake_llm = FakeLLM(script)
+        runtime, agent, _, _ = _make_agent_runtime(tmp_path, fake_llm=fake_llm)
+        try:
+            session = agent.create_session(
+                "test",
+                files={"notes.md": f},
+                max_steps=2,
+                final_answer_on_limit=True,
+            )
+            result = agent.run(session.id, "do something")
+
+            assert result.error is None
+            assert result.final_message == "final answer"
+            assert len(fake_llm.calls) == 2
+            # First call still offers the tools; last call must not.
+            assert fake_llm.calls[0]["tools"]
+            assert fake_llm.calls[1]["tools"] is None
+            nudge = fake_llm.calls[1]["messages"][-1]
+            assert nudge["role"] == "user"
+            assert "不要再调用工具" in nudge["content"]
+        finally:
+            runtime.stop()
+
     def test_run_tool_exception(self, tmp_path: Path):
         """Tool that raises → error string returned to LLM, not crash."""
         f = tmp_path / "notes.md"
@@ -848,6 +885,27 @@ class TestAgentService:
             system_text = str(system_msgs[0].get("content", ""))
             assert "ONLY use append" in system_text
             assert "NEVER use replace" in system_text
+        finally:
+            runtime.stop()
+
+    def test_passes_conversation_affinity_to_llm(self, tmp_path: Path):
+        """Every run carries its session id so the gateway can pin routing."""
+
+        f = tmp_path / "notes.md"
+        f.write_text("data", encoding="utf-8")
+        fake_llm = FakeLLM([FakeResponse(content="done")])
+        runtime, agent, _, _ = _make_agent_runtime(tmp_path, fake_llm=fake_llm)
+        try:
+            root = agent.create_session("root", files={"notes.md": f})
+            child = agent.create_session("child", files={"notes.md": f}, parent_id=root.id)
+
+            agent.run(root.id, "msg")
+            agent.run(child.id, "msg")
+
+            assert fake_llm.calls[0]["session_id"] == root.id
+            assert fake_llm.calls[0]["parent_session_id"] is None
+            assert fake_llm.calls[1]["session_id"] == child.id
+            assert fake_llm.calls[1]["parent_session_id"] == root.id
         finally:
             runtime.stop()
 
@@ -1080,3 +1138,28 @@ class TestHistoryTrimming:
             assert payload[0]["content"] == "x" * 5000
         finally:
             runtime.stop()
+
+
+def test_normalize_tool_calls_unwraps_nested_arguments() -> None:
+    """Models sometimes JSON-encode the arguments more than once."""
+
+    from plugins.agent.plugin import _normalize_tool_calls
+
+    payload = json.dumps({"file": "lecture_source.md", "l": 1})
+    double = json.dumps({"arguments": payload})
+    response = SimpleNamespace(
+        tool_calls=[
+            {"id": "a", "name": "read", "arguments": payload},
+            {"id": "b", "name": "read", "arguments": {"arguments": payload}},
+            {"id": "c", "name": "read", "arguments": {"arguments": double}},
+            {"id": "d", "name": "read", "arguments": "not json"},
+        ]
+    )
+
+    calls = _normalize_tool_calls(response)
+
+    expected = {"file": "lecture_source.md", "l": 1}
+    assert calls[0]["arguments"] == expected
+    assert calls[1]["arguments"] == expected
+    assert calls[2]["arguments"] == expected
+    assert calls[3]["arguments"] == {}

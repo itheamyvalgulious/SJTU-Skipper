@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>课堂总 Agent</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2358a6ff'/%3E%3Ctext x='16' y='24' text-anchor='middle' font-size='22' fill='%230b1220'%3E%E2%88%91%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/styles.css?v=6">
+  <title>SJTU-Skipper</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%231a73e8'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-size='19' fill='%23ffffff'%3E%E2%88%91%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css?v=9">
   <link rel="stylesheet" href="/static/vendor/katex/katex.min.css?v=6">
 </head>
 <body>
@@ -14,17 +14,22 @@
     <div class="brand">
       <div class="brand-mark">∑</div>
       <div>
-        <h1>课堂总 Agent</h1>
+        <h1>SJTU-Skipper</h1>
         <p class="brand-sub">课程 · 课堂 · 笔记</p>
       </div>
     </div>
     <nav id="menubar" class="menubar" aria-label="菜单"></nav>
     <div class="topbar-right">
+      <button id="toggle-left" class="btn btn-sm btn-ghost sidebar-toggle" type="button" title="收起 / 展开左侧栏">◧</button>
+      <button id="toggle-right" class="btn btn-sm btn-ghost sidebar-toggle" type="button" title="收起 / 展开右侧栏">◨</button>
       <button id="palette-btn" class="btn btn-sm btn-ghost" type="button" title="Ctrl+P">
         命令 <kbd>Ctrl P</kbd>
       </button>
       <span id="connection" class="pill pill-muted">连接中</span>
       <span id="session-pill" class="pill pill-muted">无会话</span>
+      <form method="post" action="/logout" class="logout-form">
+        <button class="btn btn-sm btn-ghost" type="submit" title="退出登录">退出</button>
+      </form>
     </div>
   </header>
 
@@ -58,6 +63,30 @@
 
 <div id="toast" class="toast" role="status"></div>
 
+<div id="selection-menu" class="selection-menu" hidden></div>
+
+<div id="ask" class="ask-modal" hidden>
+  <div class="ask-box">
+    <div class="ask-head">
+      <span class="ask-title">针对选中的内容提问</span>
+      <button id="ask-close" class="ask-close" type="button" title="关闭">×</button>
+    </div>
+    <blockquote id="ask-selection" class="ask-selection"></blockquote>
+    <div class="ask-levels">
+      <label class="ask-level-label" for="ask-intensity">强度</label>
+      <select id="ask-intensity" class="select"></select>
+      <span class="ask-level-hint">快速=直接回答；研究=可先检索再回答</span>
+    </div>
+    <textarea id="ask-input" class="ask-input" rows="3"
+      placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+    <div class="ask-actions">
+      <span class="ask-hint">回答会写入选中段落下方，可折叠、可删除</span>
+      <button id="ask-cancel" class="btn btn-sm" type="button">取消</button>
+      <button id="ask-send" class="btn btn-sm btn-primary" type="button">发送</button>
+    </div>
+  </div>
+</div>
+
 <div id="palette" class="palette" hidden>
   <div class="palette-box">
     <input id="palette-input" class="palette-input" type="text" placeholder="输入命令，例如：设置 / Agent / 转写" autocomplete="off">
@@ -69,6 +98,6 @@
 <script src="/static/vendor/mpegts/mpegts.min.js?v=6"></script>
 <script src="/static/vendor/katex/katex.min.js?v=6"></script>
 <script src="/static/vendor/katex/contrib/auto-render.min.js?v=6"></script>
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=9"></script>
 </body>
 </html>

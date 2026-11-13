@@ -52,7 +52,8 @@ _DOC_FILES = {
     "notice": "instant_note_notice.md",
 }
 
-_TOOLS = ["info", "read", "replace", "append"]
+# Tool declarations passed to the agent plugin: names + parameters.
+_TOOLS = [("info", {}), ("read", {}), ("replace", {}), ("append", {})]
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +168,15 @@ class InstantSummarizePlugin(Plugin):
     def _retry_max(self) -> int:
         return int(self._settings_service.get("instant-summarize.retry_max", 2))
 
+    @property
+    def _enabled(self) -> bool:
+        """The live switch: off means *nothing* is accumulated and never run."""
+
+        value = self._settings_service.get("instant-summarize.enabled", True)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
@@ -186,7 +196,7 @@ class InstantSummarizePlugin(Plugin):
             )
 
         ui.register_action(
-            "instant-summarize.now", self._on_summarize_now, plugin_id=self.id
+            "instant-summarize.toggle", self._on_toggle, plugin_id=self.id
         )
         ui.register_action(
             "instant-summarize.read", self._on_read, plugin_id=self.id
@@ -238,7 +248,22 @@ class InstantSummarizePlugin(Plugin):
                 INSTANT_NOTE_HEADERS[_DOC_FILES[key]],
             )
         )
+        enabled = self._enabled
+        mode = str(self.ctx.streams.current.meta.get("mode", "") or "")
+        if mode == "fast":
+            hint = "录播不做实时总结：课后由「课堂讲义」一次性生成"
+        elif enabled:
+            hint = "课堂进行中持续累积内容并定期总结"
+        else:
+            hint = "已关闭：完全不累积内容，也不会总结"
         return [
+            {
+                "type": "switch",
+                "label": "实时总结",
+                "checked": enabled,
+                "action": "instant-summarize.toggle",
+                "hint": hint,
+            },
             {"type": "text", "text": f"已记录 {ready}/{len(self._DOC_LABELS)} 篇"},
             {
                 "type": "buttons",
@@ -250,16 +275,6 @@ class InstantSummarizePlugin(Plugin):
                         "class": "btn btn-sm",
                     }
                     for key, label in self._DOC_LABELS.items()
-                ],
-            },
-            {
-                "type": "buttons",
-                "buttons": [
-                    {
-                        "label": "立即总结",
-                        "action": "instant-summarize.now",
-                        "class": "btn btn-sm btn-primary",
-                    }
                 ],
             },
         ]
@@ -286,24 +301,22 @@ class InstantSummarizePlugin(Plugin):
             / filename
         )
 
-    def _on_summarize_now(self, _payload: dict[str, Any]) -> dict[str, Any]:
-        """Action handler: force a summary for the current session."""
-        sid = self.ctx.streams.notes_session_id
-        streams = self.ctx.streams.current
+    def _on_toggle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """The live-switch in the notes toolbox turns accumulation on/off."""
 
-        wm = self._ensure_watermarks(sid)
-        new_chars = (
-            streams.transcript.char_count_since(int(wm["transcript"]))
-            + streams.visual.char_count_since(int(wm["visual"]))
-        )
-        if new_chars == 0 and streams.audio.duration <= float(wm["audio"]):
-            return {"ok": True, "message": "暂无新内容需要总结", "refresh": False}
-
-        triggered = self._maybe_trigger(sid, force=True)
+        enabled = payload.get("enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() in {"1", "true", "yes", "on", "y"}
+        enabled = bool(enabled)
+        self._settings_service.set("instant-summarize.enabled", enabled)
+        if not enabled:
+            # Whatever arrived but has not been summarized yet is dropped:
+            # while the switch is off nothing is accumulated at all.
+            self._drop_backlog(self.ctx.streams.notes_session_id)
+        self.ctx.ui.refresh("instant-summarize.toggle")
         return {
             "ok": True,
-            "message": "总结已开始" if triggered else "总结已在运行中",
-            "refresh": True,
+            "message": "实时总结已开启" if enabled else "实时总结已关闭（不再累积内容）",
         }
 
     # ------------------------------------------------------------------
@@ -325,6 +338,8 @@ class InstantSummarizePlugin(Plugin):
     def _on_session_stopped(self, event: Any) -> None:
         sid = event.get("session_id", "")
         if not sid:
+            return
+        if not self._enabled:
             return
         # Flush any remaining content.
         self._maybe_trigger(sid, force=True)
@@ -354,6 +369,18 @@ class InstantSummarizePlugin(Plugin):
             }
         return self._watermarks[session_id]
 
+    def _drop_backlog(self, session_id: str) -> None:
+        """Advance watermarks to *now* without summarizing (switch off)."""
+
+        streams = self.ctx.streams.current
+        if not session_id or streams.session_id != session_id:
+            return
+        self._watermarks[session_id] = {
+            "transcript": streams.transcript.snapshot_index(),
+            "visual": streams.visual.snapshot_index(),
+            "audio": streams.audio.duration,
+        }
+
     def _on_stream_appended(self, event: Any) -> None:
         sid = event.get("session_id", "")
         if not sid:
@@ -372,6 +399,11 @@ class InstantSummarizePlugin(Plugin):
         streams = self.ctx.streams.current
         if streams.session_id != session_id:
             # Session has changed; skip (the old session is no longer current).
+            return False
+        if not self._enabled:
+            # Switch is off: do not accumulate anything.  Watermarks move
+            # forward so switching back on starts from that moment.
+            self._drop_backlog(session_id)
             return False
         if str(streams.meta.get("mode", "")) == "fast":
             # Recordings are processed at full speed and summarized once at
@@ -598,6 +630,10 @@ class InstantSummarizePlugin(Plugin):
                 model=model,
                 max_steps=self._max_steps,
                 max_tool_output=self._max_tool_output,
+                # Share the failed run's affinity key so the retry lands on the
+                # same backend and reuses its prompt prefix instead of paying
+                # for it twice.
+                parent_id=session.id,
             )
             agent.run(retry_session.id, RETRY_PROMPT)
 
@@ -667,6 +703,17 @@ def _file_md5(path: str) -> str:
 # Setting specs
 # ---------------------------------------------------------------------------
 _SETTING_SPECS: list[SettingsSpec] = [
+    SettingsSpec(
+        key="instant-summarize.enabled",
+        label="实时总结开关",
+        type="bool",
+        default=True,
+        group="Instant Summarize",
+        description=(
+            "关闭后完全不累积课堂内容，也不会触发总结；重新开启时从开启时刻"
+            "开始累积。课堂上的开关就是这个值的界面。"
+        ),
+    ),
     SettingsSpec(
         key="instant-summarize.trigger_chars",
         label="触发字符数",

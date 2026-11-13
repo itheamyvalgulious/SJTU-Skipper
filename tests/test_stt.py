@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
@@ -621,6 +622,17 @@ class TestTranscribeRange:
         assert item.meta["model"] == "chirp_3"
         assert item.meta["confidence"] == pytest.approx(0.8)
 
+        log = (
+            tmp_path
+            / "sessions"
+            / ctx.streams.current.session_id
+            / "transcript.jsonl"
+        )
+        records = [
+            json.loads(line) for line in log.read_text("utf-8").splitlines()
+        ]
+        assert records == [{"start": 0.0, "end": 2.0, "text": "第一句。"}]
+
         body = captured[0]
         assert body["config"]["model"] == "chirp_3"
         assert body["config"]["languageCodes"] == ["cmn-Hans-CN"]
@@ -795,6 +807,45 @@ class TestWorker:
             assert session.audio_gate.released == pytest.approx(8.0)
             assert plugin.busy() is False
         finally:
+            plugin.teardown()
+
+    def test_idle_recording_session_does_not_hold_the_plugin_lock(
+        self, tmp_path: Path
+    ) -> None:
+        """The done-branch wait must run outside ``self._lock``.
+
+        Holding it starves ``status()`` — called on every UI state poll — for
+        seconds while the worker loops over an already-finished recording.
+        """
+
+        plugin, ctx = plugin_with_project(tmp_path)
+        session = ctx.streams.current
+        session.meta["mode"] = "fast"
+        session.ended_at = 1.0
+        plugin._recording_sessions.add(session.session_id)
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def fake_wait(_timeout: float | None = None) -> bool:
+            entered.set()
+            release.wait(2.0)
+            return False
+
+        plugin._stop_event.wait = fake_wait  # type: ignore[method-assign]
+        thread = threading.Thread(
+            target=plugin._run_recording_session, daemon=True
+        )
+        thread.start()
+        try:
+            assert entered.wait(1.0), "the worker never reached the idle wait"
+            acquired = plugin._lock.acquire(timeout=0.3)
+            assert acquired, "the idle wait must not hold the plugin lock"
+            if acquired:
+                plugin._lock.release()
+        finally:
+            release.set()
+            thread.join(2.0)
             plugin.teardown()
 
     def test_session_switch_resets_cursor(

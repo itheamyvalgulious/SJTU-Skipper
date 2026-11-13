@@ -192,6 +192,23 @@ class OrderedWindowPool:
                 return committed
             committed += self.poll(timeout=0.1)
 
+    def advance(self, start: float) -> bool:
+        """Move the next window start forward, skipping media.
+
+        Used by the gap-filling pass: a range that was already processed must
+        be dropped from memory instead of being sent to the model again.
+        Refuses while any window is in flight, so commit order stays intact.
+        """
+
+        with self._lock:
+            if self._closed or self._inflight or self._finished:
+                return False
+            new_start = max(self._next_start, float(start))
+            self._next_start = new_start
+            self._submitted_end = max(self._submitted_end, new_start)
+            self._committed_end = max(self._committed_end, new_start)
+            return True
+
     def close(self) -> None:
         with self._lock:
             self._closed = True

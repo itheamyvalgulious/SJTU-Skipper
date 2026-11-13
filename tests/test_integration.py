@@ -9,6 +9,7 @@ from config import load_config
 from core.plugin import Plugin, PluginContext
 from core.runtime import build_runtime
 from plugins.agent import AgentPlugin
+from plugins.ask.plugin import AskPlugin
 from plugins.instant_summarize.plugin import InstantSummarizePlugin
 from plugins.reader import ReaderPlugin
 from plugins.settings.plugin import SettingsPlugin
@@ -161,3 +162,65 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
     finally:
         runtime.stop()
 
+
+
+def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
+    tmp_path: Path,
+) -> None:
+    """The reader selection menu → ask.ask → deterministic note insert."""
+
+    cfg = load_config(data_dir=tmp_path)
+    llm = FakeLLM([FakeResponse(content="**答**：第一段是在说定义。")])
+    runtime = build_runtime(
+        cfg,
+        plugins=[
+            SettingsPlugin(),
+            StubLLM(),
+            AgentPlugin(),
+            ReaderPlugin(),
+            AskPlugin(),
+            SummarizePlugin(),
+        ],
+        llm=llm,
+    )
+    runtime.start()
+    try:
+        session = runtime.hub.start_session(meta={"course": "集成测试"})
+        assert runtime.bus.flush(1.0)
+        sid = session.session_id
+        knowledge = tmp_path / "sessions" / sid / "notes" / "note_knowledge.md"
+        knowledge.write_text(
+            knowledge.read_text(encoding="utf-8")
+            + "## 第一节\n\n这是第一段笔记内容。\n\n第二段笔记内容。\n",
+            encoding="utf-8",
+        )
+        open_result = runtime.ui.dispatch_action("summarize.read", {"doc": "knowledge"})
+        assert open_result.ok
+
+        result = runtime.ui.dispatch_action(
+            "ask.ask",
+            {
+                "path": str(knowledge),
+                "selection": "这是第一段笔记内容。",
+                "question": "这一段的定义是什么？",
+                "intensity": "instant",
+            },
+        )
+        assert result.ok, result.message
+        assert _wait_until(
+            lambda: "第一段是在说定义" in knowledge.read_text(encoding="utf-8")
+        ), "the answer was never written into the note"
+
+        content = knowledge.read_text(encoding="utf-8")
+        assert content.index("第一段是在说定义") < content.index("第二段笔记内容。")
+        assert "这一段的定义是什么？" in content
+
+        call = llm.calls[-1]
+        prompt = "\n".join(str(m.get("content", "")) for m in call["messages"])
+        assert "这是第一段笔记内容。" in prompt
+        assert "第二段笔记内容。" in prompt
+        assert "这一段的定义是什么？" in prompt
+        names = [tool["function"]["name"] for tool in call["tools"] or []]
+        assert names == [], "instant asking must not expose tools"
+    finally:
+        runtime.stop()

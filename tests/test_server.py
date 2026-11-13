@@ -36,10 +36,19 @@ class DemoUI(Plugin):
 
 @pytest.fixture()
 def client(tmp_path: Path):
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"users": {"test": {"password": "test"}}}), "utf-8"
+    )
     cfg = load_config(data_dir=tmp_path)
     runtime = build_runtime(cfg, plugins=[DemoUI()], llm=FakeLLM())
     app = create_app(runtime)
     with TestClient(app) as test_client:
+        login = test_client.post(
+            "/login",
+            data={"username": "test", "password": "test"},
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
         yield test_client, cfg
 
 
@@ -92,6 +101,20 @@ def test_websocket_sends_refresh(client) -> None:
         assert data["type"] == "refresh"
 
 
+def test_websocket_forwards_ui_notify(client) -> None:
+    test_client, _cfg = client
+    runtime = test_client.app.state.runtime
+    with test_client.websocket_connect("/ws") as ws:
+        assert ws.receive_json()["type"] == "refresh"
+        runtime.ui.notify("qa.live", {"id": "qa-1", "phase": "thinking"})
+        data = ws.receive_json()
+        assert data == {
+            "type": "notify",
+            "topic": "qa.live",
+            "payload": {"id": "qa-1", "phase": "thinking"},
+        }
+
+
 def test_media_relay_rejects_foreign_hosts(client) -> None:
     test_client, _cfg = client
     assert test_client.get("/api/media", params={"src": "https://example.com/a.mp4"}).status_code == 400
@@ -101,6 +124,9 @@ def test_media_relay_rejects_foreign_hosts(client) -> None:
 def test_media_relay_forwards_range(tmp_path: Path) -> None:
     """The relay streams the upstream 206 and passes the byte range through."""
 
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"users": {"test": {"password": "test"}}}), "utf-8"
+    )
     cfg = load_config(data_dir=tmp_path)
     runtime = build_runtime(cfg, plugins=[DemoUI()], llm=FakeLLM())
     app = create_app(runtime)
@@ -120,6 +146,11 @@ def test_media_relay_forwards_range(tmp_path: Path) -> None:
         )
 
     with TestClient(app) as test_client:
+        test_client.post(
+            "/login",
+            data={"username": "test", "password": "test"},
+            follow_redirects=False,
+        )
         test_client.app.state.media_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
@@ -143,10 +174,18 @@ def test_health(client) -> None:
 
 
 def test_settings_save_accepts_http_flat_payload(tmp_path: Path) -> None:
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"users": {"test": {"password": "test"}}}), "utf-8"
+    )
     cfg = load_config(data_dir=tmp_path)
     runtime = build_runtime(cfg, plugins=[SettingsPlugin(), LLMPlugin()])
     app = create_app(runtime)
     with TestClient(app) as test_client:
+        test_client.post(
+            "/login",
+            data={"username": "test", "password": "test"},
+            follow_redirects=False,
+        )
         response = test_client.post(
             "/api/ui/action",
             json={

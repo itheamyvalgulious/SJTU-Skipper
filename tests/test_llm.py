@@ -115,6 +115,8 @@ class ScriptedProvider:
             "message_count": len(request.messages),
             "tools": [t.name for t in request.tools],
             "stream": request.stream,
+            "session_id": request.session_id,
+            "parent_session_id": request.parent_session_id,
         })
         if not self.script:
             raise LLMError("scripted script exhausted")
@@ -1024,9 +1026,213 @@ def test_opencode_mode_uses_app_owned_tokens(tmp_path) -> None:
         settings.set("llm.opencode_org_id", "org_test")
         service = runtime.services.require("llm")
         resolved = service.config_for("agent")
-        assert resolved.base_url == "https://opencode.ai/zen/go/v1"
         assert resolved.api_key == "st_test"
         assert resolved.extra_headers["x-opencode-org-id"] == "org_test"
+        # Affinity header set mirrors the OpenCode client; all four carry the
+        # same fallback id until a per-request session overrides them.
+        assert resolved.base_url == "https://opencode.ai/inference/go/openai/v1"
         assert resolved.extra_headers["x-opencode-session"]
+        assert (
+            resolved.extra_headers["x-session-affinity"]
+            == resolved.extra_headers["x-opencode-session"]
+        )
+        assert (
+            resolved.extra_headers["X-Session-Id"]
+            == resolved.extra_headers["x-opencode-session"]
+        )
+        assert (
+            resolved.extra_headers["x-opencode-session-id"]
+            == resolved.extra_headers["x-opencode-session"]
+        )
     finally:
         runtime.stop()
+
+
+# ---------------------------------------------------------------------------
+# conversation affinity + usage accounting
+# ---------------------------------------------------------------------------
+
+
+def _capturing_client(
+    seen: list[httpx.Headers], body: dict[str, Any] | None = None
+) -> httpx.Client:
+    payload = body or {"model": "m", "choices": [], "usage": {}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return httpx.Response(200, json=payload)
+
+    return httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+
+
+def test_session_affinity_headers_per_request() -> None:
+    """Each conversation gets its own affinity id; sub-sessions share the root."""
+
+    seen: list[httpx.Headers] = []
+    config = _make_config(extra_headers={"x-opencode-session": "process-default"})
+    provider = OpenAICompatibleProvider(config=config)
+    provider._client = _capturing_client(seen)
+
+    provider.chat(_make_request(session_id="sess-a"))
+    provider.chat(_make_request(session_id="sess-b", parent_session_id="root"))
+
+    first = seen[0]
+    assert first["x-opencode-session"] == "sess-a"
+    assert first["x-session-affinity"] == "sess-a"
+    assert first["x-session-id"] == "sess-a"
+    assert first["x-opencode-session-id"] == "sess-a"
+    assert "x-opencode-parent-session-id" not in first
+
+    second = seen[1]
+    assert second["x-opencode-session"] == "root"
+    assert second["x-session-affinity"] == "root"
+    assert second["x-session-id"] == "root"
+    assert second["x-opencode-session-id"] == "sess-b"
+    assert second["x-opencode-parent-session-id"] == "root"
+    assert second["x-parent-session-id"] == "root"
+
+
+def test_session_headers_ignored_for_plain_provider() -> None:
+    """A generic OpenAI-compatible endpoint must not receive OpenCode headers."""
+
+    seen: list[httpx.Headers] = []
+    provider = OpenAICompatibleProvider(config=_make_config())
+    provider._client = _capturing_client(seen)
+
+    provider.chat(_make_request(session_id="sess-a"))
+
+    assert "x-opencode-session" not in seen[0]
+    assert "x-session-affinity" not in seen[0]
+
+
+@pytest.mark.parametrize(
+    "usage_payload",
+    [
+        # OpenAI / OpenCode gateway
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": {"cached_tokens": 80},
+        },
+        # DeepSeek direct
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_cache_hit_tokens": 80,
+        },
+        # OpenCode Console extension
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "opencode": {"tokens": {"cache_read": 80}},
+        },
+    ],
+)
+def test_non_streaming_usage_cached_tokens(usage_payload: dict[str, Any]) -> None:
+    body = {
+        "model": "m",
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+        ],
+        "usage": usage_payload,
+    }
+    seen: list[httpx.Headers] = []
+    provider = OpenAICompatibleProvider(config=_make_config())
+    provider._client = _capturing_client(seen, body)
+
+    response = provider.chat(_make_request())
+
+    assert response.usage.prompt_tokens == 100
+    assert response.usage.completion_tokens == 10
+    assert response.usage.cached_tokens == 80
+
+
+def test_stream_requests_and_parses_usage() -> None:
+    """Streaming must ask for the usage chunk and keep its cache-read count."""
+
+    captured: dict[str, Any] = {}
+    sse = _sse_lines(
+        json.dumps({"choices": [{"delta": {"content": "hi"}, "index": 0}]}),
+        json.dumps(
+            {
+                "choices": [],
+                "model": "m",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 5,
+                    "total_tokens": 105,
+                    "prompt_tokens_details": {"cached_tokens": 90},
+                },
+            }
+        ),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, content=sse)
+
+    provider = OpenAICompatibleProvider(config=_make_config())
+    provider._client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    )
+
+    events = list(provider.stream(_make_request()))
+    done = [e for e in events if e.type == "done"]
+
+    assert captured["body"]["stream_options"] == {"include_usage": True}
+    assert len(done) == 1
+    assert done[0].response is not None
+    assert done[0].response.usage.cached_tokens == 90
+    assert done[0].response.usage.completion_tokens == 5
+
+
+def test_service_counts_tokens_per_model() -> None:
+    provider = ScriptedProvider(
+        [
+            ChatResponse(
+                content="a",
+                model="m1",
+                usage=Usage(prompt_tokens=100, completion_tokens=10, total_tokens=110, cached_tokens=60),
+            ),
+            ChatResponse(
+                content="b",
+                model="m1",
+                usage=Usage(prompt_tokens=200, completion_tokens=20, total_tokens=220, cached_tokens=150),
+            ),
+            ChatResponse(
+                content="c",
+                model="m2",
+                usage=Usage(prompt_tokens=50, completion_tokens=5, total_tokens=55),
+            ),
+        ]
+    )
+    service = LLMService(config_provider=lambda _: _make_config())
+    service.register_provider("openai", provider)
+
+    service.chat(messages=[{"role": "user", "content": "one"}], model="m1")
+    service.chat(
+        messages=[{"role": "user", "content": "two"}],
+        model="m1",
+        session_id="sess-a",
+    )
+    service.chat(messages=[{"role": "user", "content": "three"}], model="m2")
+
+    usage = service.usage_snapshot()
+    assert usage["m1"] == {
+        "requests": 2,
+        "input_tokens": 300,
+        "output_tokens": 30,
+        "cache_read_tokens": 210,
+    }
+    assert usage["m2"] == {
+        "requests": 1,
+        "input_tokens": 50,
+        "output_tokens": 5,
+        "cache_read_tokens": 0,
+    }
+    assert service.info()["usage"]["m1"]["cache_read_tokens"] == 210
+    # The session id reaches the provider unchanged.
+    assert provider.calls[1]["session_id"] == "sess-a"

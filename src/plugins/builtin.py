@@ -18,6 +18,7 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
     """
 
     from .agent.plugin import AgentPlugin
+    from .ask.plugin import AskPlugin
     from .input.plugin import InputPlugin
     from .instant_summarize.plugin import InstantSummarizePlugin
     from .llm_core.plugin import LLMPlugin
@@ -32,6 +33,7 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
         LLMPlugin(),
         AgentPlugin(),
         ReaderPlugin(),
+        AskPlugin(),
     ]
     if config.enable_input:
         plugins.append(InputPlugin())

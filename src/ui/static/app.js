@@ -67,6 +67,11 @@
       headers: { "Content-Type": "application/json", ...(options.headers || {}) },
       ...options,
     });
+    if (resp.status === 401) {
+      // Session expired (or never existed): the login page owns the rest.
+      window.location.href = "/login";
+      throw new Error("未登录");
+    }
     if (!resp.ok) {
       let detail = resp.statusText;
       try { detail = (await resp.json()).detail || detail; } catch (_) {}
@@ -410,10 +415,21 @@
     let active = tabs.findIndex((t) => (t.title || "") === savedTitle);
     if (active < 0) active = tabs.findIndex((t) => t.active);
     if (active < 0) active = 0;
+    // Selection-menu context of the visible tab: which document is displayed
+    // and which menu items its owning plugin registered for this reader page.
+    const applyMeta = (tab) => {
+      const meta = (tab && tab.meta) || {};
+      body.dataset.docKey = meta.doc_key || "";
+      body.dataset.docPath = meta.path || "";
+      body.dataset.pageId = meta.page_id || "";
+      body.dataset.owner = meta.owner || "";
+      body.dataset.selectionActions = JSON.stringify(meta.selection_actions || []);
+    };
     const show = (index, remember = true) => {
       active = index;
       if (remember) state.blockTabs[key] = tabs[index]?.title || "";
       $$(".tab-btn", bar).forEach((b, i) => b.classList.toggle("active", i === active));
+      applyMeta(tabs[index]);
       body.replaceChildren(renderBlocks(tabs[index]?.blocks || []));
       if (remember && (body.textContent.includes("$") || body.textContent.includes("\\("))) {
         typeset(body);
@@ -603,6 +619,216 @@
     return wrap;
   }
 
+  // ------------------------------------------------------------------
+  // Switch + Q&A blocks
+  // ------------------------------------------------------------------
+  function renderSwitch(block) {
+    const wrap = el("div", { class: "block switch-block" });
+    const input = el("input", { type: "checkbox", class: "switch-input" });
+    input.checked = Boolean(block.checked);
+    const label = el("label", { class: "switch-label" }, [
+      input,
+      el("span", { class: "switch-track" }),
+      el("span", { class: "switch-text", text: block.label || "" }),
+    ]);
+    input.addEventListener("change", () => {
+      postAction(block.action, { enabled: input.checked });
+    });
+    wrap.appendChild(label);
+    if (block.hint) wrap.appendChild(el("div", { class: "hint", text: block.hint }));
+    return wrap;
+  }
+
+  function qaPreview(text) {
+    const flat = String(text || "").replace(/\s+/g, " ").trim();
+    return flat.length > 90 ? `${flat.slice(0, 90)}…` : (flat || "（提问）");
+  }
+
+  function qaLevelLabel(intensity) {
+    if (intensity === "research") return "研究";
+    if (intensity === "instant") return "快速";
+    return "";
+  }
+
+  function buildQaLive(block) {
+    const live = el("div", {
+      class: "qa-live",
+      dataset: { qaId: block.id || "", qaPath: block.path || "" },
+    });
+    live.appendChild(el("div", { class: "qa-live-phase", text: "思考中…" }));
+    live.appendChild(el("div", { class: "qa-live-tools" }));
+    live.appendChild(el("div", { class: "qa-live-thinking" }));
+    live.appendChild(el("div", { class: "qa-live-answer" }));
+    return live;
+  }
+
+  function renderQA(block) {
+    const pending = String(block.status || "") === "pending";
+    const collapsed = Boolean(block.collapsed) && !pending;
+    const wrap = el("section", {
+      class: `qa ${collapsed ? "collapsed" : ""}`,
+      dataset: {
+        qaId: block.id || "",
+        qaPath: block.path || "",
+        qaStatus: block.status || "",
+      },
+    });
+    const head = el("div", { class: "qa-head" });
+    const toggle = el("button", {
+      class: "qa-toggle", type: "button", text: collapsed ? "▸" : "▾", title: "折叠 / 展开",
+    });
+    toggle.addEventListener("click", () => {
+      const next = !wrap.classList.contains("collapsed");
+      wrap.classList.toggle("collapsed", next);
+      toggle.textContent = next ? "▸" : "▾";
+      postAction(block.collapse_action || "reader.qa_collapse", {
+        path: block.path,
+        id: block.id,
+        collapsed: next,
+      });
+    });
+    head.appendChild(toggle);
+    head.appendChild(el("span", { class: "qa-badge qa-badge-q", text: "问" }));
+    head.appendChild(el("span", { class: "qa-summary", text: qaPreview(block.question) }));
+    const level = qaLevelLabel(block.intensity);
+    if (level) head.appendChild(el("span", { class: "qa-level", text: level }));
+    if (block.ts) head.appendChild(el("span", { class: "qa-time", text: block.ts }));
+    if (pending) head.appendChild(el("span", { class: "qa-pending", text: "回答中…" }));
+    head.appendChild(
+      actionButton(
+        "删除",
+        block.delete_action || "reader.qa_delete",
+        { path: block.path, id: block.id },
+        "btn btn-sm btn-danger qa-delete"
+      )
+    );
+
+    const body = el("div", { class: "qa-body" });
+    body.appendChild(el("div", { class: "qa-msg qa-question" }, [
+      el("div", { class: "qa-role", text: "你的提问" }),
+      el("div", {
+        class: "qa-text markdown",
+        html: block.question_html || escapeHtml(block.question || ""),
+      }),
+    ]));
+    const answerBox = el("div", {
+      class: `qa-msg qa-answer ${pending ? "pending" : ""} ${block.status === "error" ? "qa-failed" : ""}`,
+    });
+    answerBox.appendChild(el("div", { class: "qa-role", text: "Agent 回答" }));
+    if (pending) {
+      answerBox.appendChild(buildQaLive(block));
+    } else {
+      answerBox.appendChild(el("div", {
+        class: "qa-text markdown",
+        html: block.answer_html || escapeHtml(block.answer || "（无内容）"),
+      }));
+    }
+    body.appendChild(answerBox);
+
+    wrap.appendChild(head);
+    wrap.appendChild(body);
+    return wrap;
+  }
+
+  // ------------------------------------------------------------------
+  // Live Q&A patches (WebSocket notify, never a full-page refresh)
+  // ------------------------------------------------------------------
+  const _QA_PHASES = {
+    thinking: "思考中…",
+    tool: "检索 / 读取材料…",
+    answering: "回答中…",
+    done: "已完成",
+    error: "失败",
+  };
+
+  function qaNode(path, id) {
+    return $$(".qa").find(
+      (node) =>
+        node.dataset.qaId === id &&
+        (!path || node.dataset.qaPath === path)
+    ) || null;
+  }
+
+  function renderQaTools(node, tools) {
+    const box = node.querySelector(".qa-live-tools");
+    if (!box) return;
+    box.replaceChildren();
+    for (const tool of tools || []) {
+      box.appendChild(
+        el("span", {
+          class: `qa-tool ${tool.done ? "done" : "busy"}`,
+          text: `${tool.name || "?"} ${tool.detail || ""}`.trim(),
+        })
+      );
+    }
+  }
+
+  function withScrollAnchor(node, mutate) {
+    const scroller = $("#page-content");
+    const before = node.getBoundingClientRect();
+    const heightBefore = node.offsetHeight;
+    const scrollerTop = scroller ? scroller.getBoundingClientRect().top : 0;
+    mutate();
+    if (!scroller) return;
+    const heightAfter = node.offsetHeight;
+    if (before.bottom <= scrollerTop && heightAfter !== heightBefore) {
+      // The block is above the viewport: keep the visible content where it is.
+      scroller.scrollTop += heightAfter - heightBefore;
+    }
+  }
+
+  function finishQaBlock(node, payload) {
+    node.dataset.qaStatus = payload.status || "done";
+    const answerBox = node.querySelector(".qa-answer");
+    if (answerBox) {
+      answerBox.classList.remove("pending");
+      if (payload.status === "error") answerBox.classList.add("qa-failed");
+      answerBox.replaceChildren(
+        el("div", { class: "qa-role", text: "Agent 回答" }),
+        el("div", {
+          class: "qa-text markdown",
+          html: payload.answer_html || escapeHtml(payload.answer || "（无内容）"),
+        })
+      );
+      typeset(answerBox);
+    }
+    const pending = node.querySelector(".qa-pending");
+    if (pending) pending.remove();
+    if (payload.collapsed !== false) {
+      node.classList.add("collapsed");
+      const toggle = node.querySelector(".qa-toggle");
+      if (toggle) toggle.textContent = "▸";
+    }
+  }
+
+  function applyQaLive(payload) {
+    if (!payload || !payload.id) return;
+    const node = qaNode(payload.path || "", payload.id);
+    if (!node) return;
+    withScrollAnchor(node, () => {
+      const phase = node.querySelector(".qa-live-phase");
+      if (phase && payload.phase) {
+        const text = _QA_PHASES[payload.phase] || payload.phase;
+        phase.textContent = payload.elapsed ? `${text} · ${payload.elapsed}s` : text;
+      }
+      if (Array.isArray(payload.tools)) renderQaTools(node, payload.tools);
+      if (payload.reasoning_delta) {
+        const box = node.querySelector(".qa-live-thinking");
+        if (box) {
+          box.appendChild(document.createTextNode(payload.reasoning_delta));
+          box.scrollTop = box.scrollHeight;
+        }
+      }
+      if (payload.text_delta) {
+        const box = node.querySelector(".qa-live-answer");
+        if (box) box.appendChild(document.createTextNode(payload.text_delta));
+      }
+      if (payload.status && payload.status !== "pending") {
+        finishQaBlock(node, payload);
+      }
+    });
+  }
+
   function renderBlocks(blocks) {
     const frag = document.createDocumentFragment();
     for (const block of blocks || []) {
@@ -680,6 +906,8 @@
     }
     if (type === "tabs") return el("div", { class: "block" }, [renderTabs(block)]);
     if (type === "player") return renderPlayer(block);
+    if (type === "switch") return renderSwitch(block);
+    if (type === "qa") return renderQA(block);
     if (type === "progress") {
       const value = Number(block.value ?? 0);
       const pct = value <= 1 ? value * 100 : value;
@@ -888,6 +1116,220 @@
     }
   }
 
+  // ------------------------------------------------------------------
+  // Collapsible sidebars
+  // ------------------------------------------------------------------
+  function applySidebarState() {
+    const app = $("#app");
+    if (!app) return;
+    for (const side of ["left", "right"]) {
+      const collapsed =
+        localStorage.getItem(`lecture-agent.sidebar.${side}`) === "collapsed";
+      app.classList.toggle(`${side}-collapsed`, collapsed);
+      const btn = $(`#toggle-${side}`);
+      if (btn) btn.classList.toggle("active", collapsed);
+    }
+  }
+
+  function bindSidebarToggles() {
+    for (const side of ["left", "right"]) {
+      const btn = $(`#toggle-${side}`);
+      if (!btn) continue;
+      btn.addEventListener("click", () => {
+        const app = $("#app");
+        const collapsed = !app.classList.contains(`${side}-collapsed`);
+        app.classList.toggle(`${side}-collapsed`, collapsed);
+        btn.classList.toggle("active", collapsed);
+        localStorage.setItem(
+          `lecture-agent.sidebar.${side}`,
+          collapsed ? "collapsed" : "open"
+        );
+      });
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Selection menu (reader pages) + ask dialog
+  // ------------------------------------------------------------------
+  function hideSelectionMenu() {
+    const menu = $("#selection-menu");
+    if (!menu) return;
+    menu.hidden = true;
+    menu.replaceChildren();
+  }
+
+  function docContext(node) {
+    const element = node && (node.nodeType === 1 ? node : node.parentElement);
+    const body = element ? element.closest(".tabs-body") : null;
+    if (!body) return null;
+    let actions = [];
+    try {
+      actions = JSON.parse(body.dataset.selectionActions || "[]");
+    } catch (_) {
+      actions = [];
+    }
+    if (!actions.length) return null;
+    return {
+      actions,
+      docKey: body.dataset.docKey || "",
+      path: body.dataset.docPath || "",
+      pageId: body.dataset.pageId || "",
+    };
+  }
+
+  function showSelectionMenu() {
+    const menu = $("#selection-menu");
+    const page = $("#page-content");
+    if (!menu || !page) return;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideSelectionMenu();
+    const text = String(sel).trim();
+    if (text.length < 2) return hideSelectionMenu();
+    const node = sel.anchorNode;
+    if (!node || !page.contains(node)) return hideSelectionMenu();
+    const ctx = docContext(node);
+    if (!ctx) return hideSelectionMenu();
+
+    menu.replaceChildren();
+    for (const item of ctx.actions) {
+      const btn = el("button", {
+        class: "selection-item",
+        type: "button",
+        text: `${item.icon ? item.icon + " " : ""}${item.label || item.id}`,
+      });
+      btn.addEventListener("click", () => {
+        hideSelectionMenu();
+        if (item.kind === "prompt") {
+          openAskDialog(item, ctx, text);
+          return;
+        }
+        postAction(item.action, {
+          ...(item.value || {}),
+          doc_key: ctx.docKey,
+          path: ctx.path,
+          page_id: ctx.pageId,
+          selection: text,
+        });
+      });
+      menu.appendChild(btn);
+    }
+    menu.hidden = false;
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    const left = Math.min(
+      window.innerWidth - width - 10,
+      Math.max(10, rect.left + rect.width / 2 - width / 2)
+    );
+    let top = rect.top - height - 8;
+    if (top < 8) top = Math.min(window.innerHeight - height - 10, rect.bottom + 8);
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+  }
+
+  let askContext = null;
+
+  function openAskDialog(item, ctx, selection) {
+    askContext = { item, ctx, selection };
+    const modal = $("#ask");
+    if (!modal) return;
+    const preview = $("#ask-selection");
+    preview.textContent =
+      selection.length > 800 ? `${selection.slice(0, 800)}…` : selection;
+    const levels = $("#ask-intensity");
+    if (levels) {
+      levels.replaceChildren();
+      const options =
+        Array.isArray(item.intensities) && item.intensities.length
+          ? item.intensities
+          : [{ value: "instant", label: "快速" }, { value: "research", label: "研究" }];
+      for (const option of options) {
+        const value = typeof option === "object" ? option.value : option;
+        const label = typeof option === "object" ? (option.label ?? option.value) : option;
+        levels.appendChild(el("option", { value: String(value), text: String(label) }));
+      }
+    }
+    const input = $("#ask-input");
+    input.value = "";
+    modal.hidden = false;
+    input.focus();
+  }
+
+  function closeAskDialog() {
+    const modal = $("#ask");
+    if (modal) modal.hidden = true;
+    askContext = null;
+  }
+
+  async function sendAsk() {
+    if (!askContext) return;
+    const input = $("#ask-input");
+    const question = (input.value || "").trim();
+    if (!question) {
+      toast("请先输入问题", "err");
+      return;
+    }
+    const { item, ctx, selection } = askContext;
+    const intensity = ($("#ask-intensity") || {}).value || "instant";
+    closeAskDialog();
+    await postAction(item.action, {
+      ...(item.value || {}),
+      doc_key: ctx.docKey,
+      path: ctx.path,
+      page_id: ctx.pageId,
+      selection,
+      question,
+      intensity,
+    });
+  }
+
+  function bindSelectionMenu() {
+    document.addEventListener("mouseup", (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target && target.closest("#selection-menu")) return;
+      if (target && target.closest("#ask")) return;
+      window.setTimeout(showSelectionMenu, 0);
+    });
+    document.addEventListener("selectionchange", () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) hideSelectionMenu();
+    });
+    document.addEventListener("scroll", hideSelectionMenu, true);
+
+    const menu = $("#selection-menu");
+    if (menu) {
+      // Keep the text selection alive while the menu is being clicked.
+      menu.addEventListener("mousedown", (event) => event.preventDefault());
+    }
+  }
+
+  function bindAskDialog() {
+    const cancel = $("#ask-cancel");
+    if (cancel) cancel.addEventListener("click", closeAskDialog);
+    const close = $("#ask-close");
+    if (close) close.addEventListener("click", closeAskDialog);
+    const send = $("#ask-send");
+    if (send) send.addEventListener("click", sendAsk);
+    const input = $("#ask-input");
+    if (input) {
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          sendAsk();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          closeAskDialog();
+        }
+      });
+    }
+    const modal = $("#ask");
+    if (modal) {
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal) closeAskDialog();
+      });
+    }
+  }
+
   function pickTab(tabs, side) {
     const current = state.activeTab[side];
     if (current && tabs.some((t) => t.id === current)) return current;
@@ -990,7 +1432,11 @@
     const container = $("#page-content");
     const active = state.ui.active_page || "";
     const blocks = active ? state.ui.page_content?.[active] : null;
-    const key = active ? `${active}\u0000${JSON.stringify(blocks || [])}` : "__welcome__";
+    // ``collapsed`` is client-side fold state persisted in the note; ignoring
+    // it here keeps polling refreshes from re-rendering after a fold toggle.
+    const key = active
+      ? `${active}\u0000${JSON.stringify(blocks || [], (k, v) => (k === "collapsed" ? undefined : v))}`
+      : "__welcome__";
     const samePage = container.dataset.pageId === active;
     // Page content is polled every few seconds; never re-render or re-run
     // KaTeX when the payload is identical.  This is what made the board and
@@ -1004,6 +1450,19 @@
       container.contains(focused) &&
       ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName);
     if (editing) return false; // don't wipe out a form the user is typing in
+    // Q&A blocks grow and shrink as answers stream in.  Record, for blocks
+    // above the viewport, how tall they were, and put the scroll back so the
+    // visible content does not move.
+    const qaBefore = new Map();
+    if (samePage) {
+      const scrollerTop = container.getBoundingClientRect().top;
+      for (const node of $$(".qa", container)) {
+        qaBefore.set(`${node.dataset.qaPath}\u0000${node.dataset.qaId}`, {
+          height: node.offsetHeight,
+          above: node.getBoundingClientRect().bottom <= scrollerTop,
+        });
+      }
+    }
     destroyPlayers(container);
     container.replaceChildren();
     container.dataset.pageId = active;
@@ -1019,6 +1478,14 @@
     }
     container.appendChild(renderBlocks(blocks));
     container.scrollTop = samePage ? scrollTop : 0;
+    if (samePage && qaBefore.size) {
+      let adjust = 0;
+      for (const node of $$(".qa", container)) {
+        const prev = qaBefore.get(`${node.dataset.qaPath}\u0000${node.dataset.qaId}`);
+        if (prev && prev.above) adjust += node.offsetHeight - prev.height;
+      }
+      if (adjust) container.scrollTop += adjust;
+    }
     return true;
   }
 
@@ -1174,6 +1641,9 @@
       try {
         const data = JSON.parse(event.data);
         if (data.type === "refresh") scheduleRefresh();
+        else if (data.type === "notify" && data.topic === "qa.live") {
+          applyQaLive(data.payload || {});
+        }
       } catch (_) { /* ignore */ }
     });
     ws.addEventListener("close", () => {
@@ -1188,6 +1658,10 @@
   }
 
   function boot() {
+    applySidebarState();
+    bindSidebarToggles();
+    bindSelectionMenu();
+    bindAskDialog();
     bindPaletteTrigger();
     loadState();
     connectWs();

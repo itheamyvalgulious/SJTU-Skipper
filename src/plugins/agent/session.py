@@ -45,6 +45,21 @@ class AgentSession:
     max_steps: int = 12
     """Maximum REPL iterations; ``0`` means unlimited (run until the model stops)."""
 
+    final_answer_on_limit: bool = False
+    """When True, the last allowed iteration runs without tools and must answer.
+
+    Used by read-only Q&A sessions: reading is a means to an end, so a model
+    that keeps calling tools should still produce an answer instead of dying
+    with ``max_steps exceeded``.  Writing agents leave it off (their last step
+    is better spent editing a file).
+    """
+
+    agent: str = ""
+    """Name of the registered agent profile this session was created from."""
+
+    stream: bool = False
+    """When True, runs use the provider's streaming API and emit deltas."""
+
     max_tool_output: int = 8000
     """Tool output longer than this is truncated before being sent to the LLM."""
 
@@ -111,14 +126,25 @@ class AgentSession:
             self.messages.clear()
 
     def to_dict(self) -> dict[str, Any]:
-        """Summary for the session list UI."""
-        with self.lock:
-            msg_count = len(self.messages)
-            last_content = ""
-            for m in reversed(self.messages):
-                if m.get("role") == "assistant" and m.get("content"):
-                    last_content = str(m["content"])[:120]
-                    break
+        """Summary for the session list UI.
+
+        Must never block: a running session holds its lock for the whole run,
+        and this is called from the UI render path.  A plain list snapshot is
+        enough — ``messages`` is only appended to.
+        """
+        if self.lock.acquire(timeout=0.05):
+            try:
+                messages = list(self.messages)
+            finally:
+                self.lock.release()
+        else:
+            messages = list(self.messages)
+        msg_count = len(messages)
+        last_content = ""
+        for m in reversed(messages):
+            if m.get("role") == "assistant" and m.get("content"):
+                last_content = str(m["content"])[:120]
+                break
         return {
             "id": self.id,
             "name": self.name,

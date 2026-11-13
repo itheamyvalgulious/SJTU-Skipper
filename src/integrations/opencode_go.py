@@ -14,7 +14,12 @@ from typing import Any
 
 import httpx
 
-OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
+OPENCODE_GO_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
+"""OpenAI-compatible Go endpoint.
+
+The model catalog declares this exact base URL for ``chat-completions``; the
+older ``/zen/go/v1`` path still answers but is not the documented one.
+"""
 DEVICE_CODE_URL = "https://opencode.ai/console/auth/device/code"
 TOKEN_URL = "https://opencode.ai/console/auth/device/token"
 OAUTH_CLIENT_ID = "opencode-cli"

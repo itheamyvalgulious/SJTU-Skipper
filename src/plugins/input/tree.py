@@ -62,6 +62,29 @@ def live_state(begin: Any, end: Any, *, now: datetime | None = None) -> str:
     return "已结束"
 
 
+def next_boundary(
+    lives: Iterable[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> float:
+    """Epoch seconds of the nearest upcoming live begin/end, or ``0.0``.
+
+    The sidebar derives each class label (直播中 / 未开始 / 已结束) from its
+    begin/end times, so those timestamps are exactly the moments a label can
+    change.  Returning the nearest one lets the caller refresh the tree on
+    schedule instead of waiting for the user to press 刷新.
+    """
+
+    current = now or datetime.now()
+    upcoming: list[float] = []
+    for live in lives:
+        for key in ("begin", "end"):
+            dt = parse_time(live.get(key))
+            if dt is not None and dt > current:
+                upcoming.append(dt.timestamp())
+    return min(upcoming) if upcoming else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Merging consecutive periods
 # ---------------------------------------------------------------------------
@@ -175,29 +198,97 @@ def _recording_child(
     }
 
 
-def _live_child(
+def merge_live_periods(
+    lives: Iterable[dict[str, Any]],
+    *,
+    max_gap_minutes: int = DEFAULT_MAX_GAP_MINUTES,
+    max_parts: int = DEFAULT_MAX_PARTS,
+) -> list[dict[str, Any]]:
+    """Group back-to-back live periods of one course into one class.
+
+    The video portal publishes a 2- or 3-period lecture as separate live rows;
+    merging them keeps the sidebar from showing "two classes" that are really
+    one.  Mirrors :func:`merge_periods` for recordings.
+    """
+
+    items = [item for item in lives if parse_time(item.get("begin")) is not None]
+    items.sort(key=lambda item: parse_time(item.get("begin")) or datetime.min)
+    max_gap = timedelta(minutes=max(0, int(max_gap_minutes)))
+
+    groups: list[dict[str, Any]] = []
+    for item in items:
+        begin = parse_time(item.get("begin"))
+        end = parse_time(item.get("end")) or begin
+        assert begin is not None and end is not None
+        if groups:
+            last = groups[-1]
+            gap = begin - last["end"]
+            same_day = begin.date() == last["begin"].date()
+            if (
+                same_day
+                and timedelta(0) <= gap <= max_gap
+                and len(last["parts"]) < max(1, int(max_parts))
+            ):
+                last["parts"].append(item)
+                last["end"] = max(last["end"], end)
+                continue
+        groups.append({"parts": [item], "begin": begin, "end": end})
+    return groups
+
+
+def _live_group_child(
     course_id: str,
     course_name: str,
-    live: dict[str, Any],
+    group: dict[str, Any],
     *,
     now: datetime,
 ) -> dict[str, Any] | None:
-    begin = parse_time(live.get("begin"))
-    end = parse_time(live.get("end"))
-    state = live_state(live.get("begin"), live.get("end"), now=now)
-    if not state:
+    """One class node for a merged run of live periods."""
+
+    parts: list[dict[str, Any]] = group["parts"]
+    states = [
+        live_state(part.get("begin"), part.get("end"), now=now) for part in parts
+    ]
+    if not any(states):
         return None
-    label = (
-        f"{begin:%m-%d %H:%M}–{end:%H:%M}"
-        if begin and end
-        else str(live.get("name", ""))
-    )
+    if "直播中" in states:
+        state = "直播中"
+    elif "未开始" in states:
+        state = "未开始"
+    else:
+        state = "已结束"
+
+    # Open the part that is live now, else the next upcoming one, else the last.
+    active = None
+    for part, part_state in zip(parts, states):
+        if part_state == "直播中":
+            active = part
+            break
+    if active is None:
+        for part, part_state in zip(parts, states):
+            if part_state == "未开始":
+                active = part
+                break
+    if active is None:
+        active = parts[-1]
+
+    begin = group["begin"]
+    end = group["end"]
+    label = f"{begin:%m-%d %H:%M}–{end:%H:%M}"
+    classrooms = [str(p.get("classroom", "") or "") for p in parts]
     subtitle = " · ".join(
-        part for part in (state, str(live.get("classroom", "") or "")) if part
+        part
+        for part in (
+            state,
+            next((c for c in classrooms if c), ""),
+            f"{len(parts)} 节" if len(parts) > 1 else "",
+        )
+        if part
     )
-    live_id = str(live.get("id", ""))
+    live_id = str(active.get("id", ""))
+    child_id = f"class:{course_id}:live:{live_id}"
     return {
-        "id": f"class:{course_id}:live:{live_id}",
+        "id": child_id,
         "label": label,
         "subtitle": subtitle,
         "badge": state,
@@ -206,15 +297,37 @@ def _live_child(
         "action": {
             "action": "input.open_class",
             "value": {
-                "id": f"class:{course_id}:live:{live_id}",
+                "id": child_id,
                 "kind": "live",
                 "course": course_id,
                 "name": course_name,
                 "label": label,
                 "live_id": live_id,
+                "parts": len(parts),
             },
         },
     }
+
+
+def _live_child(
+    course_id: str,
+    course_name: str,
+    live: dict[str, Any],
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Backwards-compatible single-period wrapper."""
+
+    begin = parse_time(live.get("begin"))
+    end = parse_time(live.get("end")) or begin
+    if begin is None or end is None:
+        return None
+    return _live_group_child(
+        course_id,
+        course_name,
+        {"parts": [live], "begin": begin, "end": end},
+        now=now,
+    )
 
 
 def build_tree(
@@ -244,6 +357,8 @@ def build_tree(
         )
 
     unmatched: list[dict[str, Any]] = []
+    lives_by_course: dict[str, list[dict[str, Any]]] = {}
+    names_by_course: dict[str, str] = {}
     for live in lives:
         matched = _match_course(str(live.get("name", "")), courses)
         if matched is None:
@@ -253,10 +368,21 @@ def build_tree(
         begin = parse_time(live.get("begin"))
         if _recording_overlaps(begin, groups_by_course.get(cid, [])):
             continue  # recorded already — do not duplicate the class
-        child = _live_child(cid, str(matched.get("name", "")), live, now=now)
-        if child is not None:
-            groups_by_course.setdefault(cid, [])
-            groups_by_course[cid].append({"__live__": child, "begin": begin})
+        lives_by_course.setdefault(cid, []).append(live)
+        names_by_course[cid] = str(matched.get("name", ""))
+
+    for cid, items in lives_by_course.items():
+        for group in merge_live_periods(
+            items, max_gap_minutes=max_gap_minutes, max_parts=max_parts
+        ):
+            child = _live_group_child(
+                cid, names_by_course.get(cid, ""), group, now=now
+            )
+            if child is not None:
+                groups_by_course.setdefault(cid, [])
+                groups_by_course[cid].append(
+                    {"__live__": child, "begin": group["begin"]}
+                )
 
     nodes: list[dict[str, Any]] = []
     for course in courses:
@@ -299,12 +425,18 @@ def build_tree(
 
     if unmatched:
         children = []
+        by_name: dict[str, list[dict[str, Any]]] = {}
         for live in unmatched:
-            child = _live_child("other", "其他直播", live, now=now)
-            if child is not None:
-                if current_class_id:
-                    child["active"] = child.get("id") == current_class_id
-                children.append(child)
+            by_name.setdefault(_norm_name(live.get("name", "")), []).append(live)
+        for items in by_name.values():
+            for group in merge_live_periods(
+                items, max_gap_minutes=max_gap_minutes, max_parts=max_parts
+            ):
+                child = _live_group_child("other", "其他直播", group, now=now)
+                if child is not None:
+                    if current_class_id:
+                        child["active"] = child.get("id") == current_class_id
+                    children.append(child)
         if children:
             nodes.append(
                 {

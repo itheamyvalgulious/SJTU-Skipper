@@ -22,6 +22,8 @@ from unittest import mock
 
 import pytest
 
+from types import SimpleNamespace
+
 from core.events import EventBus
 from core.plugin import PluginContext
 from core.services import ServiceRegistry
@@ -43,6 +45,7 @@ from plugins.input.sources import (
     SourceManager,
     SourceSpec,
 )
+from plugins.input.tree import next_boundary
 from tests.support import FakeSettings
 
 _log = logging.getLogger(__name__)
@@ -1308,6 +1311,30 @@ class TestClassPlayer:
 
         plugin.teardown()
 
+    def test_reprocess_restarts_from_the_first_part(self, monkeypatch):
+        """「重新处理」must drop the streams of the part previously loaded."""
+
+        ctx = _make_context()
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+
+        self._open_class(ctx, plugin, videos=("v1", "v2"))
+        # A finished class is reopened on its last part, keeping its streams.
+        plugin._class_index = 1
+        plugin._class_streams = {"main": "https://example.com/v2.mp4"}
+        plugin._streams_loading = False
+        plugin._class_finished = True
+
+        result = ctx.ui.dispatch_action("input.reprocess", {})
+        assert result.ok
+        assert plugin._class_index == 0
+        assert plugin._class_streams == {}, "stale streams would re-download part 2"
+        assert plugin._streams_loading is True, "part 1 streams must be re-resolved"
+        assert plugin._class_finished is False
+
+        plugin.teardown()
+
     def test_player_page_shows_both_video_streams(self, monkeypatch):
         ctx = _make_context()
         plugin = InputPlugin()
@@ -1543,3 +1570,101 @@ class TestStreamMapping:
     def test_live_streams_without_view_numbers(self):
         streams = _map_live_streams([{"url": "a"}, {"url": "b"}])
         assert streams == {"main": "a", "screen": "b"}
+
+
+# ---------------------------------------------------------------------------
+# Timetable-driven tree refresh
+# ---------------------------------------------------------------------------
+
+
+def test_next_boundary_is_the_nearest_future_moment() -> None:
+    from datetime import datetime
+
+    now = datetime(2026, 11, 12, 10, 0, 0)
+    lives = [
+        {"begin": "2026-11-12 09:00:00", "end": "2026-11-12 10:20:00"},
+        {"begin": "2026-11-12 10:30:00", "end": "2026-11-12 12:00:00"},
+    ]
+    assert next_boundary(lives, now=now) == datetime(
+        2026, 11, 12, 10, 20
+    ).timestamp()
+
+
+def test_next_boundary_ignores_past_windows() -> None:
+    from datetime import datetime
+
+    now = datetime(2026, 11, 12, 13, 0, 0)
+    lives = [{"begin": "2026-11-12 08:00:00", "end": "2026-11-12 09:40:00"}]
+    assert next_boundary(lives, now=now) == 0.0
+
+
+def test_clock_tick_refreshes_once_at_the_boundary(monkeypatch) -> None:
+    plugin = InputPlugin()
+    plugin._tree_lock = threading.RLock()
+    plugin._tree = {
+        "nodes": [],
+        "error": "",
+        "at": 0.0,
+        "started": 0.0,
+        "loading": False,
+        "next_boundary": 1000.0,
+    }
+    reloads: list[bool] = []
+    refreshes: list[str] = []
+    monkeypatch.setattr(
+        plugin, "_ensure_tree", lambda *, force=False: reloads.append(force)
+    )
+    plugin._ctx = SimpleNamespace(
+        ui=SimpleNamespace(refresh=lambda key: refreshes.append(key))
+    )
+
+    plugin._on_clock_tick({"ts": 999.0})
+    assert reloads == []
+
+    plugin._on_clock_tick({"ts": 1000.5})
+    assert reloads == [True]
+    assert refreshes == ["input.tree"]
+    assert plugin._tree["next_boundary"] == 0.0
+
+    # A second tick before the tree reloads must not fire again.
+    plugin._on_clock_tick({"ts": 1001.0})
+    assert reloads == [True]
+
+
+def test_pick_recordings_keeps_every_overlapping_part() -> None:
+    """A 2- or 3-period lecture must queue all of its recordings."""
+
+    from datetime import datetime
+
+    recordings = [
+        {"video_id": "c", "begin": "2026-11-12 13:55:00", "end": "2026-11-12 14:50:00"},
+        {"video_id": "a", "begin": "2026-11-12 15:55:00", "end": "2026-11-12 16:50:00"},
+        {"video_id": "b", "begin": "2026-11-12 16:50:20", "end": "2026-11-12 17:45:00"},
+    ]
+    started = datetime(2026, 11, 12, 16, 0).timestamp()
+    ended = datetime(2026, 11, 12, 18, 0).timestamp()
+
+    picked = InputPlugin._pick_recordings(recordings, started, ended)
+
+    assert [item["video_id"] for item in picked] == ["a", "b"]
+
+
+def test_pick_recordings_handles_three_parts() -> None:
+    from datetime import datetime
+
+    recordings = [
+        {"video_id": f"v{i}", "begin": f"2026-11-12 {begin}", "end": f"2026-11-12 {end}"}
+        for i, (begin, end) in enumerate(
+            [
+                ("08:00:00", "08:50:00"),
+                ("08:50:20", "09:40:00"),
+                ("09:50:00", "10:40:00"),
+            ]
+        )
+    ]
+    started = datetime(2026, 11, 12, 8, 5).timestamp()
+    ended = datetime(2026, 11, 12, 10, 40).timestamp()
+
+    picked = InputPlugin._pick_recordings(recordings, started, ended)
+
+    assert [item["video_id"] for item in picked] == ["v0", "v1", "v2"]

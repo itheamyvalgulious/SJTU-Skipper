@@ -67,11 +67,18 @@ class Message:
 
 @dataclass(slots=True)
 class Usage:
-    """Token usage returned by the provider."""
+    """Token usage returned by the provider.
+
+    ``cached_tokens`` is the part of the prompt the upstream served from its
+    prompt cache.  It is a subset of ``prompt_tokens`` for OpenAI-style
+    responses; providers that report cache reads separately leave
+    ``prompt_tokens`` unchanged and only fill this field.
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_tokens: int = 0
 
 
 @dataclass(slots=True)
@@ -87,6 +94,21 @@ class ChatRequest:
     response_format: dict[str, Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
     stream: bool = False
+    session_id: str | None = None
+    """Conversation-scoped id, used for gateway session affinity.
+
+    Boundaries matter: one id per conversation, distinct across concurrent
+    conversations.  Providers that understand it (OpenCode Go) pin all requests
+    of one conversation to the same backend so the upstream prompt cache is
+    reused instead of paid for again.
+    """
+
+    parent_session_id: str | None = None
+    """Id of the conversation this one was forked from, if any.
+
+    Affinity is derived from the root of the chain, matching the OpenCode
+    client: a sub-session is routed to the same backend as its parent.
+    """
 
 
 @dataclass(slots=True)

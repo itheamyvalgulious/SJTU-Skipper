@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import json
+import threading
 import time
 import difflib
 import io
@@ -32,6 +34,7 @@ from plugins.vlm.plugin import VlmPlugin, _fmt_time
 from plugins.vlm.prompts import (
     BLANK_BOARD_MARKER,
     BOARD_RECOGNITION_PROMPT,
+    NO_CHANGE_MARKER,
     build_user_message,
     collapse_repetitions,
     is_trivial_board_text,
@@ -228,6 +231,24 @@ class TestPrompts:
         assert len(content) == 1
         assert isinstance(content[0], TextPart)
 
+    def test_first_window_asks_for_full_transcription(self):
+        content = build_user_message(timestamp="00:00")
+        text = content[0].text
+        assert "第一次识别" in text
+        assert "请完整转录当前黑板" in text
+        assert "【无变化】" not in text
+
+    def test_history_is_passed_as_text_and_asks_for_delta(self):
+        content = build_user_message(
+            timestamp="10:00",
+            history=["第一版板书 A", "第二版板书 B"],
+        )
+        text = content[0].text
+        assert "第一版板书 A" in text
+        assert "第二版板书 B" in text
+        assert "新增、修改或擦除" in text
+        assert NO_CHANGE_MARKER in text
+
 
 class TestTrivialBoardText:
     def test_blank_board_marker_is_not_trivial(self):
@@ -387,6 +408,7 @@ class TestVlmPlugin:
         settings = vlm_ctx.service("settings")
         settings.set("vlm.enabled", True)
         settings.set("vlm.window_seconds", 5.0)
+        settings.set("vlm.cadence_recording_seconds", 5.0)
         settings.set("vlm.concurrency", 3)
         settings.set("vlm.dedupe_threshold", 0.92)
         settings.set("vlm.fusion", False)
@@ -413,6 +435,86 @@ class TestVlmPlugin:
             assert vlm_plugin.busy() is False
         finally:
             vlm_plugin.teardown()
+
+    def test_recording_uses_cadence_and_flushes_tail(
+        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
+    ):
+        # Drive the pipeline synchronously; the background worker would race
+        # this test's direct call and duplicate windows.
+        vlm_plugin._stop_worker()
+        vlm_plugin._stop_event.clear()
+        settings = vlm_ctx.service("settings")
+        settings.set("vlm.enabled", True)
+        settings.set("vlm.window_seconds", 20.0)
+        settings.set("vlm.cadence_recording_seconds", 300.0)
+        settings.set("vlm.fusion", False)
+
+        session = vlm_ctx.streams.current
+        session.meta["mode"] = "fast"
+        jpeg = _to_jpeg(_synthetic_frame())
+        for _ in range(1300):
+            session.video.append_frame(jpeg, duration=1.0)
+        session.input_done = True
+
+        windows: list[tuple[float, float]] = []
+
+        def run_window(start, end, frames):
+            windows.append((start, end))
+            return {"image_path": "", "text": f"第{int(start)}秒板书"}
+
+        vlm_plugin._run_window = run_window  # type: ignore[assignment]
+        try:
+            vlm_plugin._run_recording_session()
+        finally:
+            vlm_plugin.teardown()
+
+        assert [start for start, _end in windows] == [
+            0.0,
+            300.0,
+            600.0,
+            900.0,
+            1200.0,
+            1280.0,
+        ]
+        assert windows[-1][1] == 1300.0
+        assert vlm_plugin.busy() is False
+
+    def test_idle_recording_session_does_not_hold_the_plugin_lock(
+        self, vlm_ctx: PluginContext
+    ):
+        """Idling on a finished recording must release the lock ``status()`` needs."""
+
+        vlm_ctx.service("settings").set("vlm.enabled", False)
+        plugin = VlmPlugin()
+        plugin.setup(vlm_ctx)
+        session = vlm_ctx.streams.current
+        session.meta["mode"] = "fast"
+        session.ended_at = 1.0
+        plugin._recording_sessions.add(session.session_id)
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def fake_wait(_timeout: float | None = None) -> bool:
+            entered.set()
+            release.wait(2.0)
+            return False
+
+        plugin._stop_event.wait = fake_wait  # type: ignore[method-assign]
+        thread = threading.Thread(
+            target=plugin._run_recording_session, daemon=True
+        )
+        thread.start()
+        try:
+            assert entered.wait(1.0), "the worker never reached the idle wait"
+            acquired = plugin._lock.acquire(timeout=0.3)
+            assert acquired, "the idle wait must not hold the plugin lock"
+            if acquired:
+                plugin._lock.release()
+        finally:
+            release.set()
+            thread.join(2.0)
+            plugin.teardown()
 
     def test_process_window_with_fake_llm(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
         """process_window should call LLM, emit vlm.segment, and append visual."""
@@ -453,6 +555,19 @@ class TestVlmPlugin:
         assert item.end == 11.0
         assert "image_path" in item.meta
         assert "model" in item.meta
+
+        log = (
+            vlm_ctx.data_dir
+            / "sessions"
+            / vlm_ctx.streams.current.session_id
+            / "visual.jsonl"
+        )
+        records = [
+            json.loads(line) for line in log.read_text("utf-8").splitlines()
+        ]
+        assert records[-1]["start"] == 10.0
+        assert records[-1]["end"] == 11.0
+        assert "定理 1" in records[-1]["text"]
 
         # Check that thinking was disabled in the LLM call
         assert len(fake_llm.calls) >= 1
@@ -531,6 +646,49 @@ class TestVlmPlugin:
         # Only one visual item
         visual = vlm_ctx.streams.current.visual
         assert len(visual) == 1
+
+    def test_process_window_skips_no_change_marker(
+        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
+    ):
+        settings = vlm_ctx.service("settings")
+        settings.set("vlm.dedupe_threshold", 0.0)
+        settings.set("vlm.fusion", False)
+
+        fake_llm = vlm_ctx.service("llm")
+        fake_llm.script = [NO_CHANGE_MARKER]
+
+        arr = _synthetic_frame()
+        jpeg = _to_jpeg(arr)
+        frames = [_make_video_frame(jpeg, 5.0, 6.0)]
+
+        visual_before = len(vlm_ctx.streams.current.visual)
+        result = vlm_plugin.process_window(5.0, 6.0, frames)
+
+        assert result.get("skipped") is True
+        assert "无变化" in result.get("note", "")
+        assert len(vlm_ctx.streams.current.visual) == visual_before
+
+    def test_second_window_sends_previous_transcription(
+        self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
+    ):
+        settings = vlm_ctx.service("settings")
+        settings.set("vlm.dedupe_threshold", 0.0)
+        settings.set("vlm.fusion", False)
+
+        fake_llm = vlm_ctx.service("llm")
+        fake_llm.script = ["定理 A：$x=1$。", "新增：定理 B：$y=2$。"]
+
+        arr = _synthetic_frame()
+        jpeg = _to_jpeg(arr)
+        vlm_plugin.process_window(0.0, 1.0, [_make_video_frame(jpeg, 0.0, 1.0)])
+        vlm_plugin.process_window(5.0, 6.0, [_make_video_frame(jpeg, 5.0, 6.0)])
+
+        assert len(fake_llm.calls) == 2
+        first = fake_llm.calls[0]["messages"][0]["content"][0].text
+        assert "第一次识别" in first
+        second = fake_llm.calls[1]["messages"][0]["content"][0].text
+        assert "定理 A" in second
+        assert "新增、修改或擦除" in second
 
     def test_llm_error_emits_vlm_error(self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext):
         settings = vlm_ctx.service("settings")

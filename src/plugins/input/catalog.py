@@ -6,6 +6,7 @@ Wraps ``SJTUCatalog`` with settings-driven configuration and caching.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any, Callable, TypeVar
 
@@ -26,6 +27,9 @@ class Catalog:
         self._settings = settings
         self._sjt_cat: SJTUCatalog | None = None
         self._cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
+        # ``_load_tree`` fans out across courses, so lazy client creation and
+        # the TTL cache are touched from several threads.
+        self._lock = threading.Lock()
 
     def _cached(self, key: tuple[Any, ...], ttl: float, loader: Callable[[], T]) -> T:
         """Small TTL cache; UI state() re-renders toolbox items every poll."""
@@ -39,18 +43,19 @@ class Catalog:
         return value
 
     def _cat(self) -> SJTUCatalog:
-        if self._sjt_cat is None:
-            token = str(self._settings.get("input.canvas_token", "") or "")
-            base_url = str(
-                self._settings.get(
-                    "input.canvas_base_url", "https://oc.sjtu.edu.cn"
+        with self._lock:
+            if self._sjt_cat is None:
+                token = str(self._settings.get("input.canvas_token", "") or "")
+                base_url = str(
+                    self._settings.get(
+                        "input.canvas_base_url", "https://oc.sjtu.edu.cn"
+                    )
+                    or "https://oc.sjtu.edu.cn"
                 )
-                or "https://oc.sjtu.edu.cn"
-            )
-            # The settings service is the single source of truth; do not fall
-            # back to a hidden environment read here.
-            self._sjt_cat = SJTUCatalog(token=token, base_url=base_url)
-        return self._sjt_cat
+                # The settings service is the single source of truth; do not fall
+                # back to a hidden environment read here.
+                self._sjt_cat = SJTUCatalog(token=token, base_url=base_url)
+            return self._sjt_cat
 
     def has_token(self) -> bool:
         return bool(self._settings.get("input.canvas_token", ""))
@@ -108,10 +113,11 @@ class Catalog:
     # -- Lifecycle --------------------------------------------------------
 
     def close(self) -> None:
+        with self._lock:
+            cat, self._sjt_cat = self._sjt_cat, None
         self._cache.clear()
-        if self._sjt_cat is not None:
-            self._sjt_cat.close()
-            self._sjt_cat = None
+        if cat is not None:
+            cat.close()
 
     def reset(self) -> None:
         """Discard cached catalog (e.g. after token change)."""

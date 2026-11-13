@@ -208,7 +208,10 @@ def build_runtime(
     def on_ui_change(reason: str) -> None:
         bus.emit("ui.changed", reason=reason)
 
-    ui = UIManager(on_change=on_ui_change)
+    def on_ui_notify(topic: str, payload: dict[str, Any]) -> None:
+        bus.emit("ui.notify", topic=topic, payload=payload)
+
+    ui = UIManager(on_change=on_ui_change, on_notify=on_ui_notify)
 
     def context_factory(plugin_id: str) -> PluginContext:
         return PluginContext(

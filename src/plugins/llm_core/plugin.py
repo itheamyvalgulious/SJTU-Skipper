@@ -362,7 +362,13 @@ class LLMPlugin(Plugin):
             ),
             extra_headers={
                 "x-opencode-org-id": org_id,
+                # Fallback affinity for calls that carry no session id (the VLM
+                # and any direct provider use).  Agent calls override all four
+                # per request with their own conversation id.
                 "x-opencode-session": _OPENCODE_SESSION_ID,
+                "x-session-affinity": _OPENCODE_SESSION_ID,
+                "X-Session-Id": _OPENCODE_SESSION_ID,
+                "x-opencode-session-id": _OPENCODE_SESSION_ID,
             },
             extra_body=dict(extra_body or {}),
         )

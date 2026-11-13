@@ -11,18 +11,24 @@ import logging
 import shutil
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any
 
+from core.coverage import CoverageStore
 from core.plugin import Plugin, PluginContext
 from integrations.sjtu_canvas import InputError
 from plugins.settings.spec import SettingsSpec
 from .catalog import Catalog
 from .ffmpeg import probe_duration
 from .sources import SourceManager, SourceSpec
-from .tree import build_tree, live_state, local_time
+from .tree import build_tree, live_state, local_time, next_boundary, parse_time
 
 _log = logging.getLogger("lecture_agent.plugins.input")
+
+# The course tree needs one video-portal round trip per course; fetching them
+# serially took ~45s for 14 courses and tripped the sidebar's timeout label.
+_TREE_FETCH_WORKERS = 8
 
 
 
@@ -56,6 +62,27 @@ def _fmt_clock(seconds: float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _epoch_seconds(value: Any) -> float:
+    """Campus-local timestamp → epoch seconds (0.0 when unparseable)."""
+
+    dt = parse_time(value)
+    return dt.timestamp() if dt is not None else 0.0
+
+
+def _shift_intervals(
+    intervals: list[tuple[float, float]], shift: float
+) -> list[list[float]]:
+    """Move live-session ranges onto the recording's media timeline."""
+
+    out: list[list[float]] = []
+    for start, end in intervals:
+        moved_start = max(0.0, float(start) + float(shift))
+        moved_end = float(end) + float(shift)
+        if moved_end - moved_start > 0.5:
+            out.append([round(moved_start, 3), round(moved_end, 3)])
+    return out
 
 
 def _map_view_streams(views: dict[str, str]) -> dict[str, str]:
@@ -116,6 +143,7 @@ class InputPlugin(Plugin):
             "at": 0.0,
             "started": 0.0,
             "loading": False,
+            "next_boundary": 0.0,
         }
         self._tree_ttl = 30.0
         self._expanded: set[str] = set()
@@ -138,6 +166,12 @@ class InputPlugin(Plugin):
         self._class_sessions: dict[str, dict[str, Any]] = {}
         self._class_session_meta: dict[str, Any] = {}
         self._class_session_id: str = ""
+        # Gap-fill pass state (see _fill_gaps): remaining recording parts.
+        self._fill_queue: list[dict[str, Any]] = []
+        self._fill_target = ""
+        self._fill_live_started = 0.0
+        self._fill_media_begin = 0.0
+        self._fill_course: dict[str, Any] = {}
 
         # ---- Register settings ----
         for spec in _INPUT_SETTINGS:
@@ -186,6 +220,7 @@ class InputPlugin(Plugin):
         ctx.ui.register_task_provider(self.running_tasks)
         ctx.events.on("session.started", self._on_session_event, plugin_id=self.id)
         ctx.events.on("session.stopped", self._on_session_event, plugin_id=self.id)
+        ctx.events.on("clock.tick", self._on_clock_tick, plugin_id=self.id)
         self._load_session_index()
         ctx.events.on("input.status", self._on_input_event, plugin_id=self.id)
         ctx.events.on("input.download", self._on_input_event, plugin_id=self.id)
@@ -375,6 +410,155 @@ class InputPlugin(Plugin):
         self._pending_message = ""
 
     # ------------------------------------------------------------------
+    # Gap filling
+    # ------------------------------------------------------------------
+    def _fill_gaps(self, live_session_id: str) -> bool:
+        """Process the class recording(s), skipping what the live pass covered.
+
+        Called by the summarize plugin after a live class ends.  A class is
+        often split into several back-to-back recording parts; all of them are
+        queued and processed in order, in the same session, so the handout sees
+        one continuous timeline.  Returns ``False`` when no usable recording
+        exists (the caller then summarizes what it already has).
+        """
+
+        ctx = self._ctx
+        if ctx is None:
+            return False
+        try:
+            infos = self._ctx.streams.list_sessions()
+        except Exception:  # noqa: BLE001 - best effort
+            return False
+        info = next((s for s in infos if s.session_id == live_session_id), None)
+        if info is None:
+            return False
+        meta = dict(info.meta)
+        if str(meta.get("kind") or "") != "live":
+            return False
+        with self._class_lock:
+            busy = self._processing
+        if busy or self._sources.status().get("state") not in {"idle", None}:
+            _log.info("gap fill skipped: a source is already running")
+            return False
+
+        course_id = str(meta.get("course_id") or "")
+        if not course_id:
+            return False
+        started = float(info.started_at or 0.0)
+        ended = float(info.ended_at or 0.0) or started
+        try:
+            recordings = self._catalog.list_recordings(course_id, limit=50)
+        except InputError as exc:
+            _log.info("gap fill: no recordings for %s (%s)", course_id, exc)
+            return False
+        parts = self._pick_recordings(recordings, started, ended)
+        if not parts:
+            _log.info("gap fill: no recording overlaps the live window")
+            return False
+
+        self._fill_target = live_session_id
+        self._fill_live_started = started
+        self._fill_media_begin = _epoch_seconds(parts[0].get("begin"))
+        self._fill_queue = parts[1:]
+        self._fill_course = dict(meta)
+        with self._class_lock:
+            self._current_class = None
+            self._processing = True
+            self._processing_started = time.time()
+        self._ctx.ui.refresh("input.class.processing")
+        if self._start_fill_part(parts[0], continue_session=False):
+            return True
+        # First part failed: try the rest before giving up.
+        while self._fill_queue:
+            if self._start_fill_part(self._fill_queue.pop(0), continue_session=False):
+                return True
+        with self._class_lock:
+            self._processing = False
+        return False
+
+    def _start_fill_part(
+        self, recording: dict[str, Any], *, continue_session: bool
+    ) -> bool:
+        """Start one recording part of a gap-fill pass."""
+
+        meta = dict(self._fill_course)
+        course_id = str(meta.get("course_id") or "")
+        video_id = str(recording.get("video_id") or "")
+        try:
+            views = self._catalog.get_recording_streams(course_id, video_id)
+        except InputError as exc:
+            _log.info("gap fill: cannot resolve recording %s (%s)", video_id, exc)
+            return False
+        url = _map_view_streams(views).get("main", "")
+        if not url:
+            return False
+
+        begin = _epoch_seconds(recording.get("begin"))
+        session = self._ctx.streams.current
+        offset = float(session.audio.duration) if continue_session else 0.0
+        shift = offset + (self._fill_live_started - begin if begin else 0.0)
+        store = CoverageStore(self._ctx.data_dir, self._fill_target)
+        skip = {
+            "audio": _shift_intervals(store.coverage("audio").intervals, shift),
+            "video": _shift_intervals(store.coverage("video").intervals, shift),
+        }
+        _log.info(
+            "gap fill part %s for %s (offset %.1fs, skip audio=%s video=%s)",
+            video_id,
+            self._fill_target,
+            offset,
+            skip["audio"],
+            skip["video"],
+        )
+        spec = SourceSpec(
+            kind="recording",
+            url=url,
+            title=str(meta.get("title") or meta.get("class_label") or ""),
+            continue_session=continue_session,
+            realtime=False,
+            download=not url.startswith(("file://", "/")),
+            audio_gate_limit=self._gate_limit("stt", "stt.chunk_seconds", 50.0),
+            video_gate_limit=self._gate_limit("vlm", "vlm.window_seconds", 20.0),
+            meta={
+                "fill_for": self._fill_target,
+                # The first part's wall-clock start maps the whole fill session
+                # (parts are back-to-back) onto the lecture timeline.
+                "media_begin": self._fill_media_begin,
+                "skip_ranges": skip,
+            },
+            course={
+                "course_id": course_id,
+                "course_name": str(meta.get("course_name") or ""),
+                "class_label": str(meta.get("class_label") or ""),
+                "video_id": video_id,
+                "live_id": "",
+            },
+        )
+        try:
+            self._start_source(spec)
+        except Exception:  # noqa: BLE001 - try the next part
+            _log.exception("gap fill source failed to start")
+            return False
+        return True
+
+    @staticmethod
+    def _pick_recordings(
+        recordings: list[dict[str, Any]], started: float, ended: float
+    ) -> list[dict[str, Any]]:
+        """Every recording that overlaps the live class, in time order."""
+
+        picked: list[dict[str, Any]] = []
+        for item in recordings:
+            begin = _epoch_seconds(item.get("begin"))
+            end = _epoch_seconds(item.get("end")) or begin
+            if not begin:
+                continue
+            if min(end, ended + 600.0) - max(begin, started - 600.0) > 0:
+                picked.append(item)
+        picked.sort(key=lambda item: _epoch_seconds(item.get("begin")))
+        return picked
+
+    # ------------------------------------------------------------------
     # Service object
     # ------------------------------------------------------------------
 
@@ -417,6 +601,11 @@ class InputPlugin(Plugin):
 
             def get_live_devices(self, live_id: str) -> list[dict[str, Any]]:
                 return cat.get_live_devices(live_id)
+
+            def fill_gaps(self, session_id: str) -> bool:
+                """Process the class recording, skipping covered ranges."""
+
+                return self._fill_gaps(session_id)
 
         return InputService()
 
@@ -584,6 +773,37 @@ class InputPlugin(Plugin):
         with self._tree_lock:
             self._tree["at"] = 0.0
 
+    def _on_clock_tick(self, event: Any) -> None:
+        """Reload the tree when the timetable says a class state changed.
+
+        ``_load_tree`` records the nearest upcoming begin/end across today's
+        live streams.  When that moment passes, the 直播中/未开始/已结束 labels
+        are stale even though nothing else happened, so refresh without waiting
+        for a manual 刷新 click.
+        """
+
+        with self._tree_lock:
+            boundary = float(self._tree.get("next_boundary", 0.0) or 0.0)
+        if not boundary:
+            return
+        try:
+            now = float(event.get("ts", time.time()))
+        except (TypeError, ValueError):
+            now = time.time()
+        if now < boundary:
+            return
+        with self._tree_lock:
+            if float(self._tree.get("next_boundary", 0.0) or 0.0) != boundary:
+                return  # another path already handled this boundary
+            self._tree["next_boundary"] = 0.0
+        _log.info(
+            "timetable boundary %s reached; refreshing course tree",
+            datetime.fromtimestamp(boundary).strftime("%H:%M:%S"),
+        )
+        self._invalidate_tree()
+        self._ensure_tree(force=True)
+        self._ctx.ui.refresh("input.tree")
+
     def _apply_tree_state(self) -> None:
         """Re-apply expand/active flags to the cached tree (no refetch)."""
 
@@ -604,23 +824,39 @@ class InputPlugin(Plugin):
 
         walk(nodes)
 
+    def _course_recordings(self, course_id: str) -> list[dict[str, Any]]:
+        """Fetch one course's recordings; a broken course yields an empty list."""
+
+        try:
+            return self._catalog.list_recordings(course_id)
+        except InputError:
+            return []
+
     def _load_tree(self) -> None:
         nodes: list[dict[str, Any]] = []
         error = ""
+        now = datetime.now()
+        lives: list[dict[str, Any]] = []
         try:
             courses = self._catalog.list_courses()
+            course_ids = [str(course.get("id", "")) for course in courses]
             recordings: dict[str, list[dict[str, Any]]] = {}
-            for course in courses:
-                cid = str(course.get("id", ""))
-                try:
-                    recordings[cid] = self._catalog.list_recordings(cid)
-                except InputError:
-                    recordings[cid] = []
-            now = datetime.now()
-            lives = self._catalog.list_lives(
-                now.strftime("%Y-%m-%d 00:00:00"),
-                now.strftime("%Y-%m-%d 23:59:59"),
-            )
+            workers = max(1, min(_TREE_FETCH_WORKERS, len(course_ids) + 1))
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="course-tree"
+            ) as pool:
+                recording_jobs = {
+                    cid: pool.submit(self._course_recordings, cid)
+                    for cid in course_ids
+                }
+                live_job = pool.submit(
+                    self._catalog.list_lives,
+                    now.strftime("%Y-%m-%d 00:00:00"),
+                    now.strftime("%Y-%m-%d 23:59:59"),
+                )
+                for cid in course_ids:
+                    recordings[cid] = recording_jobs[cid].result()
+                lives = live_job.result()
             with self._tree_lock:
                 expanded = set(self._expanded)
                 current = self._current_class_id
@@ -644,6 +880,7 @@ class InputPlugin(Plugin):
                     "error": error,
                     "at": time.monotonic(),
                     "loading": False,
+                    "next_boundary": next_boundary(lives, now=now),
                 }
             )
         self._ctx.ui.refresh("input.tree")
@@ -1136,6 +1373,12 @@ class InputPlugin(Plugin):
             self._class_index = 0
             self._class_session_meta = {}
             self._class_session_id = ""
+            # The streams already resolved may belong to a later part (they are
+            # kept when a finished class is reopened); reusing them would
+            # re-download part N while the UI says "第 1 节".
+            self._class_streams = {}
+            self._streams_loading = False
+            self._streams_error = ""
         return self._act_start_processing(payload)
 
     def _act_start_processing(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1177,6 +1420,9 @@ class InputPlugin(Plugin):
             started = self._session_started
             self._want_processing = False
             self._download = {}
+            # A user-initiated play always wins over a pending gap-fill pass.
+            self._fill_queue = []
+            self._fill_target = ""
         if cls is None:
             return
         url = streams.get("main", "")
@@ -1262,6 +1508,28 @@ class InputPlugin(Plugin):
         window = max(5.0, window)
         return window * (max(1, concurrency) + 4)
 
+    def _continue_fill(self, recording: dict[str, Any]) -> None:
+        """Start the next recording part of a gap-fill pass."""
+
+        if self._start_fill_part(recording, continue_session=True):
+            return
+        while self._fill_queue:
+            if self._start_fill_part(self._fill_queue.pop(0), continue_session=True):
+                return
+        self._end_fill_or_playback()
+
+    def _end_fill_or_playback(self) -> None:
+        with self._class_lock:
+            self._processing = False
+            self._want_processing = False
+            self._class_finished = True
+            self._fill_queue = []
+            self._fill_target = ""
+        self._sources.stop()
+        self._end_open_session("playback finished")
+        self._prune_media()
+        self._ctx.ui.refresh("input.finished")
+
     def _probe_total_seconds(self, spec: SourceSpec, live: bool) -> float:
         if live:
             return 0.0
@@ -1303,16 +1571,18 @@ class InputPlugin(Plugin):
         if not processing:
             return
         if cls is None:
-            # Manual URL playback: nothing to advance to, just finish cleanly.
+            # Manual URL playback or a gap-fill pass.
             self._wait_for_consumers()
-            with self._class_lock:
-                self._processing = False
-                self._want_processing = False
-                self._class_finished = True
-            self._sources.stop()
-            self._end_open_session("playback finished")
-            self._prune_media()
-            self._ctx.ui.refresh("input.finished")
+            if self._fill_queue:
+                nxt = self._fill_queue.pop(0)
+                threading.Thread(
+                    target=self._continue_fill,
+                    args=(nxt,),
+                    name="fill-next-part",
+                    daemon=True,
+                ).start()
+                return
+            self._end_fill_or_playback()
             return
 
         if cls.get("kind") != "live":

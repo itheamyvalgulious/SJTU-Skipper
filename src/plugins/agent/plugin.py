@@ -14,20 +14,20 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping
 
 from core.plugin import Plugin, PluginContext
-from llm.types import ToolDef
 from .prompts import DEFAULT_SYSTEM_PROMPT
 from .session import AgentSession
-from .tools import _build_default_tools, ToolSpec
+from .tools import ToolContext, ToolSpec, build_tools
 from .workspace import FileWorkspace
 
 # ---------------------------------------------------------------------------
 # Run result types
 # ---------------------------------------------------------------------------
+
+_DEFAULT_TOOL_DECLARATIONS = ("info", "read", "replace", "append")
 
 
 @dataclass(slots=True)
@@ -52,6 +52,36 @@ class AgentRunResult:
     final_message: str = ""
     total_tokens: int = 0
     error: str | None = None
+
+
+@dataclass(slots=True)
+class AgentTool:
+    """One tool a behavior plugin wants, with its parameters."""
+
+    name: str
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class AgentProfile:
+    """A named agent configuration registered by a behavior plugin.
+
+    The plugin declares the tools (and their parameters), prompt, model and
+    limits; the agent plugin owns the loop, the tools themselves and the
+    context.  ``None`` means "fall back to the service default".
+    """
+
+    name: str
+    system_prompt: str = ""
+    tools: list[AgentTool] = field(default_factory=list)
+    model: str | None = None
+    max_steps: int | None = None
+    max_tool_output: int | None = None
+    max_history_chars: int | None = None
+    max_tokens: int | None = None
+    llm_extra: dict[str, Any] = field(default_factory=dict)
+    final_answer_on_limit: bool = False
+    stream: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -94,23 +124,27 @@ def _normalize_tool_calls(response: Any) -> list[dict[str, Any]]:
         else:
             continue
 
-        # Arguments may be a JSON string (OpenAI wire format)
-        if isinstance(tc_args, str):
-            try:
-                tc_args = json.loads(tc_args)
-            except (json.JSONDecodeError, TypeError):
-                tc_args = {}
-
-        # Some models double-encode the arguments: {"arguments": "<json>"}.
-        if isinstance(tc_args, dict) and len(tc_args) == 1:
-            nested = tc_args.get("arguments")
-            if isinstance(nested, str):
+        # Arguments may be JSON-encoded, and some models double- or triple-
+        # encode them ({"arguments": "\"<json>\""}).  Unwrap until a dict is
+        # reached; the loop is bounded so malformed input cannot spin.
+        for _ in range(6):
+            if isinstance(tc_args, str):
                 try:
-                    parsed = json.loads(nested)
+                    decoded = json.loads(tc_args)
                 except (json.JSONDecodeError, TypeError):
-                    parsed = None
-                if isinstance(parsed, dict):
-                    tc_args = parsed
+                    break
+                tc_args = decoded
+                continue
+            if (
+                isinstance(tc_args, dict)
+                and len(tc_args) == 1
+                and "arguments" in tc_args
+            ):
+                nested = tc_args["arguments"]
+                if isinstance(nested, (str, dict)):
+                    tc_args = nested
+                    continue
+            break
 
         result.append(
             {
@@ -158,6 +192,7 @@ class AgentService:
         self._default_system_prompt = default_system_prompt
         self._settings_getter = settings_getter
         self._sessions: dict[str, AgentSession] = {}
+        self._agents: dict[str, AgentProfile] = {}
         self._custom_tools: dict[str, ToolSpec] = {}
         self._prompt_contributors: list[Callable[[AgentSession], str]] = []
         self._lock = threading.RLock()
@@ -179,15 +214,24 @@ class AgentService:
         self,
         name: str,
         *,
+        agent: str | AgentProfile | None = None,
         system_prompt: str | None = None,
         files: Mapping[str, str | Path] | FileWorkspace | None = None,
         workspace: FileWorkspace | None = None,
-        tools: list[str] | list[ToolSpec] | None = None,
+        tools: (
+            list[str]
+            | list[AgentTool]
+            | list[tuple[str, Mapping[str, Any]]]
+            | list[ToolSpec]
+            | None
+        ) = None,
         model: str | None = None,
         max_steps: int | None = None,
         max_tool_output: int | None = None,
         max_history_chars: int | None = None,
         max_tokens: int | None = None,
+        final_answer_on_limit: bool | None = None,
+        stream: bool | None = None,
         llm_extra: Mapping[str, Any] | None = None,
         extra_instructions: Iterable[str] = (),
         parent_id: str | None = None,
@@ -197,21 +241,28 @@ class AgentService:
 
         Parameters:
             name: Human-readable label.
-            system_prompt: Overrides the default; ``None`` uses the plugin default.
+            agent: Registered profile name (or a profile object).  The profile
+                supplies prompt, tools (with their parameters), model, limits
+                and streaming; explicit keyword arguments override it.
+            system_prompt: Overrides the profile/default prompt.
             files: Logical-name → path mapping, or a pre-built FileWorkspace.
             workspace: Alias for *files* (takes precedence when both are given).
-            tools: Tool names (uses built-in defaults), ToolSpec list, or
-                   ``None`` for all four defaults.
-            model: LLM model; ``None`` uses the plugin default.
+            tools: Explicit tool declarations (names, ``(name, params)``,
+                ``AgentTool`` or ``ToolSpec``); ``None`` inherits the profile
+                or the four built-in defaults.
+            model: LLM model; ``None`` uses the profile/plugin default.
             max_steps: REPL iteration cap for this session.
-            max_tool_output: Per-tool-call output cap in characters; ``None``
-                uses the ``agent.max_tool_output`` setting.
-            max_history_chars: Cap on the tool-result characters kept in the
-                LLM payload; older results are spilled to hidden files.
+            final_answer_on_limit: When True, the last allowed iteration runs
+                without tools and asks the model for a final answer.
+            stream: Use the provider's streaming API for runs.
+            max_tool_output: Per-tool-call output cap in characters.
+            max_history_chars: Cap on tool-result characters kept in the LLM
+                payload; older results are spilled to hidden files.
             extra_instructions: Per-session lines appended after the system prompt.
             parent_id: Session to fork from (for create_subsession).
             meta: Arbitrary caller metadata.
         """
+        profile = self._resolve_agent(agent)
         sid = _new_session_id()
 
         # --- workspace ---
@@ -224,31 +275,61 @@ class AgentService:
         else:
             ws = FileWorkspace()
 
+        prompt = (
+            system_prompt
+            if system_prompt is not None
+            else (profile.system_prompt if profile else "")
+        )
+        if not prompt:
+            prompt = self._setting("agent.system_prompt", self._default_system_prompt)
+
+        extra = dict(profile.llm_extra) if profile else {}
+        extra.update(llm_extra or {})
+
         session = AgentSession(
             id=sid,
             name=name,
-            system_prompt=(
-                system_prompt
-                if system_prompt is not None
-                else self._setting("agent.system_prompt", self._default_system_prompt)
-            ),
+            agent=profile.name if profile else "",
+            system_prompt=prompt,
             workspace=ws,
             tools={},
             model=(
                 model
                 if model is not None
-                else self._setting("agent.model", self._default_model)
+                else (
+                    profile.model
+                    if profile and profile.model is not None
+                    else self._setting("agent.model", self._default_model)
+                )
             ),
             max_steps=(
                 max_steps
                 if max_steps is not None
-                else self._setting("agent.max_steps", self._default_max_steps)
+                else (
+                    profile.max_steps
+                    if profile and profile.max_steps is not None
+                    else self._setting("agent.max_steps", self._default_max_steps)
+                )
+            ),
+            final_answer_on_limit=bool(
+                final_answer_on_limit
+                if final_answer_on_limit is not None
+                else (profile.final_answer_on_limit if profile else False)
+            ),
+            stream=bool(
+                stream
+                if stream is not None
+                else (profile.stream if profile else False)
             ),
             max_tool_output=(
                 max_tool_output
                 if max_tool_output is not None
-                else self._setting(
-                    "agent.max_tool_output", self._default_max_tool_output
+                else (
+                    profile.max_tool_output
+                    if profile and profile.max_tool_output is not None
+                    else self._setting(
+                        "agent.max_tool_output", self._default_max_tool_output
+                    )
                 )
             ),
             max_history_chars=(
@@ -257,27 +338,57 @@ class AgentService:
                 else max(
                     0,
                     int(
-                        self._setting(
-                            "agent.max_history_chars",
-                            self._default_max_history_chars,
+                        (
+                            profile.max_history_chars
+                            if profile and profile.max_history_chars is not None
+                            else self._setting(
+                                "agent.max_history_chars",
+                                self._default_max_history_chars,
+                            )
                         )
                         or 0
                     ),
                 )
             ),
-            max_tokens=max(0, int(max_tokens or 0)),
-            llm_extra=dict(llm_extra or {}),
+            max_tokens=max(
+                0,
+                int(
+                    max_tokens
+                    if max_tokens is not None
+                    else ((profile.max_tokens if profile else None) or 0)
+                ),
+            ),
+            llm_extra=extra,
             extra_instructions=tuple(extra_instructions),
             parent_id=parent_id,
             meta=dict(meta or {}),
         )
 
         # --- tools ---
-        session.tools = self._resolve_tools(tools, session)
+        # ``None`` => built-in defaults; a profile with an empty tool list
+        # really means "no tools" (the instant ask agent).
+        declarations = (
+            tools
+            if tools is not None
+            else (list(profile.tools) if profile else None)
+        )
+        session.tools = self._resolve_tools(declarations, session)
 
         with self._lock:
             self._sessions[sid] = session
         return session
+
+    def _resolve_agent(
+        self, agent: str | AgentProfile | None
+    ) -> AgentProfile | None:
+        if agent is None:
+            return None
+        if isinstance(agent, AgentProfile):
+            return agent
+        profile = self.get_agent(str(agent))
+        if profile is None:
+            raise KeyError(f"agent profile {agent!r} is not registered")
+        return profile
 
     def create_subsession(
         self,
@@ -297,6 +408,7 @@ class AgentService:
             "model": parent.model,
             "max_steps": parent.max_steps,
             "max_tokens": parent.max_tokens,
+            "final_answer_on_limit": parent.final_answer_on_limit,
             "llm_extra": dict(parent.llm_extra),
             "extra_instructions": parent.extra_instructions,
             "meta": dict(parent.meta),
@@ -330,50 +442,60 @@ class AgentService:
         return session
 
     # ------------------------------------------------------------------
+    # Agent profile registry
+    # ------------------------------------------------------------------
+    def register_agent(self, profile: AgentProfile) -> None:
+        """Register (or replace) an agent profile by name."""
+
+        if not profile.name:
+            raise ValueError("agent profile needs a name")
+        with self._lock:
+            self._agents[profile.name] = profile
+
+    def unregister_agent(self, name: str) -> None:
+        with self._lock:
+            self._agents.pop(name, None)
+
+    def get_agent(self, name: str) -> AgentProfile | None:
+        with self._lock:
+            return self._agents.get(name)
+
+    # ------------------------------------------------------------------
     # Tool resolution
     # ------------------------------------------------------------------
     def _resolve_tools(
         self,
-        tools: list[str] | list[ToolSpec] | None,
+        tools: (
+            list[str]
+            | list[AgentTool]
+            | list[tuple[str, Mapping[str, Any]]]
+            | list[ToolSpec]
+            | None
+        ),
         session: AgentSession,
     ) -> dict[str, ToolSpec]:
-        max_out = session.max_tool_output
-        result: dict[str, ToolSpec] = {}
-
+        context = ToolContext(
+            workspace=session.workspace,
+            session_getter=lambda: session,
+            meta_getter=self._ctx.meta.render,
+            max_tool_output=session.max_tool_output,
+        )
+        declarations: list[Any]
         if tools is None:
-            specs = _build_default_tools(
-                workspace=session.workspace,
-                session_getter=lambda: session,
-                meta_getter=self._ctx.meta.render,
-                max_tool_output=max_out,
-            )
-            for spec in specs:
-                result[spec.name] = spec
-        elif tools and isinstance(tools[0], ToolSpec):
-            for spec in tools:
-                if isinstance(spec, ToolSpec):
-                    result[spec.name] = spec
+            declarations = [AgentTool(name) for name in _DEFAULT_TOOL_DECLARATIONS]
         else:
-            # List of tool name strings
-            requested = tuple(str(name) for name in tools)
-            default_specs = _build_default_tools(
-                workspace=session.workspace,
-                session_getter=lambda: session,
-                meta_getter=self._ctx.meta.render,
-                max_tool_output=max_out,
-                names=requested,
-            )
-            default_map = {s.name: s for s in default_specs}
-            for name in requested:
-                if name in default_map:
-                    result[name] = default_map[name]
-                elif name in self._custom_tools:
-                    result[name] = self._custom_tools[name]
+            declarations = list(tools)
 
-        # Always layer custom tools on top
+        prepared = [
+            (item.name, item.params) if isinstance(item, AgentTool) else item
+            for item in declarations
+        ]
+        result = build_tools(prepared, context)
+
+        # Custom tools are available to every session; explicit/registered
+        # built-ins win when names collide.
         for name, spec in self._custom_tools.items():
             result.setdefault(name, spec)
-
         return result
 
     # ------------------------------------------------------------------
@@ -419,6 +541,12 @@ class AgentService:
         past the model window.  Results beyond ``max_history_chars`` are spilled
         to hidden workspace files (the agent can ``read`` them again by name)
         and replaced with a short pointer.
+
+        Cache note: prefix caching matches from the start of the prompt, so
+        changing any message invalidates everything after it.  A sliding spill
+        window rewrites the oldest kept result on every step, which re-bills the
+        whole tail each time.  Keep ``max_history_chars`` at ``0`` (default)
+        unless the context window genuinely requires trimming.
         """
 
         budget = int(getattr(session, "max_history_chars", 0) or 0)
@@ -483,11 +611,14 @@ class AgentService:
         user_input: str,
         *,
         on_event: Callable[[AgentEvent], None] | None = None,
+        stream: bool | None = None,
     ) -> AgentRunResult:
         """Execute one synchronous REPL loop.
 
         Acquires the session lock; returns immediately with an error if the
-        session is already running.
+        session is already running.  *stream* overrides the session default;
+        when enabled the run emits ``agent.delta`` / ``agent.reasoning``
+        events while the provider streams.
         """
         session = self._require_session(session_id)
         acquired = session.lock.acquire(blocking=False)
@@ -497,7 +628,12 @@ class AgentService:
                 error="session is already running",
             )
         try:
-            return self._run_locked(session, user_input, on_event)
+            return self._run_locked(
+                session,
+                user_input,
+                on_event,
+                session.stream if stream is None else stream,
+            )
         finally:
             session.lock.release()
 
@@ -507,6 +643,7 @@ class AgentService:
         user_input: str,
         *,
         on_event: Callable[[AgentEvent], None] | None = None,
+        stream: bool | None = None,
     ) -> threading.Thread:
         """Execute one REPL loop on a background thread.
 
@@ -516,7 +653,7 @@ class AgentService:
         thread = threading.Thread(
             target=self.run,
             args=(session_id, user_input),
-            kwargs={"on_event": on_event},
+            kwargs={"on_event": on_event, "stream": stream},
             daemon=True,
             name=f"agent-run-{session_id[:8]}",
         )
@@ -528,6 +665,7 @@ class AgentService:
         session: AgentSession,
         user_input: str,
         on_event: Callable[[AgentEvent], None] | None,
+        use_stream: bool,
     ) -> AgentRunResult:
         # --- prepare ---
         system = self._build_system_prompt(session)
@@ -545,22 +683,42 @@ class AgentService:
             step += 1
             session.meta["step"] = step
 
+            # Last allowed step: take the tools away and ask for the answer.
+            # Otherwise a model that keeps reading files burns the whole budget
+            # and the run dies with "max_steps exceeded" even though it already
+            # has enough material to answer.  Opt-in: writing agents keep their
+            # tools on the last step.
+            final_step = (
+                bool(session.max_steps)
+                and session.final_answer_on_limit
+                and step >= session.max_steps
+            )
+
             # Build messages for the LLM (old tool results are trimmed).
             llm_messages: list[dict[str, Any]] = []
             if system:
                 llm_messages.append({"role": "system", "content": system})
             llm_messages.extend(self._payload_messages(session))
+            if final_step and tool_schemas:
+                llm_messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "工具调用次数已经用完。现在不要再调用工具，"
+                            "直接根据已有信息给出最终回答。"
+                        ),
+                    }
+                )
 
             # --- LLM call ---
             try:
-                response = self._ctx.llm.chat(
-                    profile="agent",
-                    messages=llm_messages,
-                    tools=tool_schemas if tool_schemas else None,
-                    model=session.model,
-                    temperature=0.2,
-                    max_tokens=session.max_tokens or None,
-                    extra=dict(session.llm_extra) or None,
+                response, step_reasoning = self._call_llm(
+                    session,
+                    llm_messages,
+                    None if final_step else (tool_schemas or None),
+                    step,
+                    on_event,
+                    use_stream,
                 )
             except Exception as exc:
                 self._emit(
@@ -608,7 +766,14 @@ class AgentService:
             with session.lock:
                 msg.update(assistant_msg)
 
-            self._emit("agent.message", session, step, on_event, content=content)
+            self._emit(
+                "agent.message",
+                session,
+                step,
+                on_event,
+                content=content,
+                reasoning=step_reasoning or _response_reasoning(response),
+            )
 
             if not tool_calls:
                 final_message = content
@@ -716,6 +881,69 @@ class AgentService:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _call_llm(
+        self,
+        session: AgentSession,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        step: int,
+        on_event: Callable[[AgentEvent], None] | None,
+        use_stream: bool,
+    ) -> tuple[Any, str]:
+        """One LLM round trip; returns ``(response, reasoning_text)``.
+
+        Streaming forwards every text/reasoning chunk as an event so callers
+        can display progress; the final response still carries the tool calls.
+        """
+
+        kwargs: dict[str, Any] = {
+            "profile": "agent",
+            "messages": messages,
+            "tools": tools,
+            "model": session.model,
+            "temperature": 0.2,
+            "max_tokens": session.max_tokens or None,
+            "extra": dict(session.llm_extra) or None,
+            # Conversation affinity: one id per session, so independent runs do
+            # not thrash each other's prompt cache at the gateway.
+            "session_id": session.id,
+            "parent_session_id": session.parent_id,
+        }
+        if not use_stream:
+            response = self._ctx.llm.chat(**kwargs)
+            return response, _response_reasoning(response)
+
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        response = None
+        for event in self._ctx.llm.stream(**kwargs):
+            if event.type == "text":
+                content_parts.append(event.text)
+                self._emit(
+                    "agent.delta",
+                    session,
+                    step,
+                    on_event,
+                    text=event.text,
+                    content="".join(content_parts),
+                )
+            elif event.type == "reasoning":
+                reasoning_parts.append(event.text)
+                self._emit(
+                    "agent.reasoning",
+                    session,
+                    step,
+                    on_event,
+                    text=event.text,
+                    content="".join(reasoning_parts),
+                )
+            elif event.type == "done":
+                response = event.response
+            elif event.type == "error":
+                raise event.error or RuntimeError("LLM stream failed")
+        if response is None:
+            raise RuntimeError("LLM stream ended without a response")
+        return response, "".join(reasoning_parts) or _response_reasoning(response)
     def _emit(
         self,
         event_type: str,
@@ -837,6 +1065,8 @@ class AgentPlugin(Plugin):
                 description=(
                     "保留在上下文里的工具结果字符数上限；更早的结果转存为隐藏文件"
                     "（用 read 可再读）；0 = 不限制。新建会话生效。"
+                    "注意：非 0 时会在每步改写较早的工具结果，从而击穿提示词前缀缓存，"
+                    "导致该步之后的内容全按原价重算。"
                 ),
             ),
             SettingsSpec(
@@ -886,6 +1116,8 @@ class AgentPlugin(Plugin):
         # --- event definitions ---
         for evt_name, evt_desc in [
             ("agent.run.started", "Agent run started"),
+            ("agent.delta", "Streaming text delta"),
+            ("agent.reasoning", "Streaming reasoning delta"),
             ("agent.message", "Assistant message received"),
             ("agent.tool_call", "Tool call issued"),
             ("agent.tool_result", "Tool result received"),
@@ -1068,8 +1300,22 @@ class AgentPlugin(Plugin):
             }
         ]
         if session is not None:
-            with session.lock:
+            # A running session holds its lock for the whole run (minutes for a
+            # handout job), so waiting for it would freeze the entire UI state
+            # render.  Take a best-effort snapshot instead.
+            if session.lock.acquire(timeout=0.05):
+                try:
+                    msgs = list(session.messages)
+                finally:
+                    session.lock.release()
+            else:
                 msgs = list(session.messages)
+                blocks.append(
+                    {
+                        "type": "text",
+                        "text": "（会话正在运行，消息列表可能不完整）",
+                    }
+                )
             for msg in msgs[-20:]:
                 role = msg.get("role", "?")
                 content = str(msg.get("content", ""))
@@ -1179,3 +1425,27 @@ def _safe_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _response_reasoning(response: Any) -> str:
+    """Best-effort extraction of the model's hidden reasoning text (if any).
+
+    Reasoning models expose it in the raw message body under
+    ``reasoning_content`` (DeepSeek style) or ``reasoning`` (OpenRouter
+    style); non-reasoning responses simply yield an empty string.
+    """
+
+    raw = getattr(response, "raw", None)
+    if not isinstance(raw, dict):
+        return ""
+    choices = raw.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    if not isinstance(message, dict):
+        return ""
+    for key in ("reasoning_content", "reasoning"):
+        value = message.get(key)
+        if value:
+            return str(value)
+    return ""

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,9 @@ class SJTUCatalog:
         # course_id (str) -> SJTUVideoClient
         self._video_clients: dict[str, SJTUVideoClient] = {}
         self._closed = False
+        # The course tree fetches every course concurrently, so client
+        # creation/iteration must be serialised (never held across I/O).
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -127,32 +131,35 @@ class SJTUCatalog:
         return token
 
     def _canvas_client(self) -> CanvasClient:
-        if self._closed:
-            raise InputError("catalog 已关闭")
-        if self._canvas is None:
-            self._canvas = CanvasClient(
-                base_url=self._base_url,
-                token=self._require_token(),
-                timeout_seconds=self._timeout,
-            )
-        return self._canvas
+        with self._lock:
+            if self._closed:
+                raise InputError("catalog 已关闭")
+            if self._canvas is None:
+                self._canvas = CanvasClient(
+                    base_url=self._base_url,
+                    token=self._require_token(),
+                    timeout_seconds=self._timeout,
+                )
+            return self._canvas
 
     def _video_client_for(self, course_id: str) -> SJTUVideoClient:
-        if self._closed:
-            raise InputError("catalog 已关闭")
         cid = str(course_id)
-        if cid not in self._video_clients:
-            self._video_clients[cid] = SJTUVideoClient(
-                canvas_base_url=self._base_url,
-                canvas_token=self._require_token(),
-                timeout_seconds=self._timeout,
-            )
-        return self._video_clients[cid]
+        with self._lock:
+            if self._closed:
+                raise InputError("catalog 已关闭")
+            if cid not in self._video_clients:
+                self._video_clients[cid] = SJTUVideoClient(
+                    canvas_base_url=self._base_url,
+                    canvas_token=self._require_token(),
+                    timeout_seconds=self._timeout,
+                )
+            return self._video_clients[cid]
 
     def _reset_video_client(self, course_id: str) -> SJTUVideoClient:
         """Force a fresh video client (e.g. after auth error)."""
         cid = str(course_id)
-        old = self._video_clients.pop(cid, None)
+        with self._lock:
+            old = self._video_clients.pop(cid, None)
         if old is not None:
             try:
                 old.close()
@@ -323,8 +330,10 @@ class SJTUCatalog:
 
         Returns ``(token, headers)``.
         """
-        # Try existing cached clients first
-        for vc in self._video_clients.values():
+        # Try existing cached clients first (snapshot: workers may add more).
+        with self._lock:
+            cached_clients = list(self._video_clients.values())
+        for vc in cached_clients:
             if vc.video_token:
                 token = vc.video_token
                 headers = self._live_headers(token)
@@ -495,19 +504,21 @@ class SJTUCatalog:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        self._closed = True
-        if self._canvas is not None:
+        with self._lock:
+            self._closed = True
+            canvas, self._canvas = self._canvas, None
+            clients = list(self._video_clients.values())
+            self._video_clients.clear()
+        if canvas is not None:
             try:
-                self._canvas.close()
+                canvas.close()
             except Exception:
                 pass
-            self._canvas = None
-        for vc in list(self._video_clients.values()):
+        for vc in clients:
             try:
                 vc.close()
             except Exception:
                 pass
-        self._video_clients.clear()
 
     def __enter__(self) -> "SJTUCatalog":
         return self

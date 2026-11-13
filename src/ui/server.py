@@ -19,6 +19,7 @@ from starlette.background import BackgroundTask
 
 from config import SHUTDOWN_TIMEOUT
 from core.runtime import Runtime
+from ui.auth import COOKIE_NAME as AUTH_COOKIE, install as install_auth
 
 logger = logging.getLogger("lecture_agent.server")
 STATIC_DIR = Path(__file__).with_name("static")
@@ -76,23 +77,27 @@ class _Broadcaster:
             self._clients.discard(ws)
 
     def broadcast(self, reason: str = "") -> None:
+        self.send({"type": "refresh", "reason": reason})
+
+    def send(self, payload: dict[str, Any]) -> None:
+        """Send one JSON payload to every connected client."""
         if self._loop is None:
             return
         with self._lock:
             if not self._clients:
                 return
         try:
-            asyncio.run_coroutine_threadsafe(self._broadcast(reason), self._loop)
+            asyncio.run_coroutine_threadsafe(self._send(payload), self._loop)
         except RuntimeError:
             pass
 
-    async def _broadcast(self, reason: str) -> None:
+    async def _send(self, payload: dict[str, Any]) -> None:
         with self._lock:
             clients = list(self._clients)
         dead: list[WebSocket] = []
         for ws in clients:
             try:
-                await ws.send_json({"type": "refresh", "reason": reason})
+                await ws.send_json(payload)
             except Exception:  # noqa: BLE001 - client disconnected
                 dead.append(ws)
         if dead:
@@ -153,14 +158,27 @@ def create_app(runtime: Runtime) -> FastAPI:
             lambda event: broadcaster.broadcast(event.get("reason", "")),
             plugin_id="server",
         )
+        notify_subscription = runtime.bus.on(
+            "ui.notify",
+            lambda event: broadcaster.send(
+                {
+                    "type": "notify",
+                    "topic": event.get("topic", ""),
+                    "payload": event.get("payload") or {},
+                }
+            ),
+            plugin_id="server",
+        )
         if owns_runtime:
             runtime.start()
         app.state.runtime = runtime
         app.state.ui_subscription = subscription
+        app.state.ui_notify_subscription = notify_subscription
         try:
             yield
         finally:
             subscription.cancel()
+            notify_subscription.cancel()
             client: httpx.AsyncClient | None = getattr(app.state, "media_client", None)
             if client is not None:
                 try:
@@ -172,6 +190,7 @@ def create_app(runtime: Runtime) -> FastAPI:
                 _stop_runtime(runtime)
 
     app = FastAPI(title="Lecture Agent", version="0.1.0", lifespan=lifespan)
+    auth_store = install_auth(app, runtime.config.data_dir)
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -292,6 +311,10 @@ def create_app(runtime: Runtime) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket) -> None:
+        if auth_store.check(ws.cookies.get(AUTH_COOKIE, "")) is None:
+            # Same gate as the HTTP routes: no session, no socket.
+            await ws.close(code=4401)
+            return
         await ws.accept()
         broadcaster.add(ws)
         try:

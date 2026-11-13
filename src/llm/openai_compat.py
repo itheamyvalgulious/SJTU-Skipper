@@ -138,6 +138,47 @@ def _serialise_tool_defs(tools: list[ToolDef]) -> list[dict[str, Any]]:
     ]
 
 
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_usage(raw: Any) -> Usage:
+    """Parse ``usage`` into ``Usage``, including prompt-cache reads.
+
+    Accepted shapes, in order of precedence:
+
+    * OpenAI: ``prompt_tokens_details.cached_tokens``
+    * DeepSeek direct: ``prompt_cache_hit_tokens``
+    * OpenCode Console: ``opencode.tokens.cache_read``
+    """
+
+    if not isinstance(raw, dict):
+        return Usage()
+    prompt = _as_int(raw.get("prompt_tokens"))
+    completion = _as_int(raw.get("completion_tokens"))
+    total = _as_int(raw.get("total_tokens"))
+
+    details = raw.get("prompt_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    if cached is None:
+        cached = raw.get("prompt_cache_hit_tokens")
+    if cached is None:
+        opencode = raw.get("opencode")
+        tokens = opencode.get("tokens") if isinstance(opencode, dict) else None
+        if isinstance(tokens, dict):
+            cached = tokens.get("cache_read")
+
+    return Usage(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=total or prompt + completion,
+        cached_tokens=_as_int(cached),
+    )
+
+
 def _build_retry_delay(
     attempt: int, policy: RetryPolicy, retry_after: float | None
 ) -> float:
@@ -209,6 +250,38 @@ class OpenAICompatibleProvider:
             self.config = config
             self._client = self._make_client(config)
             self._retired.append(old)
+
+    def _session_headers(self, request: ChatRequest) -> dict[str, str]:
+        """Per-request conversation-affinity headers (OpenCode Go).
+
+        OpenCode's own client sends the same set for the root conversation id:
+        the gateway pins one conversation to one backend so the upstream prompt
+        cache is reused.  Only emitted for OpenCode-style endpoints; a generic
+        OpenAI-compatible endpoint gets no extra headers.
+
+        Note: ``User-Agent`` is deliberately left to the HTTP client.  The Go
+        docs ask clients to identify themselves, but inventing a UA the gateway
+        does not recognise is worse than the httpx default.
+        """
+
+        session_id = (request.session_id or "").strip()
+        if not session_id:
+            return {}
+        if not any(key.lower() == "x-opencode-session" for key in self.config.extra_headers):
+            return {}
+
+        root = (request.parent_session_id or session_id).strip()
+        headers = {
+            "x-opencode-session": root,
+            "x-session-affinity": root,
+            "X-Session-Id": root,
+            "x-opencode-session-id": session_id,
+        }
+        parent = (request.parent_session_id or "").strip()
+        if parent:
+            headers["x-opencode-parent-session-id"] = parent
+            headers["x-parent-session-id"] = parent
+        return headers
 
     # ------------------------------------------------------------------
     # public API
@@ -295,6 +368,10 @@ class OpenAICompatibleProvider:
             "messages": [_serialise_message(m) for m in request.messages],
             "stream": stream,
         }
+        if stream:
+            # Without this the final chunk carries no usage, so cache reads and
+            # token counts are invisible.  ``extra`` may still override it.
+            payload.setdefault("stream_options", {"include_usage": True})
         if request.tools:
             payload["tools"] = _serialise_tool_defs(request.tools)
         if request.tool_choice is not None:
@@ -322,9 +399,11 @@ class OpenAICompatibleProvider:
         return payload
 
     def _chat_once(
-        self, payload: dict[str, Any], _request: ChatRequest
+        self, payload: dict[str, Any], request: ChatRequest
     ) -> ChatResponse:
-        response = self._client.post("/chat/completions", json=payload)
+        response = self._client.post(
+            "/chat/completions", json=payload, headers=self._session_headers(request)
+        )
         if response.status_code in (401, 403):
             raise LLMAuthError(
                 f"LLM auth failed ({response.status_code}): {response.text[:500]}"
@@ -354,14 +433,20 @@ class OpenAICompatibleProvider:
         return _parse_non_streaming_response(body)
 
     def _stream_once(
-        self, payload: dict[str, Any], _request: ChatRequest
+        self, payload: dict[str, Any], request: ChatRequest
     ) -> Iterator[StreamEvent]:
         tool_call_acc: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        usage_raw: dict[str, Any] = {}
         model = ""
-
-        with self._client.stream("POST", "/chat/completions", json=payload) as resp:
+        with self._client.stream(
+            "POST",
+            "/chat/completions",
+            json=payload,
+            headers=self._session_headers(request),
+        ) as resp:
             if resp.status_code in (401, 403):
                 raise LLMAuthError(
                     f"LLM auth failed ({resp.status_code}): {resp.text[:500]}"
@@ -390,6 +475,11 @@ class OpenAICompatibleProvider:
                     except json.JSONDecodeError:
                         continue
                     model = chunk.get("model", model)
+                    chunk_usage = chunk.get("usage")
+                    if isinstance(chunk_usage, dict):
+                        # Usage lands on the final chunk, whose ``choices`` is
+                        # usually empty — capture it before the early exit.
+                        usage_raw = chunk_usage
                     choices = chunk.get("choices", [])
                     if not choices:
                         continue
@@ -402,6 +492,14 @@ class OpenAICompatibleProvider:
                         text = delta["content"]
                         content_parts.append(text)
                         yield StreamEvent(type="text", text=text)
+
+                    # hidden reasoning (DeepSeek: reasoning_content,
+                    # OpenRouter: reasoning) — forwarded so callers can show
+                    # it live and log it verbatim.
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    if reasoning:
+                        reasoning_parts.append(str(reasoning))
+                        yield StreamEvent(type="reasoning", text=str(reasoning))
 
                     # tool calls (incremental)
                     for tc_delta in (delta.get("tool_calls") or []):
@@ -449,13 +547,20 @@ class OpenAICompatibleProvider:
                         a["arguments_parsed"] = json.loads(a["arguments"]) if a["arguments"] else {}
                     except json.JSONDecodeError:
                         a["arguments_parsed"] = {}
-                usage_raw = {}
                 response = ChatResponse(
                     content=content,
                     tool_calls=tool_calls,
                     finish_reason=finish_reason,
-                    usage=Usage(),
-                    raw={},
+                    usage=_parse_usage(usage_raw),
+                    raw={
+                        "choices": [
+                            {
+                                "message": {
+                                    "reasoning_content": "".join(reasoning_parts)
+                                }
+                            }
+                        ]
+                    },
                     model=model,
                 )
                 yield StreamEvent(type="done", response=response)
@@ -508,12 +613,7 @@ class OpenAICompatibleProvider:
 
 def _parse_non_streaming_response(body: dict[str, Any]) -> ChatResponse:
     model = body.get("model", "")
-    usage_raw = body.get("usage", {})
-    usage = Usage(
-        prompt_tokens=usage_raw.get("prompt_tokens", 0),
-        completion_tokens=usage_raw.get("completion_tokens", 0),
-        total_tokens=usage_raw.get("total_tokens", 0),
-    )
+    usage = _parse_usage(body.get("usage"))
     choices = body.get("choices", [])
     if not choices:
         return ChatResponse(content="", usage=usage, raw=body, model=model)

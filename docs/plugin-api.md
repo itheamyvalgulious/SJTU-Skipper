@@ -168,8 +168,19 @@ Block：
 ], "action": "input.play_url", "submit_label": "开始"}
 {"type": "log", "lines": [{"time": "12:00", "text": "..."}]}
 {"type": "image", "src": "/api/artifacts/<session>/vlm/000030-000060.jpg"}
-{"type": "tabs", "tabs": [{"title": "知识", "active": True, "blocks": [...]}]}
+{"type": "tabs", "tabs": [{"title": "知识", "active": True, "blocks": [...],
+                          "meta": {"doc_key": "knowledge", "path": "...", "owner": "summarize",
+                                   "selection_actions": [...]}}]}
 {"type": "progress", "value": 0.42, "label": "处理进度"}
+# 布尔开关：切换后以 {"enabled": true/false} 调用 action
+{"type": "switch", "label": "实时总结", "checked": True,
+ "action": "instant-summarize.toggle", "hint": "关闭后不再累积内容"}
+# 内联问答对（reader 渲染成可折叠、可删除的独立组件）
+{"type": "qa", "id": "qa-1a2b3c4d", "ts": "2026-11-10 14:03", "status": "done",
+ "intensity": "research", "collapsed": True,
+ "question": "...", "answer": "...", "question_html": "...", "answer_html": "...",
+ "path": "/data/sessions/<sid>/notes/note_knowledge.md",
+ "delete_action": "reader.qa_delete", "collapse_action": "reader.qa_collapse"}
 # player：两路视频（m3u8 走 hls.js，flv 走 mpegts.js，其余原生播放）
 {"type": "player", "sources": [{"key": "main", "label": "课堂", "src": "https://.../main.m3u8"},
                               {"key": "screen", "label": "屏幕", "src": "...", "muted": True}],
@@ -197,6 +208,49 @@ def handler(payload: dict):
 ```
 
 返回 `refresh=True` 会让前端重新拉取 state；长任务请放到后台线程，立即返回。
+
+### 6.1 reader：选中菜单与内联问答
+
+```python
+reader = ctx.require("reader")
+
+# owner 标记“这一页的文档是我给的”，决定选中菜单里出现谁注册的页面级项
+page_id = reader.show(title="课堂讲义", docs=docs, active="knowledge",
+                      page_key=session_id, owner="my-plugin")
+
+# 页面级菜单项：只在“这一页 + 这个 owner”的文档上出现
+reader.register_selection_action(
+    page_id,
+    {"id": "my.ask", "label": "提问", "icon": "💬", "kind": "prompt",
+     "action": "my.ask", "placeholder": "针对选中的内容提问"},
+    owner="my-plugin",
+)
+
+# 全局菜单项：任何笔记页都出现（ask 插件就是这么注册“提问”的）
+reader.register_selection_action(
+    "",
+    {"id": "ask.ask", "label": "提问", "kind": "prompt", "action": "ask.ask",
+     "intensities": [{"value": "instant", "label": "快速"},
+                      {"value": "research", "label": "研究"}]},
+    owner="ask",
+)
+
+# 问答块由 reader 做确定性写入；插件只负责产生回答文本
+created = reader.qa_begin(path, question="为什么？", selection=selection,
+                          intensity="research")
+ctx = reader.qa_context(path, created["id"], before_words=2000, after_words=2000,
+                        history_words=1000)
+answer = my_agent_answer(...)          # 只读 agent，不写文件
+reader.qa_finish(path, created["id"], answer=answer, status="done",
+                 collapsed=True)       # collapsed 持久化到块 meta
+reader.qa_set_collapsed(path, created["id"], False)
+```
+
+- `kind="prompt"`：前端先弹输入框（有 `intensities` 时带强度选择），提交时 values 里带 `{doc_key, path, selection, question, intensity, page_id}`。
+- `qa_begin` 在选中段落下方插入 `pending` 块（问题立刻可见）；`qa_finish` 把回答写回同一块，并把 `status` / `collapsed` 写进 meta。
+- 折叠由 `reader.qa_collapse`（values: `{path, id, collapsed}`，返回 `refresh=false`）完成；删除由 `reader.qa_delete`（values: `{path, id}`）完成，插件不用管。
+- 页面级项只按当前文档的 owner 暴露；全局项不看 owner，由 action 自己判断文档是否合法。
+- 流式过程中的实时展示走 `ctx.ui.notify("qa.live", payload)`（WebSocket `{"type":"notify","topic":"qa.live"}`），payload 里带 `path` / `id` / `phase` / `reasoning_delta` / `text_delta` / `tools` / `elapsed`；结束时带 `status` / `answer_html` / `collapsed`，前端原地 patch，不触发整页刷新。
 
 Web 层还预注册了通用 action `ui.open_page`，插件可以在按钮里这样用：
 
@@ -239,18 +293,36 @@ settings.set("my.api_key", "new")
 ```python
 agent = ctx.require("agent")          # llm-agent 插件注册的服务
 
+# 方式一：先注册具名 profile，再从 profile 创建会话
+from plugins.agent import AgentProfile, AgentTool
+
+agent.register_agent(AgentProfile(
+    name="my.reader",
+    system_prompt="你是课堂助手。",
+    tools=[AgentTool("read", {"max_lines": 50}), AgentTool("search", {"max_hits": 100})],
+    max_steps=8,
+    max_tokens=32000,
+    final_answer_on_limit=True,
+    stream=True,                       # 边走流边发 agent.delta / agent.reasoning
+))
+
 session = agent.create_session(
     name="my-agent",
-    system_prompt="你是课堂助手。",
+    agent="my.reader",
     files={"notes.md": "/path/notes.md"},
-    tools=["info", "read", "replace", "append", "write"],  # write 为可选：整文件覆盖
-    max_steps=8,
-    max_tool_output=24000,  # 单次 read 输出上限
-    max_history_chars=0,    # 上下文里保留的工具结果上限；更早的转存为隐藏文件
     extra_instructions=["只修改 notes.md"],
 )
 
-result = agent.run(session.id, "请总结这一段", on_event=lambda e: print(e))
+# 方式二：创建时直接声明工具与参数（agent 插件负责构建工具）
+session = agent.create_session(
+    name="one-shot",
+    system_prompt="...",
+    files={"notes.md": "/path/notes.md"},
+    tools=[("read", {"max_lines": 50}), ("search", {})],
+    max_steps=8,
+)
+
+result = agent.run(session.id, "请总结这一段", on_event=lambda e: print(e), stream=True)
 sub = agent.create_subsession(session.id, name="child", system_prompt="...")
 agent.register_tool(ToolSpec(...))
 agent.add_prompt_contributor(lambda session: "全局补充说明")
@@ -259,9 +331,13 @@ agent.add_prompt_contributor(lambda session: "全局补充说明")
 工具契约：
 
 - `info()`：无参数，返回课程/日期/会话/文件/流状态。
-- `read(file, l, r)`：1-based 行号；`l` 或 `r` 为 `-1` 表示该侧无界。
+- `read(file, l, r)`：1-based 行号；`l` 或 `r` 为 `-1` 表示该侧无界；工厂参数 `max_lines` 限制单次返回行数。
+- `search(keywords, file=?)`：返回命中的 `(行号, 该行内容)` 列表；`file` 省略时查全部可读文件；工厂参数 `max_hits` 限制命中数。
 - `replace(file, old_str, new_str)`：唯一替换；0 次或多次都报错，多次时报告出现次数与行号。
 - `append(file, text)`：在文件末尾新行追加。
+- `write(file, text)`：整文件覆盖（默认不提供，需显式声明）。
+
+流式运行的 `on_event` 会依次收到 `agent.run.started`、`agent.delta`（正文增量）、`agent.reasoning`（思考增量）、`agent.tool_call`、`agent.tool_result`、`agent.message`（该步完整正文 + `reasoning`）、`agent.run.finished` / `agent.error`。
 
 ## 9. 文件与数据目录
 

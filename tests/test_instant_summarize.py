@@ -456,7 +456,8 @@ def test_ui_state(harness: tuple) -> None:
     snap = runtime.ui.snapshot()
     assert snap["tabs"]["note"] == "right"
     assert snap["items"]["instant-summarize.notes"] == "note"
-    assert "instant-summarize.now" in snap["actions"]
+    assert "instant-summarize.toggle" in snap["actions"]
+    assert "instant-summarize.now" not in snap["actions"]
     assert "instant-summarize.read" in snap["actions"]
     assert "reader:main" in snap["pages"]
     assert "instant-summarize:notes" not in snap["pages"]
@@ -468,6 +469,16 @@ def test_ui_state(harness: tuple) -> None:
         if item["id"] == "instant-summarize.notes"
     )
     assert item["blocks"], "note toolbox item rendered empty blocks"
+    switch = next(block for block in item["blocks"] if block["type"] == "switch")
+    assert switch["checked"] is True
+    assert switch["action"] == "instant-summarize.toggle"
+    # The manual "立刻总结" button is gone: the lecture-time control is a switch.
+    assert not any(
+        button.get("label") == "立即总结"
+        for block in item["blocks"]
+        if block["type"] == "buttons"
+        for button in block.get("buttons", [])
+    )
 
     sid = runtime.hub.current.session_id
     result = runtime.ui.dispatch_action("instant-summarize.read", {"doc": "gossip"})
@@ -481,45 +492,79 @@ def test_ui_state(harness: tuple) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. summarize.now action
+# 10. The live switch: off means nothing is accumulated, ever
 # ---------------------------------------------------------------------------
 
 
-def test_summarize_now_action(harness: tuple) -> None:
+def test_switch_off_stops_accumulation(harness: tuple) -> None:
     runtime, settings, agent = harness
     _start_session(runtime)
+
+    result = runtime.ui.dispatch_action("instant-summarize.toggle", {"enabled": False})
+    assert result.ok
+    assert settings.get("instant-summarize.enabled") is False
 
     streams = runtime.hub.current
-    # Append content below trigger threshold.
-    streams.transcript.append("短文本。" * 10)  # ~40 chars, < trigger
+    streams.transcript.append("今天我们来讨论代数拓扑。" * 60)
     runtime.bus.flush(2.0)
+    time.sleep(0.3)
+    assert agent.run_calls == [], "a disabled instant-summarize must not run"
 
-    # summarize.now should force a summary.
-    result = runtime.ui.dispatch_action("instant-summarize.now", {})
+    # The backlog is dropped, not banked: turning the switch back on starts
+    # from that moment instead of dumping everything that happened while off.
+    result = runtime.ui.dispatch_action("instant-summarize.toggle", {"enabled": True})
     assert result.ok
-    assert "总结" in result.message
+    assert settings.get("instant-summarize.enabled") is True
+    runtime.bus.flush(1.0)
+    time.sleep(0.3)
+    assert agent.run_calls == [], "the off-period content must not be summarized"
 
-    assert _wait_for_agent_runs(agent, 1), (
-        f"instant-summarize.now should trigger agent; runs={len(agent.run_calls)}"
-    )
+    streams.transcript.append("新的课堂内容。" * 100)
+    runtime.bus.flush(2.0)
+    assert _wait_for_agent_runs(agent, 1), "accumulation must resume after switching on"
+
+
+def test_switch_off_skips_final_flush(harness: tuple) -> None:
+    runtime, settings, agent = harness
+    sid = _start_session(runtime)
+    settings.set("instant-summarize.enabled", False)
+
+    streams = runtime.hub.current
+    streams.transcript.append("这段内容不应该被总结。" * 60)
+    runtime.bus.flush(1.0)
+
+    runtime.hub.end_session("test")
+    runtime.bus.flush(2.0)
+    time.sleep(0.3)
+    assert agent.run_calls == [], "session end must not flush while switched off"
+
+    notes_dir = runtime.data_dir / "sessions" / sid / "notes"
+    for fname in INSTANT_NOTE_FILES:
+        content = (notes_dir / fname).read_text("utf-8")
+        assert "Fake summary" not in content
 
 
 # ---------------------------------------------------------------------------
-# 11. summarize.now with empty streams
+# 11. The switch is a boolean setting and the toolbox renders it
 # ---------------------------------------------------------------------------
 
 
-def test_summarize_now_empty(harness: tuple) -> None:
+def test_switch_setting_and_render(harness: tuple) -> None:
     runtime, settings, agent = harness
     _start_session(runtime)
 
-    # No content appended – summarize.now should return gracefully.
-    result = runtime.ui.dispatch_action("instant-summarize.now", {})
-    assert result.ok
-    assert "暂无" in result.message
+    assert settings.get("instant-summarize.enabled") is True
+    settings.set("instant-summarize.enabled", False)
 
-    # No agent run should have happened.
-    assert len(agent.run_calls) == 0
+    item = next(
+        item
+        for tab in runtime.ui.state()["right_tabs"]
+        for item in tab["toolbox"]
+        if item["id"] == "instant-summarize.notes"
+    )
+    switch = next(block for block in item["blocks"] if block["type"] == "switch")
+    assert switch["checked"] is False
+    assert "不累积" in switch["hint"]
 
 
 # ---------------------------------------------------------------------------

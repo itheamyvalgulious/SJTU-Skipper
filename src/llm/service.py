@@ -8,6 +8,7 @@ stays decoupled from any particular settings plugin.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Union
 
@@ -22,6 +23,7 @@ from .types import (
     StreamEvent,
     TextPart,
     ToolDef,
+    Usage,
 )
 
 logger = logging.getLogger("lecture_agent.llm.service")
@@ -122,9 +124,56 @@ class LLMService:
     default_provider: str = "openai"
     on_event: Callable[[str, dict[str, Any]], None] | None = None
     registry: ProviderRegistry = field(default_factory=ProviderRegistry)
+    usage_by_model: dict[str, dict[str, int]] = field(default_factory=dict)
+    """Per-model token totals: ``requests``, ``input_tokens``, ``output_tokens``,
+    ``cache_read_tokens``.  Counted, not priced: pricing depends on the plan and
+    peak hours, so it is left to a later accounting layer."""
+    _usage_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
 
     def register_provider(self, name: str, provider: Provider) -> None:
         self.registry.register(name, provider)
+
+    def _record_usage(self, model: str, usage: Usage) -> dict[str, int]:
+        """Add one response to the per-model totals and log the request line."""
+
+        key = model or "unknown"
+        with self._usage_lock:
+            totals = self.usage_by_model.setdefault(
+                key,
+                {
+                    "requests": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                },
+            )
+            totals["requests"] += 1
+            totals["input_tokens"] += usage.prompt_tokens
+            totals["output_tokens"] += usage.completion_tokens
+            totals["cache_read_tokens"] += getattr(usage, "cached_tokens", 0)
+            snapshot = dict(totals)
+
+        logger.info(
+            "llm usage model=%s input=%d output=%d cache_read=%d | "
+            "total input=%d output=%d cache_read=%d",
+            key,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            getattr(usage, "cached_tokens", 0),
+            snapshot["input_tokens"],
+            snapshot["output_tokens"],
+            snapshot["cache_read_tokens"],
+        )
+        return snapshot
+
+    def usage_snapshot(self) -> dict[str, dict[str, int]]:
+        """Copy of the per-model token totals (safe to hand to the UI)."""
+
+        with self._usage_lock:
+            return {model: dict(totals) for model, totals in self.usage_by_model.items()}
+
     def _provider_for(self, config: ProviderConfig) -> Provider:
         provider = self.registry.require(config.provider or self.default_provider)
         reconfigure = getattr(provider, "reconfigure", None)
@@ -148,6 +197,8 @@ class LLMService:
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        parent_session_id: str | None = None,
         **kwargs: Any,
     ) -> ChatResponse:
         config = self.config_for(profile)
@@ -164,6 +215,8 @@ class LLMService:
             response_format=response_format,
             extra=dict(extra or {}),
             stream=False,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
         )
 
         if self.on_event:
@@ -173,6 +226,7 @@ class LLMService:
                 "message_count": len(coerced),
                 "tool_count": len(request.tools),
                 "stream": False,
+                "session_id": session_id,
             })
 
         try:
@@ -182,6 +236,7 @@ class LLMService:
                 self.on_event("llm.error", {"profile": profile, "phase": "chat"})
             raise
 
+        totals = self._record_usage(response.model or request.model or "", response.usage)
         if self.on_event:
             self.on_event("llm.response", {
                 "profile": profile,
@@ -189,11 +244,14 @@ class LLMService:
                 "finish_reason": response.finish_reason,
                 "content_len": len(response.content),
                 "tool_calls": len(response.tool_calls),
+                "session_id": session_id,
                 "usage": {
                     "prompt_tokens": response.usage.prompt_tokens,
                     "completion_tokens": response.usage.completion_tokens,
                     "total_tokens": response.usage.total_tokens,
+                    "cached_tokens": response.usage.cached_tokens,
                 },
+                "usage_totals": totals,
             })
         return response
 
@@ -209,6 +267,8 @@ class LLMService:
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        parent_session_id: str | None = None,
         **kwargs: Any,
     ) -> Iterator[StreamEvent]:
         config = self.config_for(profile)
@@ -225,6 +285,8 @@ class LLMService:
             response_format=response_format,
             extra=dict(extra or {}),
             stream=True,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
         )
 
         if self.on_event:
@@ -234,10 +296,16 @@ class LLMService:
                 "message_count": len(coerced),
                 "tool_count": len(request.tools),
                 "stream": True,
+                "session_id": session_id,
             })
 
         try:
             for event in provider.stream(request):
+                if event.type == "done" and event.response is not None:
+                    self._record_usage(
+                        event.response.model or request.model or "",
+                        event.response.usage,
+                    )
                 if event.type == "error" and self.on_event:
                     self.on_event("llm.error", {
                         "profile": profile,
@@ -298,4 +366,5 @@ class LLMService:
             "provider": self.default_provider,
             "providers": self.registry.names(),
             "default_provider": self.default_provider,
+            "usage": self.usage_snapshot(),
         }

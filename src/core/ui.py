@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Literal
+from typing import Any, Callable, Iterable, Literal, Mapping
 
 from html import escape as html_escape
 
@@ -234,8 +234,14 @@ class UIManager:
     a block list (or a string/Markdown); the web layer serialises ``state()``.
     """
 
-    def __init__(self, *, on_change: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        on_change: Callable[[str], None] | None = None,
+        on_notify: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> None:
         self._on_change = on_change
+        self._on_notify = on_notify
         self._status_provider: Callable[[], dict[str, Any]] | None = None
         self._task_providers: list[Callable[[], list[dict[str, Any]]]] = []
         self._lock = threading.RLock()
@@ -527,6 +533,18 @@ class UIManager:
                 self._on_change(reason)
             except Exception:  # pragma: no cover - notification is best effort
                 logger.exception("UI change listener failed")
+
+    def notify(self, topic: str, payload: Mapping[str, Any] | None = None) -> None:
+        """Push a transient message to connected clients.
+
+        Unlike :meth:`refresh` this does not invalidate the state: the browser
+        patches the named target in place, so streaming output never causes a
+        full-page re-render.
+        """
+
+        if self._on_notify is None:
+            return
+        self._on_notify(str(topic), dict(payload or {}))
 
     def set_status_provider(self, provider: Callable[[], dict[str, Any]] | None) -> None:
         self._status_provider = provider
