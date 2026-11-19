@@ -39,8 +39,7 @@ class AppConfig:
     enable_input: bool = True
     enable_stt: bool = True
     enable_vlm: bool = True
-    enable_summarize: bool = True
-    enable_instant_summarize: bool = True
+    enable_notes: bool = True
     config_file: Path | None = None
 
     def resolve(self) -> "AppConfig":
@@ -96,12 +95,7 @@ def load_config(
         cfg.enable_input = _coerce_bool(section.get("enable_input"), cfg.enable_input)
         cfg.enable_stt = _coerce_bool(section.get("enable_stt"), cfg.enable_stt)
         cfg.enable_vlm = _coerce_bool(section.get("enable_vlm"), cfg.enable_vlm)
-        cfg.enable_summarize = _coerce_bool(
-            section.get("enable_summarize"), cfg.enable_summarize
-        )
-        cfg.enable_instant_summarize = _coerce_bool(
-            section.get("enable_instant_summarize"), cfg.enable_instant_summarize
-        )
+        cfg.enable_notes = _coerce_bool(section.get("enable_notes"), cfg.enable_notes)
         cfg.config_file = candidate
 
     if data_dir is not None:

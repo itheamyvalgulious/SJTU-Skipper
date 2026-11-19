@@ -78,33 +78,31 @@ LLM 模型和角色配置保存在 `data/agent/settings.json` 的 `llm.models` �
         ├──────────────► STT 插件 ──► TextStream(transcript)
         └──────────────► VLM 插件 ──► TextStream(visual)
                                       │
-行为层（llm-agent / summarize / instant-summarize / 自定义插件）
+行为层（llm-agent / notes / 自定义插件）
   事件总线、时钟、服务注册、UI、项目 OMP SDK 运行时
                                       │
 Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 ```
 
 - **流**：音频是 PCM s16le；视频是 JPEG 帧；文字是不断增长的 `TextItem` 列表。`len(stream)` 是整秒/片段数，精确时长用 `stream.duration`。
-- **事件**：`clock.tick`、`session.*`、`stream.appended`、`settings.changed`、`agent.*`、`stt.*`、`vlm.*`、`summarize.*`、`instant-summarize.*`、`input.*`。
+- **事件**：`clock.tick`、`session.*`、`stream.appended`、`settings.changed`、`agent.*`、`stt.*`、`vlm.*`、`notes.*`、`input.*`．
 - **插件**：`id` + `requires` 组成 DAG，拓扑序加载；插件之间只通过 `ctx.services` 调用。
 - **LLM 层**：Python 通过私有 JSON Lines IPC 调用一个常驻 Bun 进程．OMP SDK 管理模型请求、工具执行、会话与上下文压缩．取消会终止实际模型流和工具执行．
 - **UI**：声明式 block + action；插件不写前端代码。
 
 内置插件：
 
-| 插件 ID             | 作用                                                                                                    |
-| ------------------- | ------------------------------------------------------------------------------------------------------- |
-| `settings`          | 设置注册、持久化、设置页                                                                                |
-| `llm`               | 项目 Bun 运行时、模型角色配置与提供方鉴权                                                               |
-| `input`             | Canvas/SJTU 录播、直播、ffmpeg 源                                                                       |
-| `stt`               | 供应商适配：兼容 HTTP/WebSocket 服务（流式临时文字、定稿）或 Google Cloud Speech-to-Text v2（批量窗口） |
-| `vlm`               | 视频流 -> 融合板书 -> 文字流                                                                            |
-| `llm-agent`         | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权                                      |
-| `notes-pipeline`    | 按来源完成位置整理片段，汇总文稿后审阅，通过后发布笔记                                                  |
-| `summarize`         | 笔记页面与课后 direct/fill/skip 策略                                                                    |
-| `ask`               | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存                                     |
-| `reader`            | 通用 Markdown 阅读页（每门课程一页），持有选中菜单与内联问答块                                          |
-| `instant-summarize` | 分段笔记页面与预览开关，直播和录播均可使用                                                              |
+| 插件 ID     | 作用                                                                                                    |
+| ----------- | ------------------------------------------------------------------------------------------------------- |
+| `settings`  | 设置注册、持久化、设置页                                                                                |
+| `llm`       | 项目 Bun 运行时、模型角色配置与提供方鉴权                                                               |
+| `input`     | Canvas/SJTU 录播、直播、ffmpeg 源                                                                       |
+| `stt`       | 供应商适配：兼容 HTTP/WebSocket 服务（流式临时文字、定稿）或 Google Cloud Speech-to-Text v2（批量窗口） |
+| `vlm`       | 视频流 -> 融合板书 -> 文字流                                                                            |
+| `llm-agent` | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权                                      |
+| `notes`     | 整理分段笔记、汇总与审阅，提供笔记页面及课后 direct/fill/skip 策略                                      |
+| `ask`       | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存                                     |
+| `reader`    | 通用 Markdown 阅读页（每门课程一页），持有选中菜单与内联问答块                                          |
 
 分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制笔记 agent 并发数．分段预览标为未审阅；`note_review` 统一检查完整笔记的来源覆盖与正确性．
 
@@ -123,7 +121,7 @@ src/                              # 课堂 Agent
 ├── core/                         # 流、事件、插件、服务、UI、runtime
 ├── agent_runtime/                # Bun OMP SDK、IPC、配置、鉴权与授权工作区
 ├── llm/                          # Python 角色请求与用量适配
-├── plugins/                      # settings/llm/input/stt/vlm/agent/summarize/instant_summarize
+├── plugins/                      # settings/llm/input/stt/vlm/agent/notes
 ├── integrations/                 # vendored SJTU Canvas/视频客户端
 └── ui/                           # FastAPI + 静态前端
 tests/

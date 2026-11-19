@@ -250,15 +250,15 @@ def create_app(runtime: Runtime) -> FastAPI:
         page = request.page
         try:
             notes = page.startswith("reader:notes:") and page.endswith(
-                (":summarize", ":instant-summarize")
+                (":notes", ":chunk-notes")
             )
-            logs = page.startswith("summarize:logs:")
+            logs = page.startswith("notes:logs:")
             sid = ""
             if notes:
                 kind = page.rsplit(":", 1)[1]
                 sid = page.removeprefix("reader:notes:").removesuffix(f":{kind}")
             elif logs:
-                sid = page.removeprefix("summarize:logs:")
+                sid = page.removeprefix("notes:logs:")
             if notes or logs:
                 if not sid or Path(sid).name != sid or sid in {".", ".."}:
                     raise ValueError("Invalid session ID")
@@ -281,19 +281,20 @@ def create_app(runtime: Runtime) -> FastAPI:
                 runtime.ui.show_home()
             else:
                 if notes:
-                    if kind == "instant-summarize":
-                        result = runtime.ui.dispatch_action(
-                            "instant-summarize.read",
-                            {"session_id": sid, "doc": request.doc or "knowledge"},
+                    if kind == "chunk-notes":
+                        result = runtime.services.require("notes").open_chunk_notes(
+                            sid, request.doc or "knowledge"
                         )
-                        if not result.ok:
-                            raise KeyError(result.message)
+                        if not result.get("ok"):
+                            raise KeyError(
+                                result.get("message", "Cannot open chunk notes")
+                            )
                     else:
-                        runtime.services.require("summarize").open_notes(
+                        runtime.services.require("notes").open_notes(
                             sid, request.doc or "knowledge"
                         )
                 elif logs:
-                    runtime.services.require("summarize").open_logs(sid)
+                    runtime.services.require("notes").open_logs(sid)
                 if request.doc:
                     runtime.services.require("reader").select_document(
                         page, request.doc

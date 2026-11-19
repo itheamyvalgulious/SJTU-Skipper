@@ -2,10 +2,9 @@ import json
 import threading
 from enum import StrEnum
 from html import escape
-from core.plugin import Plugin
 from core.ui import BlockType, Side
 from core.settings_spec import SettingsSpec, SettingType
-from plugins.notes_pipeline.types import GenerationState, NoteKind, NotePublication
+from .types import GenerationState, NoteKind, NotePublication
 
 
 class OnStopAction(StrEnum):
@@ -24,7 +23,7 @@ def note_log_blocks(state, *, message_channel: bool = True):
                 "agents": agents,
                 **(
                     {
-                        "send_action": "notes-pipeline.message",
+                        "send_action": "notes.message",
                         "send_values": {"session_id": state["session_id"]},
                     }
                     if message_channel
@@ -38,50 +37,28 @@ def note_log_blocks(state, *, message_channel: bool = True):
     return blocks
 
 
-class SummarizeService:
-    def __init__(self, plugin):
-        self.plugin = plugin
+class NotesView:
+    id = "notes"
 
-    @property
-    def busy(self):
-        state = self.plugin.pipeline.status()
-        return state["generation_state"] == GenerationState.GENERATING
-
-    def start(self, session_id=None):
-        return self.plugin.pipeline.start(session_id)
-
-    def source_path(self, session_id=None):
-        return self.plugin.pipeline.source_path(session_id)
-
-    def note_files(self):
-        return self.plugin.pipeline.note_files(NotePublication.FINAL)
-
-    def running_tasks(self):
-        return self.plugin.pipeline.running_tasks()
-
-    def open_notes(self, session_id, doc: NoteKind = NoteKind.KNOWLEDGE):
-        return self.plugin._read({"session_id": session_id, "doc": doc})
+    def open_notes(self, session_id, doc=NoteKind.KNOWLEDGE):
+        return self._read({"session_id": session_id, "doc": doc})
 
     def open_logs(self, session_id):
-        return self.plugin._logs({"session_id": session_id})
+        return self._logs({"session_id": session_id})
 
+    def open_chunk_notes(self, session_id, doc=NoteKind.KNOWLEDGE):
+        return self._chunk_read({"session_id": session_id, "doc": doc})
 
-class SummarizePlugin(Plugin):
-    id = "summarize"
-    requires = ("settings", "notes-pipeline", "reader")
-    optional_requires = ("input",)
-    provides = ("summarize",)
-    uses_actions = ("notes-pipeline.message",)
     ON_STOP_LABELS = (
         (OnStopAction.DIRECT, "直接生成笔记"),
         (OnStopAction.FILL, "先补全再生成"),
         (OnStopAction.SKIP, "不自动生成笔记"),
     )
 
-    def setup(self, ctx):
+    def setup(self, ctx, pipeline):
         self.ctx = ctx
         self.settings = ctx.require("settings")
-        self.pipeline = ctx.require("notes-pipeline")
+        self.pipeline = pipeline
         self.stop_event = threading.Event()
         self.notices = {}
         self.fill_threads = []
@@ -92,34 +69,41 @@ class SummarizePlugin(Plugin):
         ):
             self.settings.register(
                 SettingsSpec(
-                    key=f"summarize.{key}",
+                    key=f"notes.{key}",
                     default=default,
                     type=kind,
                     label=key,
-                    group="Summarize",
+                    group="笔记",
                 ),
                 plugin_id=self.id,
             )
         self.settings.register(
             SettingsSpec(
-                key="summarize.on_stop",
+                key="notes.on_stop",
                 default=OnStopAction.DIRECT,
                 type=SettingType.SELECT,
                 label="课后处理",
                 options=list(self.ON_STOP_LABELS),
-                group="Summarize",
+                group="笔记",
             ),
             plugin_id=self.id,
         )
-        ctx.register_service(self.id, SummarizeService(self))
         if not ctx.ui.has_tab("note"):
             ctx.ui.add_tab(Side.RIGHT, "note", "笔记", order=20, plugin_id=self.id)
         ctx.ui.add_toolbox_item(
             "note",
-            "summarize.notes",
+            "notes.final",
             "",
             order=10,
             render=self._render,
+            plugin_id=self.id,
+        )
+        ctx.ui.add_toolbox_item(
+            "note",
+            "notes.chunks",
+            "",
+            order=11,
+            render=self._render_chunks,
             plugin_id=self.id,
         )
         for action, handler in (
@@ -130,8 +114,10 @@ class SummarizePlugin(Plugin):
             ("delete", self._delete),
             ("generate", self._generate),
             ("stop", self._stop),
+            ("chunk_toggle", self._chunk_toggle),
+            ("chunk_read", self._chunk_read),
         ):
-            ctx.ui.register_action(f"summarize.{action}", handler, plugin_id=self.id)
+            ctx.ui.register_action(f"notes.{action}", handler, plugin_id=self.id)
         ctx.events.on("session.stopped", self._stopped, plugin_id=self.id)
 
     def _render(self):
@@ -158,7 +144,7 @@ class SummarizePlugin(Plugin):
             GenerationState.FINISHED: ("delete", "删除笔记", "btn-text theme-danger"),
         }[state]
         action, label, style = generation_action
-        mode = OnStopAction(self.settings.get("summarize.on_stop", OnStopAction.DIRECT))
+        mode = OnStopAction(self.settings.get("notes.on_stop", OnStopAction.DIRECT))
         options = "".join(
             f'<option value="{key}"{" selected" if key == mode else ""}>{text}</option>'
             for key, text in self.ON_STOP_LABELS
@@ -177,15 +163,15 @@ class SummarizePlugin(Plugin):
                 <span class="fg-2" role="status">{state_label}</span>
               </div>
               <div class="d-flex flex-wrap align-items-center gap-2">
-                <button type="button" class="btn-outline theme-primary" data-action="summarize.read">打开笔记</button>
-                <button type="button" class="btn-text" data-action="summarize.logs">查看日志</button>
-                <button type="button" class="{style}" data-action="summarize.{action}">{label}</button>
+                <button type="button" class="btn-outline theme-primary" data-action="notes.read">打开笔记</button>
+                <button type="button" class="btn-text" data-action="notes.logs">查看日志</button>
+                <button type="button" class="{style}" data-action="notes.{action}">{label}</button>
               </div>
               {notice}
               <div class="mt-3 pt-3 border-top">
                 <label class="d-block fw-semibold mb-2" for="notes-on-stop">课程结束后</label>
                 <select id="notes-on-stop" name="mode" class="form-control min-w-0"
-                  data-change-action="summarize.set_mode">{options}</select>
+                  data-change-action="notes.set_mode">{options}</select>
               </div>
             </section>''',
             }
@@ -244,7 +230,7 @@ class SummarizePlugin(Plugin):
             title="笔记",
             docs=docs,
             active=NoteKind(payload.get("doc", NoteKind.KNOWLEDGE)),
-            page_key=f"{sid}:summarize",
+            page_key=f"{sid}:notes",
             owner=self.id,
         )
         return {"ok": True, "open_page": page}
@@ -253,7 +239,7 @@ class SummarizePlugin(Plugin):
         sid = self._action_sid(payload)
         if not sid:
             return {"ok": False, "message": "请先选择课程"}
-        page = f"summarize:logs:{sid}"
+        page = f"notes:logs:{sid}"
         if not self.ctx.ui.has_page(page):
             self.ctx.ui.add_page(
                 page,
@@ -269,7 +255,7 @@ class SummarizePlugin(Plugin):
     def _render_logs(self, sid):
         blocks = note_log_blocks(
             self.pipeline.status(sid),
-            message_channel=self.ctx.ui.has_action("notes-pipeline.message"),
+            message_channel=self.ctx.ui.has_action("notes.message"),
         )
         return blocks or [
             {
@@ -283,7 +269,7 @@ class SummarizePlugin(Plugin):
             mode = OnStopAction(payload.get("mode"))
         except ValueError:
             return {"ok": False, "message": "未知的课后处理方式"}
-        self.settings.set("summarize.on_stop", mode)
+        self.settings.set("notes.on_stop", mode)
         return {"ok": True, "refresh": True}
 
     def _meta(self, sid):
@@ -315,7 +301,7 @@ class SummarizePlugin(Plugin):
         if meta.get("fill_for"):
             self.pipeline.finalize(str(meta["fill_for"]))
             return
-        mode = OnStopAction(self.settings.get("summarize.on_stop", OnStopAction.DIRECT))
+        mode = OnStopAction(self.settings.get("notes.on_stop", OnStopAction.DIRECT))
         if mode == OnStopAction.DIRECT:
             self.pipeline.finalize(sid)
         elif mode == OnStopAction.FILL:
@@ -339,7 +325,7 @@ class SummarizePlugin(Plugin):
 
     def _fill(self, sid):
         service = self.ctx.service("input")
-        attempts = max(1, int(self.settings.get("summarize.fill_max_attempts", 6)))
+        attempts = max(1, int(self.settings.get("notes.fill_max_attempts", 6)))
         for attempt in range(attempts):
             if self.stop_event.is_set():
                 return
@@ -349,7 +335,7 @@ class SummarizePlugin(Plugin):
             except Exception as exc:
                 self.notices[sid] = f"补录查询失败：{exc}"
             if attempt + 1 < attempts and self.stop_event.wait(
-                max(1, int(self.settings.get("summarize.fill_wait_minutes", 20))) * 60
+                max(1, int(self.settings.get("notes.fill_wait_minutes", 20))) * 60
             ):
                 return
         self.notices[sid] = "未取得录播，笔记使用已有来源，并保留来源缺口标记"
@@ -368,8 +354,70 @@ class SummarizePlugin(Plugin):
             "delete",
             "generate",
             "stop",
+            "chunk_toggle",
+            "chunk_read",
         ):
-            self.ctx.ui.unregister_action(f"summarize.{action}")
-        self.ctx.ui.remove_toolbox_item("summarize.notes")
+            self.ctx.ui.unregister_action(f"notes.{action}")
+        self.ctx.ui.remove_toolbox_item("notes.final")
+        self.ctx.ui.remove_toolbox_item("notes.chunks")
         for page in self.log_pages:
             self.ctx.ui.remove_page(page)
+
+    def _render_chunks(self):
+        sid = self.ctx.streams.selected_class_id
+        if not sid or sid == "boot":
+            return []
+        status = self.pipeline.status(sid)
+        enabled = bool(self.settings.get("notes.chunks_enabled", True))
+        errors = len(status["errors"])
+        gaps = f"，缺口 {errors} 项" if errors else ""
+        return [
+            {
+                "type": BlockType.HTML,
+                "html": f'''<section class="px-3 pb-3" aria-label="分段笔记">
+              <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                <h3 class="fs-md fw-semibold mb-0">分段笔记</h3>
+                <div class="d-flex align-items-center gap-2">
+                  <div class="switch">
+                    <input id="chunk-notes-enabled" type="checkbox" role="switch" switch
+                      data-change-action="notes.chunk_toggle"{" checked" if enabled else ""}>
+                  </div>
+                  <label for="chunk-notes-enabled">启用</label>
+                </div>
+              </div>
+              <p class="fg-2 mb-2" role="status">已发布至 {status["published_end"]:.0f} 秒{gaps}</p>
+              <button type="button" class="btn-outline theme-primary" data-action="notes.chunk_read">打开分段笔记</button>
+            </section>''',
+            }
+        ]
+
+    def _chunk_toggle(self, payload):
+        enabled = payload.get("enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.lower() in ("true", "1", "yes", "on")
+        self.settings.set("notes.chunks_enabled", bool(enabled))
+        self.ctx.ui.refresh("notes.toggle")
+        return {"ok": True, "refresh": True}
+
+    def _chunk_read(self, payload):
+        sid = str(payload.get("session_id", self.ctx.streams.selected_class_id) or "")
+        if not sid or sid == "boot":
+            return {"ok": False, "message": "请先选择课程"}
+        docs = [
+            {
+                "key": key,
+                "label": label,
+                "path": str(self.ctx.data_dir / "sessions" / sid / "notes" / name),
+            }
+            for key, (name, label) in self.pipeline.note_files(
+                NotePublication.CHUNK
+            ).items()
+        ]
+        page = self.ctx.require("reader").show(
+            title="分段笔记",
+            docs=docs,
+            active=NoteKind(payload.get("doc", NoteKind.KNOWLEDGE)),
+            page_key=f"{sid}:chunk-notes",
+            owner=self.id,
+        )
+        return {"ok": True, "open_page": page}

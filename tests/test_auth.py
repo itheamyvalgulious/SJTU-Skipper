@@ -134,7 +134,7 @@ def test_login_returns_to_requested_route(tmp_path: Path) -> None:
         return {"ok": True}
 
     install(app, tmp_path)
-    target = "/reader?page=reader:notes:session:summarize&doc=notes%2Flecture.md"
+    target = "/reader?page=reader:notes:session:notes&doc=notes%2Flecture.md"
     hidden = f'name="next" value="{html.escape(target, quote=True)}"'
     with TestClient(app) as client:
         gate = client.get(target, follow_redirects=False)

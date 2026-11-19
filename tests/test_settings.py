@@ -1166,28 +1166,26 @@ def test_expired_login_allows_a_fresh_start(tmp_path, monkeypatch):
         runtime.stop()
 
 
-def test_unload_preserves_settings_owned_by_pipeline(tmp_path):
+def test_unload_removes_all_notes_settings(tmp_path):
     service = SettingsService(SettingsStore(tmp_path / "settings.json"))
     service.register(
         SettingsSpec(
-            key="summarize.review_enabled",
+            key="notes.review_enabled",
             label="Review",
             type=SettingType.BOOL,
             default=True,
         ),
-        plugin_id="notes-pipeline",
+        plugin_id="notes",
     )
     service.register(
         SettingsSpec(
-            key="summarize.on_stop",
+            key="notes.on_stop",
             label="Stop",
             type=SettingType.STRING,
             default="skip",
         ),
-        plugin_id="summarize",
+        plugin_id="notes",
     )
-    service.unregister(plugin_id="summarize")
-    assert service.get_spec("summarize.review_enabled") is not None
-    assert service.get_spec("summarize.on_stop") is None
-    service.unregister(plugin_id="notes-pipeline")
-    assert service.get_spec("summarize.review_enabled") is None
+    service.unregister(plugin_id="notes")
+    assert service.get_spec("notes.review_enabled") is None
+    assert service.get_spec("notes.on_stop") is None

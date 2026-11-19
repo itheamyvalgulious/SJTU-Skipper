@@ -9,11 +9,9 @@ from core.plugin import Plugin, PluginContext
 from core.runtime import build_runtime
 from plugins.agent import AgentPlugin
 from plugins.ask.plugin import AskPlugin
-from plugins.instant_summarize.plugin import InstantSummarizePlugin
+from plugins.notes import NotesPlugin
 from plugins.reader import ReaderPlugin
 from plugins.settings.plugin import SettingsPlugin
-from plugins.summarize.plugin import SummarizePlugin
-from plugins.notes_pipeline import NotesPipelinePlugin
 
 from tests.test_agent import ScriptedRuntime
 
@@ -54,7 +52,7 @@ def _wait_until(predicate, timeout: float = 8.0, interval: float = 0.05) -> bool
     return False
 
 
-def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
+def test_chunk_notes_writes_three_files(tmp_path: Path) -> None:
     cfg = load_config(data_dir=tmp_path)
     llm = _notes_llm(
         {
@@ -71,17 +69,14 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
             StubLLM(),
             AgentPlugin(),
             ReaderPlugin(),
-            NotesPipelinePlugin(),
-            InstantSummarizePlugin(),
+            NotesPlugin(),
         ],
         llm=llm,
     )
     runtime.start()
     runtime.services.require("settings").set("notes.chunk_seconds", 60)
     try:
-        session = runtime.hub.start_session(
-            "instant-notes", meta={"course": "集成测试"}
-        )
+        session = runtime.hub.start_session("chunk-notes", meta={"course": "集成测试"})
         session.transcript.append(
             "今天我们讲留数定理。" * 80,
             start=0.0,
@@ -100,19 +95,19 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
         notes = tmp_path / "sessions" / session.session_id / "notes"
         assert _wait_until(
             lambda: (
-                (notes / "instant_note_knowledge.md").exists()
+                (notes / "chunk_note_knowledge.md").exists()
                 and "留数定理"
-                in (notes / "instant_note_knowledge.md").read_text(encoding="utf-8")
+                in (notes / "chunk_note_knowledge.md").read_text(encoding="utf-8")
             )
-        ), "instant_note_knowledge.md was not written"
-        assert "AI" in (notes / "instant_note_gossip.md").read_text(encoding="utf-8")
-        assert "作业" in (notes / "instant_note_notice.md").read_text(encoding="utf-8")
-        assert llm.runs, "instant notes never started an SDK run"
+        ), "chunk_note_knowledge.md was not written"
+        assert "AI" in (notes / "chunk_note_gossip.md").read_text(encoding="utf-8")
+        assert "作业" in (notes / "chunk_note_notice.md").read_text(encoding="utf-8")
+        assert llm.runs, "chunk notes never started an SDK run"
     finally:
         runtime.stop()
 
 
-def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
+def test_whole_lecture_notes_rewrites_outline(tmp_path: Path) -> None:
     cfg = load_config(data_dir=tmp_path)
     outline = (
         "# 笔记：知识\n\n"
@@ -135,19 +130,19 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
             StubLLM(),
             AgentPlugin(),
             ReaderPlugin(),
-            NotesPipelinePlugin(),
-            SummarizePlugin(),
+            NotesPlugin(),
         ],
         llm=llm,
     )
     runtime.start()
-    runtime.services.require("settings").set("instant-summarize.enabled", False)
-    runtime.services.require("settings").set("summarize.review_enabled", False)
-    runtime.services.require("settings").set("summarize.on_stop", "skip")
+    runtime.services.require("settings").set("notes.chunks_enabled", False)
+    runtime.services.require("settings").set("notes.review_enabled", False)
+    runtime.services.require("settings").set("notes.on_stop", "skip")
     try:
         session = runtime.hub.start_session(
             "whole-lecture", meta={"course": "集成测试"}
         )
+        runtime.hub.select_class(session.session_id, session.meta)
         session.transcript.append(
             "留数定理：设 f 在 D 内除有限个孤立奇点外解析……" * 30,
             start=0.0,
@@ -157,16 +152,14 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
         runtime.hub.end_session()
         assert runtime.bus.flush(1.0)
 
-        result = runtime.ui.dispatch_action("summarize.generate", {})
+        result = runtime.ui.dispatch_action("notes.generate", {})
         assert result.ok
 
         notes = tmp_path / "sessions" / session.session_id / "notes"
         knowledge = notes / "note_knowledge.md"
         assert _wait_until(
             lambda: (
-                runtime.services.require("notes-pipeline").status(session.session_id)[
-                    "phase"
-                ]
+                runtime.services.require("notes").status(session.session_id)["phase"]
                 == "published"
             )
         ), "the whole lecture was not published"
@@ -205,9 +198,8 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
             StubLLM(),
             AgentPlugin(),
             ReaderPlugin(),
-            NotesPipelinePlugin(),
             AskPlugin(),
-            SummarizePlugin(),
+            NotesPlugin(),
         ],
         llm=llm,
     )
@@ -216,6 +208,7 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
         session = runtime.hub.start_session(
             "instant-asking", meta={"course": "集成测试"}
         )
+        runtime.hub.select_class(session.session_id, session.meta)
         assert runtime.bus.flush(1.0)
         sid = session.session_id
         knowledge = tmp_path / "sessions" / sid / "notes" / "note_knowledge.md"
@@ -223,7 +216,7 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
         knowledge.write_text(
             "## 第一节\n\n这是第一段笔记内容。\n\n第二段笔记内容。\n", encoding="utf-8"
         )
-        open_result = runtime.ui.dispatch_action("summarize.read", {"doc": "knowledge"})
+        open_result = runtime.ui.dispatch_action("notes.read", {"doc": "knowledge"})
         assert open_result.ok
 
         result = runtime.ui.dispatch_action(

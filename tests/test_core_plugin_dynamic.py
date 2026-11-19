@@ -122,17 +122,17 @@ def test_register_service_must_match_declared_provides() -> None:
 
 def test_shared_tab_keeps_other_owner_and_drops_when_last_leaves() -> None:
     ui = UIManager()
-    ui.add_tab(Side.RIGHT, "note", "笔记", plugin_id="summarize")
-    ui.add_toolbox_item("note", "note.a", "A", plugin_id="summarize")
-    ui.add_tab(Side.RIGHT, "note", "笔记", plugin_id="instant-summarize")
-    ui.add_toolbox_item("note", "note.b", "B", plugin_id="instant-summarize")
+    ui.add_tab(Side.RIGHT, "note", "笔记", plugin_id="notes")
+    ui.add_toolbox_item("note", "note.a", "A", plugin_id="notes")
+    ui.add_tab(Side.RIGHT, "note", "笔记", plugin_id="other-plugin")
+    ui.add_toolbox_item("note", "note.b", "B", plugin_id="other-plugin")
     assert len(ui.state()["right_tabs"][0]["toolbox"]) == 2
 
-    ui.remove_plugin("summarize")
+    ui.remove_plugin("notes")
     assert ui.has_tab("note")
     assert not ui.has_toolbox_item("note.a")
 
-    ui.remove_plugin("instant-summarize")
+    ui.remove_plugin("other-plugin")
     assert not ui.has_tab("note")
 
 

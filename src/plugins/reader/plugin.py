@@ -1,15 +1,8 @@
 """Reader plugin: display markdown documents (lecture notes) in reader pages.
 
-Notes plugins (summarize / instant-summarize) own their files; they hand the
-reader a list of ``{key, label, path}`` documents.  Every notes session gets
-its **own page** (``reader:notes:<session_id>``), so several courses' handouts
-can stay open at the same time instead of sharing one page.
-
-The reader also owns the **selection menu**: when the user selects a passage
-the browser shows a small floating menu whose items are contributed by the
-plugin that created the page (``register_selection_action``).  Registration is
-per page, not global: ``summarize`` registers "提问" on the pages it opens, so
-the same page re-used by ``instant-summarize`` shows no summarize menu item.
+The notes plugin owns its files and gives the reader a list of
+``{key, label, path}`` documents. Each lecture has its own reader pages.
+The reader owns the selection menu. Plugins register actions for selected text.
 
 Q&A pairs written by such a menu item live *inside* the note file as
 ``qa`` blocks (see :mod:`core.note_document`); the reader renders them with its

@@ -28,9 +28,7 @@ def _note(tmp_path: Path, name: str = "note_knowledge.md") -> Path:
     return path
 
 
-def _open(
-    runtime: Any, path: Path, *, owner: str = "summarize", key: str = "s1"
-) -> str:
+def _open(runtime: Any, path: Path, *, owner: str = "notes", key: str = "s1") -> str:
     reader = runtime.services.require("reader")
     return reader.show(
         title="笔记",
@@ -60,7 +58,7 @@ def test_selection_actions_are_scoped_to_page_and_owner(tmp_path: Path) -> None:
                 "kind": SelectionKind.PROMPT,
                 "action": "demo.ask",
             },
-            owner="summarize",
+            owner="notes",
         )
 
         meta = _tabs(runtime, page_id)[0]["meta"]
@@ -69,9 +67,9 @@ def test_selection_actions_are_scoped_to_page_and_owner(tmp_path: Path) -> None:
         assert [item["id"] for item in meta["selection_actions"]] == ["demo.ask"]
         assert meta["selection_actions"][0]["kind"] == SelectionKind.PROMPT
 
-        _open(runtime, path, owner="instant-summarize")
+        _open(runtime, path, owner="other-plugin")
         meta = _tabs(runtime, page_id)[0]["meta"]
-        assert meta["owner"] == "instant-summarize"
+        assert meta["owner"] == "other-plugin"
         assert meta["selection_actions"] == []
     finally:
         runtime.stop()
@@ -86,7 +84,7 @@ def test_selection_actions_are_not_global(tmp_path: Path) -> None:
         reader.register_selection_action(
             page_a,
             {"id": "ask", "label": "提问", "action": "demo.ask"},
-            owner="summarize",
+            owner="notes",
         )
         page_b = _open(runtime, path, key="b")
         assert _tabs(runtime, page_b)[0]["meta"]["selection_actions"] == []

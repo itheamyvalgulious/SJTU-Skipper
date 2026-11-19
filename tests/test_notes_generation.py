@@ -1,4 +1,4 @@
-from plugins.notes_pipeline.material import chunk_material
+from plugins.notes.material import chunk_material
 
 import queue
 import threading
@@ -19,7 +19,7 @@ from core.agent_types import (
     ExecutionRole,
     ExecutionStatus,
 )
-from plugins.notes_pipeline.types import (
+from plugins.notes.types import (
     ChunkState,
     ContinuationStage,
     GenerationState,
@@ -28,15 +28,15 @@ from plugins.notes_pipeline.types import (
     NoteTaskKind,
 )
 from core.ui import BlockType
-from plugins.notes_pipeline.plugin import NotesPipelinePlugin
-from plugins.notes_pipeline.prompts import NOTE_HEADERS, SOURCE_FILENAME
+from plugins.notes.pipeline import NotesPipeline
+from plugins.notes.prompts import NOTE_HEADERS, SOURCE_FILENAME
 from tests.support import FakeSettings
 
 
 def test_visual_gap_survives_reload(tmp_path):
     import json
     from core.events import Event
-    from plugins.notes_pipeline.material import collect_material, render
+    from plugins.notes.material import collect_material, render
 
     hub = StreamHub()
     session = hub.start_session("visual-gap")
@@ -52,7 +52,7 @@ def test_visual_gap_survives_reload(tmp_path):
     assert "Repeated board" in source
     assert list(session.visual) == []
     for _ in range(2):
-        pipeline = NotesPipelinePlugin()
+        pipeline = NotesPipeline()
         pipeline.ctx = ctx
         pipeline.sessions = {}
         pipeline.condition = threading.Condition()
@@ -128,7 +128,7 @@ def test_gap_reaches_chunk_and_final_source(tmp_path):
 
 def test_fill_material_uses_class_directory(tmp_path):
     import json
-    from plugins.notes_pipeline.material import collect_material, render
+    from plugins.notes.material import collect_material, render
 
     primary = tmp_path / "sessions" / "primary"
     primary.mkdir(parents=True)
@@ -165,9 +165,9 @@ def test_fill_material_uses_class_directory(tmp_path):
 def test_execution_blocks_and_review_invalidation():
     import json
     from core.events import Event
-    from plugins.summarize.plugin import note_log_blocks
+    from plugins.notes.view import note_log_blocks
 
-    pipeline = object.__new__(NotesPipelinePlugin)
+    pipeline = object.__new__(NotesPipeline)
     pipeline.condition = threading.Condition()
     pipeline.sessions = {}
     task = {
@@ -255,7 +255,7 @@ def test_execution_blocks_and_review_invalidation():
     assert blocks == [
         {
             "type": BlockType.AGENT_ACTIVITY,
-            "send_action": "notes-pipeline.message",
+            "send_action": "notes.message",
             "send_values": {"session_id": "lecture"},
             "id": "lecture",
             "agents": list(task["agents"].values()),
@@ -275,7 +275,7 @@ def test_review_replaces_only_final_output(correct):
     import json
     from core.events import Event
 
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.condition = threading.Condition()
     pipeline.ctx = SimpleNamespace(ui=SimpleNamespace(refresh=lambda reason: None))
     task = {"agents": {}, "label": "Writer"}
@@ -343,7 +343,7 @@ def test_review_rejects_non_boolean(correct):
     import json
     from core.events import Event
 
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.condition = threading.Condition()
     pipeline.ctx = SimpleNamespace(ui=SimpleNamespace(refresh=lambda reason: None))
     task = {"agents": {}, "label": "Writer"}
@@ -368,7 +368,7 @@ def test_review_rejects_non_boolean(correct):
 
 
 def test_concurrent_chunks_share_one_viewer():
-    from plugins.summarize.plugin import note_log_blocks
+    from plugins.notes.view import note_log_blocks
 
     tasks = [
         {
@@ -498,7 +498,7 @@ def note_pipeline(tmp_path, run, *, settings=None, releases=()):
         "notes.chunk_seconds": 10,
         "notes.overlap_seconds": 2,
         "notes.concurrency": 3,
-        "summarize.review_enabled": False,
+        "notes.review_enabled": False,
     }
     values.update(settings or {})
     config = FakeSettings(values)
@@ -516,7 +516,7 @@ def note_pipeline(tmp_path, run, *, settings=None, releases=()):
             refresh=updates.put,
         ),
     )
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline._agent_run = lambda sid, agent_id, instruction, **kwargs: agent.run(
         agent_id, instruction, follow_ups=kwargs.get("follow_ups", ())
     )
@@ -580,7 +580,7 @@ def test_log_and_stream_record_once(tmp_path):
     import json
     from types import SimpleNamespace
     from core.streams import StreamHub
-    from plugins.notes_pipeline.material import collect_material
+    from plugins.notes.material import collect_material
 
     hub = StreamHub()
     session = hub.start_session("log-and-stream")
@@ -599,11 +599,11 @@ def test_log_and_stream_record_once(tmp_path):
 def test_late_visual_window_blocks_chunk():
     from types import SimpleNamespace
     from core.streams import StreamHub
-    from plugins.notes_pipeline.plugin import NotesPipelinePlugin
+    from plugins.notes.pipeline import NotesPipeline
 
     hub = StreamHub()
     session = hub.start_session("late-visual-window")
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.ctx = SimpleNamespace(streams=hub, service=lambda name: object())
     hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 600)
     hub.seal_text(session.session_id, StreamKind.VISUAL, 580)
@@ -625,11 +625,11 @@ def test_late_visual_window_blocks_chunk():
 def test_disabled_source_does_not_end_lecture():
     from types import SimpleNamespace
     from core.streams import StreamHub
-    from plugins.notes_pipeline.plugin import NotesPipelinePlugin
+    from plugins.notes.pipeline import NotesPipeline
 
     hub = StreamHub()
     session = hub.start_session("disabled-source")
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.ctx = SimpleNamespace(streams=hub, service=lambda name: object())
     hub.set_text_enabled(session.session_id, StreamKind.VISUAL, False)
     hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 600, final=True)
@@ -792,7 +792,7 @@ def test_final_tasks_keep_session_sources_when_selection_changes(tmp_path):
     with note_pipeline(
         tmp_path,
         run,
-        settings={"notes.concurrency": 2, "instant-summarize.enabled": False},
+        settings={"notes.concurrency": 2, "notes.chunks_enabled": False},
         releases=(release_writers,),
     ) as env:
         lectures = []
@@ -878,7 +878,7 @@ def test_manual_entries_keep_incremental_occurrences(tmp_path):
         session.transcript.append("Repeated condition")
         env.wait_until(lambda: len(sources) == 2)
         assert all(source.count("Repeated condition") == 1 for source in sources)
-        from plugins.notes_pipeline.material import collect_material
+        from plugins.notes.material import collect_material
 
         assert len(collect_material(env.pipeline.ctx, session.session_id)) == 2
 
@@ -889,7 +889,7 @@ def test_lecture_context_uses_target_session(tmp_path):
         "target-course", meta={"course_name": "Target course", "date": "2026-11-10"}
     )
     hub.start_session("other-course", meta={"course_name": "Other course"})
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.ctx = SimpleNamespace(streams=hub, data_dir=tmp_path)
     context = pipeline._lecture_context(target.session_id)
     assert "Target course" in context and "2026-11-10" in context
@@ -897,7 +897,7 @@ def test_lecture_context_uses_target_session(tmp_path):
 
 
 def test_preview_omits_chunk_titles(tmp_path):
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.ctx = SimpleNamespace(
         data_dir=tmp_path, ui=SimpleNamespace(refresh=lambda _: None)
     )
@@ -921,9 +921,7 @@ def test_preview_omits_chunk_titles(tmp_path):
             )
             (directory / name).write_text(header + body)
     pipeline._publish_preview(sid)
-    text = (
-        tmp_path / "sessions" / sid / "notes" / "instant_note_notice.md"
-    ).read_text()
+    text = (tmp_path / "sessions" / sid / "notes" / "chunk_note_notice.md").read_text()
     assert "笔记：通知" not in text
     assert text.count("# 通知\n") == 1
     assert "## 作业\n\n完成练习 1．" in text
@@ -968,7 +966,7 @@ def saved_writer(pipeline, sid="lecture"):
 
 
 def test_note_log_blocks_drop_message_channel(tmp_path):
-    from plugins.summarize.plugin import note_log_blocks
+    from plugins.notes.view import note_log_blocks
 
     task = {
         "agents": {
@@ -983,7 +981,7 @@ def test_note_log_blocks_drop_message_channel(tmp_path):
     }
     state = {"session_id": "lecture", "tasks": [task], "error": ""}
     channel = note_log_blocks(state)[0]
-    assert channel["send_action"] == "notes-pipeline.message"
+    assert channel["send_action"] == "notes.message"
     assert channel["send_values"] == {"session_id": "lecture"}
     silent = note_log_blocks(state, message_channel=False)[0]
     assert silent["send_action"] == ""
@@ -1218,9 +1216,7 @@ def test_initial_failure_cannot_continue(tmp_path, draft):
             )
         return note_result(error="Initial generation failed")
 
-    with note_pipeline(
-        tmp_path, run, settings={"instant-summarize.enabled": False}
-    ) as env:
+    with note_pipeline(tmp_path, run, settings={"notes.chunks_enabled": False}) as env:
         pipeline = env.pipeline
         session = env.hub.start_session("cancelled-review")
         session.transcript.append("Definition", start=0, end=10)
@@ -1440,9 +1436,7 @@ def test_same_id_reprocess_replaces_notes(tmp_path):
     def run(session, instruction):
         return write_notes(session, session.workspace.text(SOURCE_FILENAME))
 
-    with note_pipeline(
-        tmp_path, run, settings={"instant-summarize.enabled": False}
-    ) as env:
+    with note_pipeline(tmp_path, run, settings={"notes.chunks_enabled": False}) as env:
         old = env.hub.start_session("same-class")
         old.transcript.append("Old unique theorem", start=0, end=2)
         env.hub.end_session()
@@ -1483,7 +1477,7 @@ def test_same_id_fill_keeps_published_notes(tmp_path):
     with note_pipeline(
         tmp_path,
         lambda session, instruction: write_notes(session, "Valid notes"),
-        settings={"instant-summarize.enabled": False},
+        settings={"notes.chunks_enabled": False},
     ) as env:
         old = env.hub.start_session("fill-class")
         old.transcript.append("Valid theorem", start=0, end=2)
@@ -1514,7 +1508,7 @@ def test_reset_drains_running_writer(tmp_path):
     with note_pipeline(
         tmp_path,
         run,
-        settings={"instant-summarize.enabled": False},
+        settings={"notes.chunks_enabled": False},
         releases=(release,),
     ) as env:
         session = env.hub.start_session("reset-writer")
@@ -1584,7 +1578,7 @@ def test_selected_status_does_not_follow_processing(tmp_path):
     with note_pipeline(
         tmp_path,
         run,
-        settings={"instant-summarize.enabled": False},
+        settings={"notes.chunks_enabled": False},
         releases=(release_writer,),
     ) as env:
         session = env.hub.start_session("processing")

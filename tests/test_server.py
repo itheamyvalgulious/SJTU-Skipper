@@ -88,28 +88,27 @@ def navigation_client(client):
 
     def notes(session_id, doc):
         selected.update(session=session_id, doc=doc)
-        page = f"reader:notes:{session_id}:summarize"
+        page = f"reader:notes:{session_id}:notes"
         if not runtime.ui.has_page(page):
             runtime.ui.add_page(page, "Notes")
 
     def logs(session_id):
         selected["session"] = session_id
-        page = f"summarize:logs:{session_id}"
+        page = f"notes:logs:{session_id}"
         if not runtime.ui.has_page(page):
             runtime.ui.add_page(page, "Logs")
 
-    runtime.services.register(
-        "summarize", SimpleNamespace(open_notes=notes, open_logs=logs)
-    )
-
-    def instant_notes(payload):
-        selected.update(session=payload["session_id"], doc=payload["doc"])
-        page = f"reader:notes:{payload['session_id']}:instant-summarize"
+    def chunk_notes(session_id, doc):
+        selected.update(session=session_id, doc=doc)
+        page = f"reader:notes:{session_id}:chunk-notes"
         if not runtime.ui.has_page(page):
             runtime.ui.add_page(page, "Draft notes")
         return {"ok": True}
 
-    runtime.ui.register_action("instant-summarize.read", instant_notes)
+    runtime.services.register(
+        "notes",
+        SimpleNamespace(open_notes=notes, open_logs=logs, open_chunk_notes=chunk_notes),
+    )
     runtime.services.register(
         "reader",
         SimpleNamespace(
@@ -138,13 +137,13 @@ def test_navigation_restores_dynamic_pages(navigation_client):
     test_client, sid, selected = navigation_client
     for route in [
         {"page": "input:session", "class": sid},
-        {"page": f"reader:notes:{sid}:summarize", "class": sid, "doc": "knowledge"},
+        {"page": f"reader:notes:{sid}:notes", "class": sid, "doc": "knowledge"},
         {
-            "page": f"reader:notes:{sid}:instant-summarize",
+            "page": f"reader:notes:{sid}:chunk-notes",
             "class": sid,
             "doc": "notice",
         },
-        {"page": f"summarize:logs:{sid}", "class": sid},
+        {"page": f"notes:logs:{sid}", "class": sid},
         {"page": "test.page", "class": sid},
         {"page": "", "class": sid},
     ]:
@@ -160,7 +159,7 @@ def test_navigation_restores_dynamic_pages(navigation_client):
     )
     assert (
         test_client.post(
-            "/api/ui/navigate", json={"page": "summarize:logs:../secret"}
+            "/api/ui/navigate", json={"page": "notes:logs:../secret"}
         ).status_code
         == 400
     )
@@ -169,9 +168,9 @@ def test_navigation_restores_dynamic_pages(navigation_client):
 @pytest.mark.parametrize(
     "page",
     [
-        "reader:notes:{sid}:summarize",
-        "reader:notes:{sid}:instant-summarize",
-        "summarize:logs:{sid}",
+        "reader:notes:{sid}:notes",
+        "reader:notes:{sid}:chunk-notes",
+        "notes:logs:{sid}",
     ],
 )
 def test_notes_navigation_selects_class(navigation_client, page):
@@ -191,7 +190,7 @@ def test_notes_navigation_selects_class(navigation_client, page):
     }
 
 
-@pytest.mark.parametrize("page", ["", "test.page", "reader:notes:{sid}:summarize"])
+@pytest.mark.parametrize("page", ["", "test.page", "reader:notes:{sid}:notes"])
 def test_navigation_clears_explicit_class(navigation_client, page):
     test_client, sid, selected = navigation_client
     selected["class_id"] = sid
@@ -227,7 +226,7 @@ def test_state_does_not_reopen_class(navigation_client):
 def test_navigation_restores_notes_after_reset(navigation_client):
     test_client, sid, selected = navigation_client
     route = {
-        "page": f"reader:notes:{sid}:summarize",
+        "page": f"reader:notes:{sid}:notes",
         "class": sid,
         "doc": "notice",
     }

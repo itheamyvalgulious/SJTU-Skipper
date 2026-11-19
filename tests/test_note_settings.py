@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from core.ui import UIManager
-from plugins.notes_pipeline.plugin import NotesPipelinePlugin
+from plugins.notes.pipeline import NotesPipeline
 from plugins.settings.store import SettingsService, SettingsStore
 
 
@@ -15,12 +15,12 @@ def test_pipeline_registers_generation_settings(tmp_path):
         events=SimpleNamespace(on=lambda *args, **kwargs: None),
         ui=UIManager(),
     )
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.setup(ctx)
     try:
-        settings.set("instant-summarize.enabled", False)
-        settings.set("summarize.review_max_rounds", 3)
-        assert pipeline.setting("instant-summarize.enabled", True) is False
-        assert pipeline.setting("summarize.review_max_rounds", 0) == 3
+        settings.set("notes.chunks_enabled", False)
+        settings.set("notes.review_max_rounds", 3)
+        assert pipeline.setting("notes.chunks_enabled", True) is False
+        assert pipeline.setting("notes.review_max_rounds", 0) == 3
     finally:
         pipeline.teardown()

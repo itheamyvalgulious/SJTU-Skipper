@@ -24,7 +24,6 @@ from core.agent_types import (
 )
 from core.file_access import publication_lock
 from core.events import Event
-from core.plugin import Plugin
 from core.streams import StreamKind
 from core.ui import TaskState
 from core.settings_spec import SettingsSpec, SettingType
@@ -53,46 +52,8 @@ from .prompts import (
 )
 
 
-class NotesPipelineService:
-    def __init__(self, pipeline):
-        self._pipeline = pipeline
-
-    def start(self, session_id=None):
-        return self._pipeline.start(session_id)
-
-    def finalize(self, session_id=None):
-        return self._pipeline.finalize(session_id)
-
-    def status(self, session_id=None):
-        return self._pipeline.status(session_id)
-
-    def stop(self, session_id=None):
-        return self._pipeline.stop(session_id)
-
-    def reset(self, session_id=None):
-        return self._pipeline.reset(session_id)
-
-    def delete(self, session_id=None):
-        return self._pipeline.delete(session_id)
-
-    def draft_paths(self, session_id=None):
-        return self._pipeline.draft_paths(session_id)
-
-    def source_path(self, session_id=None):
-        return self._pipeline.source_path(session_id)
-
-    def note_files(self, kind):
-        return self._pipeline.note_files(kind)
-
-    def running_tasks(self):
-        return self._pipeline.running_tasks()
-
-
-class NotesPipelinePlugin(Plugin):
-    id = "notes-pipeline"
-    requires = ("settings", "llm-agent")
-    optional_requires = ("stt", "vlm")
-    provides = ("notes-pipeline",)
+class NotesPipeline:
+    id = "notes"
 
     def setup(self, ctx):
         self.ctx = ctx
@@ -109,53 +70,53 @@ class NotesPipelinePlugin(Plugin):
                     default=default,
                     type=SettingType.INT,
                     label=label,
-                    group="Notes",
+                    group="笔记",
                     description="修改后重启服务生效" if key == "concurrency" else "",
                 ),
                 plugin_id=self.id,
             )
         for key, default, kind, label, group in (
             (
-                "summarize.system_prompt",
+                "notes.system_prompt",
                 SYSTEM,
-                SettingType.STRING,
+                SettingType.TEXT,
                 "system_prompt",
-                "Summarize",
+                "笔记",
             ),
             (
-                "summarize.reviewer_prompt",
+                "notes.reviewer_prompt",
                 REVIEW_SYSTEM,
-                SettingType.STRING,
+                SettingType.TEXT,
                 "reviewer_prompt",
-                "Summarize",
+                "笔记",
             ),
             (
-                "summarize.review_enabled",
+                "notes.review_enabled",
                 True,
                 SettingType.BOOL,
                 "review_enabled",
-                "Summarize",
+                "笔记",
             ),
             (
-                "summarize.review_max_rounds",
+                "notes.review_max_rounds",
                 0,
                 SettingType.INT,
                 "review_max_rounds",
-                "Summarize",
+                "笔记",
             ),
             (
-                "instant-summarize.system_prompt",
+                "notes.chunk_system_prompt",
                 SYSTEM,
-                SettingType.STRING,
+                SettingType.TEXT,
                 "系统提示词",
-                "Instant Summarize",
+                "分段笔记",
             ),
             (
-                "instant-summarize.enabled",
+                "notes.chunks_enabled",
                 True,
                 SettingType.BOOL,
                 "分段笔记",
-                "Instant Summarize",
+                "分段笔记",
             ),
         ):
             self.settings.register(
@@ -185,19 +146,8 @@ class NotesPipelinePlugin(Plugin):
             sid = path.parent.parent.name
             if sid != "boot":
                 self._state(sid)
-        ctx.register_service(self.id, NotesPipelineService(self))
         ctx.ui.register_task_provider(self.running_tasks, plugin_id=self.id)
-        ctx.ui.register_action(
-            "notes-pipeline.stop",
-            lambda payload: {
-                "ok": self.stop(str(payload.get("session_id", ""))),
-                "refresh": True,
-            },
-            plugin_id=self.id,
-        )
-        ctx.ui.register_action(
-            "notes-pipeline.message", self.message, plugin_id=self.id
-        )
+        ctx.ui.register_action("notes.message", self.message, plugin_id=self.id)
         for event in (
             "session.started",
             "stream.sealed",
@@ -316,7 +266,7 @@ class NotesPipelinePlugin(Plugin):
         _, final = self._readiness(sid, [])
         if state["finalize_requested"] or (
             not final
-            and self.setting("instant-summarize.enabled", True)
+            and self.setting("notes.chunks_enabled", True)
             and session is not None
         ):
             return GenerationState.GENERATING
@@ -606,7 +556,7 @@ class NotesPipelinePlugin(Plugin):
                 "completed_chunks": 0,
                 "total_chunks": 0,
                 "expected_chunks": None,
-                "chunk_enabled": bool(self.setting("instant-summarize.enabled", True)),
+                "chunk_enabled": bool(self.setting("notes.chunks_enabled", True)),
                 "tasks": [],
                 "error": "",
                 "errors": [],
@@ -617,7 +567,7 @@ class NotesPipelinePlugin(Plugin):
             duration = (
                 float(session.meta.get("total_media_seconds") or 0) if session else 0
             )
-            chunk_enabled = bool(self.setting("instant-summarize.enabled", True))
+            chunk_enabled = bool(self.setting("notes.chunks_enabled", True))
             expected_chunks = (
                 math.ceil(
                     duration / max(1, float(self.setting("notes.chunk_seconds", 600)))
@@ -685,9 +635,9 @@ class NotesPipelinePlugin(Plugin):
                 "errors": list(state["errors"]),
             }
 
-    def note_files(self, kind: NotePublication):
+    def note_files(self, kind: NotePublication = NotePublication.FINAL):
         kind = NotePublication(kind)
-        prefix = "instant_note" if kind == NotePublication.INSTANT else "note"
+        prefix = "chunk_note" if kind == NotePublication.CHUNK else "note"
         return {key: (f"{prefix}_{key}.md", LABELS[key]) for key in KINDS}
 
     def draft_paths(self, session_id=None):
@@ -697,7 +647,7 @@ class NotesPipelinePlugin(Plugin):
         directory = self.ctx.data_dir / "sessions" / sid / "notes"
         return {
             key: directory / name
-            for key, (name, _) in self.note_files(NotePublication.INSTANT).items()
+            for key, (name, _) in self.note_files(NotePublication.CHUNK).items()
             if (directory / name).exists()
         }
 
@@ -725,7 +675,7 @@ class NotesPipelinePlugin(Plugin):
                         "phase": phase,
                         "state": TaskState.RUNNING,
                         "cancel": {
-                            "action": "notes-pipeline.stop",
+                            "action": "notes.stop",
                             "payload": {"session_id": sid},
                         },
                         "label": f"笔记 {sid}",
@@ -745,7 +695,7 @@ class NotesPipelinePlugin(Plugin):
                     "phase": kind,
                     "state": TaskState.PENDING,
                     "cancel": {
-                        "action": "notes-pipeline.stop",
+                        "action": "notes.stop",
                         "payload": {"session_id": sid},
                     },
                     "chunk": index,
@@ -811,7 +761,7 @@ class NotesPipelinePlugin(Plugin):
         )
         if session is not None:
             end = max(end, session.duration)
-        enabled = bool(self.setting("instant-summarize.enabled", True))
+        enabled = bool(self.setting("notes.chunks_enabled", True))
         manual = [record for record in records if record.get("start") is None]
         manual_before = max(
             (chunk.get("manual_end", 0) for chunk in state["chunks"]), default=0
@@ -1261,7 +1211,7 @@ class NotesPipelinePlugin(Plugin):
         session = self.agent.create_session(
             name,
             workspace=workspace,
-            system_prompt=self.setting("instant-summarize.system_prompt", "") or SYSTEM,
+            system_prompt=self.setting("notes.chunk_system_prompt", "") or SYSTEM,
             role=AgentRole.NOTE_CHUNK,
             tools=[
                 AgentToolName.READ,
@@ -1355,7 +1305,7 @@ class NotesPipelinePlugin(Plugin):
         if (
             self.closed
             or self._state(sid).get("deleted")
-            or not self.setting("instant-summarize.enabled", True)
+            or not self.setting("instant-notes.enabled", True)
         ):
             return
         state = self._state(sid)
@@ -1384,7 +1334,7 @@ class NotesPipelinePlugin(Plugin):
                             text = "\n".join(lines[1:]).strip()
                         if text:
                             body.append(text)
-                path = notes / f"instant_note_{kind}.md"
+                path = notes / f"chunk_note_{kind}.md"
                 previous = path.read_text(encoding="utf-8") if path.exists() else ""
                 seen = set()
                 qa_blocks = []
@@ -1480,16 +1430,16 @@ class NotesPipelinePlugin(Plugin):
             if not files[name].exists():
                 files[name].write_text(header, encoding="utf-8")
         workspace = FileWorkspace(files, readonly=readonly)
-        review_enabled = bool(self.setting("summarize.review_enabled", True))
+        review_enabled = bool(self.setting("notes.review_enabled", True))
         review = {
             "prompt": REVIEW,
-            "system": self.setting("summarize.reviewer_prompt", "") or REVIEW_SYSTEM,
-            "maxRounds": int(self.setting("summarize.review_max_rounds", 0)),
+            "system": self.setting("notes.reviewer_prompt", "") or REVIEW_SYSTEM,
+            "maxRounds": int(self.setting("notes.review_max_rounds", 0)),
         }
         writer = self.agent.create_session(
             f"{sid} 笔记写作",
             workspace=workspace,
-            system_prompt=self.setting("summarize.system_prompt", "") or SYSTEM,
+            system_prompt=self.setting("notes.system_prompt", "") or SYSTEM,
             role=AgentRole.NOTE_WRITER,
             tools=[
                 AgentToolName.READ,
@@ -1506,7 +1456,7 @@ class NotesPipelinePlugin(Plugin):
                 "session_id": writer.id,
                 "directory": str(directory.relative_to(self._directory(sid))),
                 "name": writer.name,
-                "system_prompt": self.setting("summarize.system_prompt", "") or SYSTEM,
+                "system_prompt": self.setting("notes.system_prompt", "") or SYSTEM,
                 "role": AgentRole.NOTE_WRITER,
                 "tools": [
                     AgentToolName.READ,
@@ -1595,7 +1545,7 @@ class NotesPipelinePlugin(Plugin):
             self.continuations.clear()
             running = tuple(self.agent_tasks)
             self.condition.notify_all()
-        self.ctx.ui.unregister_action("notes-pipeline.message")
+        self.ctx.ui.unregister_action("notes.message")
         for session_id in running:
             self.agent.cancel(session_id)
         self.coordinator.join()

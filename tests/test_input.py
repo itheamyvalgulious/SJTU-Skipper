@@ -169,7 +169,7 @@ def _make_context(data_dir: Any = None) -> PluginContext:
     services = ServiceRegistry()
     settings = FakeSettings()
     services.register("settings", settings)
-    settings.set("instant-summarize.enabled", False)
+    settings.set("notes.chunks_enabled", False)
     ui = UIManager()
     import logging
 
@@ -726,9 +726,7 @@ class TestInputPluginUI:
             "error": "",
             "errors": [],
         }
-        ctx.services.register(
-            "notes-pipeline", SimpleNamespace(status=lambda sid: notes)
-        )
+        ctx.services.register("notes", SimpleNamespace(status=lambda sid: notes))
         plugin = InputPlugin()
         plugin._ctx = ctx
         monkeypatch.setattr("plugins.input.plugin.time.time", lambda: 1240.0)
@@ -766,9 +764,7 @@ class TestInputPluginUI:
             "error": "",
             "errors": [],
         }
-        ctx.services.register(
-            "notes-pipeline", SimpleNamespace(status=lambda sid: notes)
-        )
+        ctx.services.register("notes", SimpleNamespace(status=lambda sid: notes))
         plugin = InputPlugin()
         plugin._ctx = ctx
         assert not any(
@@ -1422,7 +1418,7 @@ class TestClassPlayer:
         for name in ("transcript.jsonl", "visual.jsonl", "coverage.json"):
             (directory / name).write_text("old")
         reset = mock.Mock()
-        ctx.services.register("notes-pipeline", SimpleNamespace(reset=reset))
+        ctx.services.register("notes", SimpleNamespace(reset=reset))
         self._open_class(ctx, plugin, videos=("v1", "v2"))
         monkeypatch.setattr(plugin, "_resolve_job_streams", lambda job: None)
         plugin._class_index = 1

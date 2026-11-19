@@ -131,19 +131,17 @@ def test_service_registry() -> None:
         registry.require("x")
 
 
-def test_builtin_registers_both_summarizers(tmp_path) -> None:
+def test_builtin_registers_unified_notes(tmp_path) -> None:
     from plugins.builtin import builtin_plugins
 
     cfg = load_config(data_dir=tmp_path)
     ids = [plugin.id for plugin in builtin_plugins(cfg)]
-    assert "summarize" in ids
-    assert "instant-summarize" in ids
+    assert "notes" in ids
+    assert ids.count("notes") == 1
 
-    cfg.enable_summarize = False
-    cfg.enable_instant_summarize = False
+    cfg.enable_notes = False
     ids = [plugin.id for plugin in builtin_plugins(cfg)]
-    assert "summarize" not in ids
-    assert "instant-summarize" not in ids
+    assert "notes" not in ids
 
 
 def test_scoped_tab_side(tmp_path) -> None:

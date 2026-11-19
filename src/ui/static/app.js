@@ -312,7 +312,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (
       !("class" in navigation) &&
       !navigation.page.startsWith("reader:notes:") &&
-      !navigation.page.startsWith("summarize:logs:")
+      !navigation.page.startsWith("notes:logs:")
     ) {
       navigation.class = "";
     }

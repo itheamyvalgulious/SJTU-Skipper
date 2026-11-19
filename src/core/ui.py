@@ -243,8 +243,7 @@ class _Tab:
     icon: str | None
     order: float
     plugin_id: str
-    # Plugins that share this tab (a tab may be contributed by several
-    # plugins, e.g. "note" is used by both summarizers).
+    # A tab can have more than one contributing plugin.
     owners: set[str] = field(default_factory=set)
 
 

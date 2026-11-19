@@ -1,11 +1,11 @@
 from types import SimpleNamespace
 import pytest
-from plugins.summarize.plugin import SummarizePlugin
+from plugins.notes.view import NotesView
 
 
 def test_stop_policy_is_session_bound():
     calls = []
-    plugin = SummarizePlugin()
+    plugin = NotesView()
     plugin.pipeline = SimpleNamespace(finalize=calls.append)
     plugin.settings = SimpleNamespace(get=lambda key, default: "direct")
     old = SimpleNamespace(meta={})
@@ -16,7 +16,7 @@ def test_stop_policy_is_session_bound():
 
 def test_fill_keeps_class_identity():
     calls = []
-    plugin = SummarizePlugin()
+    plugin = NotesView()
     plugin.pipeline = SimpleNamespace(finalize=calls.append)
     fill = SimpleNamespace(meta={"fill_for": "course"})
     plugin.ctx = SimpleNamespace(streams=SimpleNamespace(get_session=lambda sid: fill))
@@ -26,7 +26,7 @@ def test_fill_keeps_class_identity():
 
 def test_stale_stop_does_not_finalize_replacement():
     calls = []
-    plugin = SummarizePlugin()
+    plugin = NotesView()
     plugin.pipeline = SimpleNamespace(finalize=calls.append)
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
@@ -39,7 +39,7 @@ def test_stale_stop_does_not_finalize_replacement():
 
 def test_skip_preserves_preview():
     calls = []
-    plugin = SummarizePlugin()
+    plugin = NotesView()
     plugin.pipeline = SimpleNamespace(finalize=calls.append)
     plugin.settings = SimpleNamespace(get=lambda key, default: "skip")
     plugin.ctx = SimpleNamespace(
@@ -69,9 +69,9 @@ def test_log_pages_keep_their_session():
     }
     services = {
         "settings": FakeSettings(),
-        "notes-pipeline": SimpleNamespace(status=states.__getitem__),
+        "notes": SimpleNamespace(status=states.__getitem__),
     }
-    plugin = SummarizePlugin()
+    plugin = NotesView()
     plugin.setup(
         SimpleNamespace(
             streams=streams,
@@ -79,14 +79,15 @@ def test_log_pages_keep_their_session():
             require=services.__getitem__,
             register_service=lambda *args: None,
             events=SimpleNamespace(on=lambda *args, **kwargs: None),
-        )
+        ),
+        services["notes"],
     )
     try:
-        result = ui.dispatch_action("summarize.logs", {})
+        result = ui.dispatch_action("notes.logs", {})
         first_page = result.open_page
         ui.open_page(first_page)
         streams.selected_class_id = "second"
-        second_page = ui.dispatch_action("summarize.logs", {}).open_page
+        second_page = ui.dispatch_action("notes.logs", {}).open_page
         ui.open_page(second_page)
         assert second_page != first_page
         states["first"]["tasks"][0]["agents"]["main"]["label"] = "updated first"
@@ -98,7 +99,7 @@ def test_log_pages_keep_their_session():
         assert (
             ui.state()["page_content"][second_page][0]["agents"][0]["label"] == "second"
         )
-        assert ui.dispatch_action("summarize.logs", {}).open_page == second_page
+        assert ui.dispatch_action("notes.logs", {}).open_page == second_page
     finally:
         plugin.teardown()
     assert not ui.has_page(first_page) and not ui.has_page(second_page)
@@ -106,7 +107,7 @@ def test_log_pages_keep_their_session():
 
 @pytest.mark.parametrize("selected", ["", "boot"])
 def test_empty_selection_hides_notes(selected):
-    plugin = SummarizePlugin()
+    plugin = NotesView()
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
             selected_class_id=selected,
@@ -120,7 +121,7 @@ def test_empty_selection_hides_notes(selected):
 
 @pytest.mark.parametrize("target", ["", "boot"])
 def test_invalid_action_target_does_not_use_selection(target):
-    plugin = SummarizePlugin()
+    plugin = NotesView()
     plugin.ctx = SimpleNamespace(streams=SimpleNamespace(selected_class_id="selected"))
     for action in ("_generate", "_stop", "_delete", "_read", "_logs", "_fill_again"):
         assert not getattr(plugin, action)({"session_id": target})["ok"]
@@ -128,7 +129,7 @@ def test_invalid_action_target_does_not_use_selection(target):
 
 def test_generation_uses_selected_or_explicit_class():
     calls = []
-    plugin = SummarizePlugin()
+    plugin = NotesView()
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
             selected_class_id="selected",
@@ -146,7 +147,7 @@ def test_sidebar_status_uses_selected_class():
     from tests.support import FakeSettings
 
     calls = []
-    plugin = SummarizePlugin()
+    plugin = NotesView()
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
             selected_class_id="selected",

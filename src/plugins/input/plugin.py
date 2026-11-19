@@ -238,7 +238,7 @@ def _map_live_streams(devices: list[dict[str, Any]]) -> dict[StreamView, str]:
 class InputPlugin(Plugin):
     id = "input"
     requires = ("settings",)
-    optional_requires = ("stt", "vlm", "notes-pipeline")
+    optional_requires = ("stt", "vlm", "notes")
     provides = ("input",)
 
     def setup(self, ctx: PluginContext) -> None:
@@ -721,11 +721,8 @@ class InputPlugin(Plugin):
     def _fill_gaps(self, live_session_id: str) -> bool:
         """Process the class recording(s), skipping what the live pass covered.
 
-        Called by the summarize plugin after a live class ends.  A class is
-        often split into several back-to-back recording parts; all of them are
-        queued and processed in order, in the same session, so the handout sees
-        one continuous timeline.  Returns ``False`` when no usable recording
-        exists (the caller then summarizes what it already has).
+        The notes plugin calls this after a live class ends. Recording parts
+        share one session and one timeline. Return False if no recording exists.
         """
 
         ctx = self._ctx
@@ -1485,11 +1482,11 @@ class InputPlugin(Plugin):
                     "class": "btn-subtle theme-secondary",
                 }
             )
-            if self._ctx.ui.has_action("summarize.fill_again"):
+            if self._ctx.ui.has_action("notes.fill_again"):
                 buttons.append(
                     {
                         "label": "补录缺失内容",
-                        "action": "summarize.fill_again",
+                        "action": "notes.fill_again",
                         "class": "btn-subtle theme-secondary",
                     }
                 )
@@ -1865,7 +1862,7 @@ class InputPlugin(Plugin):
                     cursors[MediaKind.AUDIO],
                     min(session.audio.duration, float(partial["end_ms"]) / 1000),
                 )
-        pipeline = self._ctx.service("notes-pipeline")
+        pipeline = self._ctx.service("notes")
         notes = (
             pipeline.status(session_id) if pipeline is not None and session_id else None
         )
@@ -2458,7 +2455,7 @@ class InputPlugin(Plugin):
         vlm = self._ctx.service("vlm")
         if vlm is not None:
             vlm.cancel(session.session_id)
-        notes = self._ctx.service("notes-pipeline")
+        notes = self._ctx.service("notes")
         if notes is not None:
             notes.stop(session.session_id)
         self._sources.stop()
@@ -2510,7 +2507,7 @@ class InputPlugin(Plugin):
             session is self._ctx.streams.current and self._ctx.streams.consumers_busy()
         ):
             time.sleep(0.05)
-        notes = self._ctx.service("notes-pipeline")
+        notes = self._ctx.service("notes")
         if notes is not None:
             notes.reset(sid)
         directory = self._ctx.data_dir / "sessions" / sid
@@ -3028,7 +3025,7 @@ class InputPlugin(Plugin):
         vlm = self._ctx.service("vlm")
         if vlm is not None:
             vlm.cancel(session.session_id)
-        notes = self._ctx.service("notes-pipeline")
+        notes = self._ctx.service("notes")
         if notes is not None:
             notes.stop(session.session_id)
         self._sources.stop()

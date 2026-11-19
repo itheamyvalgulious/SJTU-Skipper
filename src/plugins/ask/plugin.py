@@ -31,7 +31,7 @@ from core.settings_spec import SettingsSpec, SettingType
 from core.ui import render_markdown
 from core.file_access import publication_lock
 from core.workspace import FileWorkspace
-from plugins.notes_pipeline.types import NotePublication
+from plugins.notes.types import NotePublication
 from plugins.reader.types import SelectionKind
 
 from .prompts import ASK_PROMPT_TEMPLATE, INSTANT_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT
@@ -60,7 +60,7 @@ class AskService:
 class AskPlugin(Plugin):
     id = "ask"
     requires = ("settings", "llm-agent", "reader")
-    optional_requires = ("notes-pipeline",)
+    optional_requires = ("notes",)
     provides = ("ask",)
     uses_actions = (MESSAGE_ACTION,)
 
@@ -334,7 +334,7 @@ class AskPlugin(Plugin):
         note = Path(path)
         names = set()
         names.add(note.name)
-        pipeline = self.ctx.service("notes-pipeline")
+        pipeline = self.ctx.service("notes")
         if pipeline is not None:
             for kind in NotePublication:
                 names.update(name for name, _ in pipeline.note_files(kind).values())
@@ -351,7 +351,7 @@ class AskPlugin(Plugin):
     def _source_file(self, note: Path) -> Path | None:
         """Locate the complete source through its owning pipeline."""
 
-        pipeline = self.ctx.service("notes-pipeline")
+        pipeline = self.ctx.service("notes")
         if pipeline is not None:
             found = pipeline.source_path(note.parent.parent.name)
             if found is not None and Path(found).exists():
@@ -362,7 +362,7 @@ class AskPlugin(Plugin):
     def _doc_label(self, name: str) -> str:
         """Human title of a note file, asked from the plugin that writes it."""
 
-        pipeline = self.ctx.service("notes-pipeline")
+        pipeline = self.ctx.service("notes")
         if pipeline is not None:
             for kind in NotePublication:
                 for filename, title in pipeline.note_files(kind).values():
@@ -510,9 +510,9 @@ _DEFAULT_DOC_LABELS = {
     "note_knowledge.md": "知识",
     "note_gossip.md": "闲话与分享",
     "note_notice.md": "通知",
-    "instant_note_knowledge.md": "即时知识",
-    "instant_note_gossip.md": "即时闲话",
-    "instant_note_notice.md": "即时通知",
+    "chunk_note_knowledge.md": "分段知识",
+    "chunk_note_gossip.md": "分段闲话",
+    "chunk_note_notice.md": "分段通知",
 }
 
 

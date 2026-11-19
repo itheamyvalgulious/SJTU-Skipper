@@ -7,13 +7,13 @@ from types import SimpleNamespace
 from core.streams import StreamHub
 from core.workspace import FileWorkspace
 from plugins.agent import AgentService
-from plugins.notes_pipeline.plugin import NotesPipelinePlugin
-from plugins.notes_pipeline.types import (
+from plugins.notes.pipeline import NotesPipeline
+from plugins.notes.types import (
     ChunkState,
     GenerationState,
     NotePhase,
 )
-from plugins.summarize.plugin import OnStopAction
+from plugins.notes.view import OnStopAction
 from core.agent_types import (
     AgentEventType,
     AgentRole,
@@ -22,7 +22,7 @@ from core.agent_types import (
     RuntimeFrameType,
 )
 from core.agent_types import IpcMethod
-from plugins.notes_pipeline.prompts import NOTE_HEADERS, SOURCE_FILENAME
+from plugins.notes.prompts import NOTE_HEADERS, SOURCE_FILENAME
 from tests.support import FakeSettings
 from tests.test_agent import ScriptedRuntime
 
@@ -30,9 +30,7 @@ from tests.test_agent import ScriptedRuntime
 @contextmanager
 def pipeline_context(tmp_path, script):
     sdk = ScriptedRuntime(script)
-    settings = FakeSettings(
-        {"notes.concurrency": 4, "instant-summarize.enabled": False}
-    )
+    settings = FakeSettings({"notes.concurrency": 4, "notes.chunks_enabled": False})
     ctx = SimpleNamespace(
         data_dir=tmp_path,
         streams=StreamHub(),
@@ -50,7 +48,7 @@ def pipeline_context(tmp_path, script):
     agent = AgentService(ctx)
     ctx.require = lambda name: {"settings": settings, "agent": agent, "llm": sdk}[name]
     ctx.service = lambda name: None
-    pipeline = NotesPipelinePlugin()
+    pipeline = NotesPipeline()
     pipeline.setup(ctx)
     try:
         yield pipeline, agent, sdk
@@ -181,8 +179,8 @@ def test_empty_finalization_releases_generation(tmp_path):
 
 def test_chunk_only_completion_releases_generation(tmp_path):
     with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
-        pipeline.settings.set("instant-summarize.enabled", True)
-        pipeline.settings.set("summarize.on_stop", OnStopAction.SKIP)
+        pipeline.settings.set("notes.chunks_enabled", True)
+        pipeline.settings.set("notes.on_stop", OnStopAction.SKIP)
         session = pipeline.ctx.streams.start_session("chunk-completion")
         with pipeline.condition:
             state = pipeline._state(session.session_id)

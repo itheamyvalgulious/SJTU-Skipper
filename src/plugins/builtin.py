@@ -18,13 +18,11 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
     from .agent.plugin import AgentPlugin
     from .ask.plugin import AskPlugin
     from .input.plugin import InputPlugin
-    from .instant_summarize.plugin import InstantSummarizePlugin
     from .llm_core.plugin import LLMPlugin
-    from .notes_pipeline import NotesPipelinePlugin
+    from .notes import NotesPlugin
     from .reader.plugin import ReaderPlugin
     from .settings.plugin import SettingsPlugin
     from .stt import STTPlugin
-    from .summarize.plugin import SummarizePlugin
     from .vlm.plugin import VLMPlugin
 
     plugins: list["Plugin"] = [
@@ -40,10 +38,6 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
         plugins.append(STTPlugin())
     if config.enable_vlm:
         plugins.append(VLMPlugin())
-    if config.enable_summarize or config.enable_instant_summarize:
-        plugins.append(NotesPipelinePlugin())
-    if config.enable_summarize:
-        plugins.append(SummarizePlugin())
-    if config.enable_instant_summarize:
-        plugins.append(InstantSummarizePlugin())
+    if config.enable_notes:
+        plugins.append(NotesPlugin())
     return plugins

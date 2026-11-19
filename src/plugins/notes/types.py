@@ -8,7 +8,7 @@ class NoteKind(StrEnum):
 
 
 class NotePublication(StrEnum):
-    INSTANT = "instant"
+    CHUNK = "chunk"
     FINAL = "final"
 
 

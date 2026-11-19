@@ -1,59 +1,76 @@
 from types import SimpleNamespace
 import pytest
-from plugins.instant_summarize.plugin import (
-    InstantSummarizeService,
-    InstantSummarizePlugin,
-)
+from plugins.notes import NotesService
+from plugins.notes.view import NotesView
+from plugins.notes.types import NotePublication
 
 
 def test_service_uses_pipeline_files(tmp_path):
-    expected = {"knowledge": tmp_path / "instant_note_knowledge.md"}
+    expected = {"knowledge": tmp_path / "chunk_note_knowledge.md"}
     pipeline = SimpleNamespace(
         draft_paths=lambda sid: expected,
         note_files=lambda kind: {"knowledge": (f"{kind}.md", "知识")},
         running_tasks=lambda: [],
     )
-    service = InstantSummarizeService(pipeline)
+    service = NotesService(pipeline, SimpleNamespace())
     assert service.draft_paths("course") == expected
-    assert service.note_files()["knowledge"][0] == "instant.md"
+    assert service.note_files(NotePublication.CHUNK)["knowledge"][0] == "chunk.md"
+
+
+def test_service_opens_final_chunk_and_log_views():
+    calls = []
+    view = SimpleNamespace(
+        open_notes=lambda sid, doc: calls.append(("final", sid, doc)),
+        open_chunk_notes=lambda sid, doc: calls.append(("chunk", sid, doc)),
+        open_logs=lambda sid: calls.append(("logs", sid)),
+    )
+    service = NotesService(SimpleNamespace(), view)
+    service.open_notes("course", "knowledge")
+    service.open_chunk_notes("course", "notice")
+    service.open_logs("course")
+    assert calls == [
+        ("final", "course", "knowledge"),
+        ("chunk", "course", "notice"),
+        ("logs", "course"),
+    ]
 
 
 def test_toggle_retains_source_records():
     values = {}
-    plugin = InstantSummarizePlugin()
+    plugin = NotesView()
     plugin.settings = SimpleNamespace(
         set=lambda key, value: values.update({key: value})
     )
     plugin.ctx = SimpleNamespace(ui=SimpleNamespace(refresh=lambda event: None))
-    assert plugin._toggle({"enabled": False})["ok"]
-    assert values["instant-summarize.enabled"] is False
+    assert plugin._chunk_toggle({"enabled": False})["ok"]
+    assert values["notes.chunks_enabled"] is False
 
 
 @pytest.mark.parametrize("selected", ["", "boot"])
 def test_empty_selection_hides_notes(selected):
-    plugin = InstantSummarizePlugin()
+    plugin = NotesView()
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
             selected_class_id=selected,
             current=SimpleNamespace(session_id="processing"),
         )
     )
-    assert plugin._render() == []
-    assert not plugin._read({})["ok"]
+    assert plugin._render_chunks() == []
+    assert not plugin._chunk_read({})["ok"]
 
 
 @pytest.mark.parametrize("target", ["", "boot"])
 def test_invalid_read_target_does_not_use_selection(target):
-    plugin = InstantSummarizePlugin()
+    plugin = NotesView()
     plugin.ctx = SimpleNamespace(streams=SimpleNamespace(selected_class_id="selected"))
-    assert not plugin._read({"session_id": target})["ok"]
+    assert not plugin._chunk_read({"session_id": target})["ok"]
 
 
 def test_notes_use_selected_or_explicit_class(tmp_path):
     reads = []
     statuses = []
     reader = SimpleNamespace(show=lambda **kwargs: reads.append(kwargs) or "note-page")
-    plugin = InstantSummarizePlugin()
+    plugin = NotesView()
     plugin.ctx = SimpleNamespace(
         data_dir=tmp_path,
         streams=SimpleNamespace(
@@ -65,15 +82,15 @@ def test_notes_use_selected_or_explicit_class(tmp_path):
     plugin.settings = SimpleNamespace(get=lambda key, default: default)
     plugin.pipeline = SimpleNamespace(
         status=lambda sid: statuses.append(sid) or {"errors": [], "published_end": 12},
-        note_files=lambda kind: {"knowledge": ("instant_note_knowledge.md", "知识")},
+        note_files=lambda kind: {"knowledge": ("chunk_note_knowledge.md", "知识")},
     )
-    assert plugin._render()
+    assert plugin._render_chunks()
     assert statuses == ["selected"]
-    assert plugin._read({})["ok"]
+    assert plugin._chunk_read({})["ok"]
     plugin.ctx.streams.selected_class_id = ""
-    assert plugin._read({"session_id": "task-page"})["ok"]
+    assert plugin._chunk_read({"session_id": "task-page"})["ok"]
     assert [read["page_key"] for read in reads] == [
-        "selected:instant-summarize",
-        "task-page:instant-summarize",
+        "selected:chunk-notes",
+        "task-page:chunk-notes",
     ]
     assert all("processing" not in read["docs"][0]["path"] for read in reads)

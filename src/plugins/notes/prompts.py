@@ -7,8 +7,8 @@ LABELS = {
     NoteKind.NOTICE: "通知",
 }
 NOTE_HEADERS = {f"note_{kind}.md": f"# 笔记：{LABELS[kind]}\n\n" for kind in KINDS}
-INSTANT_NOTE_HEADERS = {
-    f"instant_note_{kind}.md": f"# 课堂笔记：{LABELS[kind]}\n\n> 未审阅\n\n"
+CHUNK_NOTE_HEADERS = {
+    f"chunk_note_{kind}.md": f"# 课堂笔记：{LABELS[kind]}\n\n> 未审阅\n\n"
     for kind in KINDS
 }
 SOURCE_FILENAME = "lecture_source.md"

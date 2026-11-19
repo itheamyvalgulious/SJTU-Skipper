@@ -47,10 +47,8 @@ from .prompts import (
 
 logger = logging.getLogger("lecture_agent.plugin.vlm")
 
-# The VLM plugin owns this file exclusively: one JSON object per written
-# blackboard item, under ``data_dir/sessions/<session>/``.  The summarize
-# plugin reads it later to rebuild the lecture material, so board text that
-# was already recognised survives a crash, an early stop or a handout rerun.
+# The VLM plugin writes board items here. The notes plugin reads this log
+# to reconstruct lecture material after a stop or a notes rerun.
 VISUAL_LOG = "visual.jsonl"
 
 
@@ -155,8 +153,7 @@ class VlmPlugin(Plugin):
         self._recording_sessions: set[str] = set()
         self._recording_cursor: dict[str, float] = {}
         self._recording_active = False
-        # True while the stop-time tail flush runs; the summarize plugin waits
-        # for it before reading visual.jsonl.
+        # The notes plugin waits for the tail flush before reading visual.jsonl.
         self._flushing = False
         self._processing_session: Any = None
         self._coverage_cache: dict[str, CoverageStore] = {}
