@@ -174,6 +174,7 @@ class VlmPlugin(Plugin):
         )
         self._prepared_future = None
         self._prepared_key = None
+        self._sessions[ctx.streams.current.session_id] = ctx.streams.current
 
         self._register_settings()
         self._register_service()
@@ -674,9 +675,9 @@ class VlmPlugin(Plugin):
                 else:
                     self._process_next_window()
             except Exception as exc:
-                if (
-                    session is not None
-                    and session.session_id in self._cancelled_sessions
+                if session is not None and (
+                    session.session_id in self._cancelled_sessions
+                    or self._ctx.streams.get_session(session.session_id) is not session
                 ):
                     continue
                 logger.exception("VLM worker iteration failed")
@@ -703,6 +704,9 @@ class VlmPlugin(Plugin):
                 self._consecutive_errors = 0
                 self._last_error = ""
 
+            finally:
+                if self._processing_session is session:
+                    self._processing_session = None
         # Flush remaining frames
         with self._lock:
             self._flushing = True
@@ -793,7 +797,10 @@ class VlmPlugin(Plugin):
         if ctx is None:
             return
         session = self._processing_session or ctx.streams.current
-        if session.session_id in self._cancelled_sessions:
+        if (
+            session.session_id in self._cancelled_sessions
+            or ctx.streams.get_session(session.session_id) is not session
+        ):
             return
         dur = session.video.duration
         window = self._window_seconds()
@@ -922,6 +929,11 @@ class VlmPlugin(Plugin):
 
         ctx = self._ctx
         session = self._processing_session or ctx.streams.current
+        if (
+            ctx.streams.get_session(session.session_id) is not session
+            or session.session_id in self._cancelled_sessions
+        ):
+            raise RuntimeError("VLM session cancelled or replaced")
 
         raw_text = str(result.get("text", "") or "")
         text = raw_text
@@ -999,6 +1011,7 @@ class VlmPlugin(Plugin):
             if (
                 session.session_id in self._cancelled_sessions
                 or self._stop_event.is_set()
+                or self._ctx.streams.get_session(session.session_id) is not session
             ):
                 raise RuntimeError("VLM session cancelled")
             detail = {
@@ -1062,30 +1075,44 @@ class VlmPlugin(Plugin):
         force: bool = False,
     ) -> dict[str, Any]:
         ctx = self._ctx
-        self._processing_session = self._processing_session or ctx.streams.current
+        session = self._processing_session or ctx.streams.current
+        if ctx.streams.get_session(session.session_id) is not session:
+            raise RuntimeError("VLM session replaced")
+        self._remember_session(session)
+        self._processing_session = session
         try:
-            result = self._run_window(start, end, frames)
-        except VLMRecognitionError as exc:
-            return self._skip_failed_window(self._processing_session, start, end, exc)
-        except Exception as exc:
-            self._last_error = f"{type(exc).__name__}: {exc}"
-            session = self._processing_session
-            ctx.streams.seal_text(
-                session.session_id,
-                StreamKind.VISUAL,
-                start,
-                error={"start": start, "end": end, "error": self._last_error},
-            )
-            ctx.events.emit(
-                "vlm.error",
-                session_id=self._processing_session.session_id,
-                start=start,
-                end=end,
-                error=self._last_error,
-            )
-            ctx.ui.refresh("vlm.error")
-            raise
-        return self._commit_window(start, end, result)
+            try:
+                result = self._run_window(start, end, frames)
+                if ctx.streams.get_session(session.session_id) is not session:
+                    raise RuntimeError("VLM session replaced")
+            except VLMRecognitionError as exc:
+                return self._skip_failed_window(session, start, end, exc)
+            except Exception as exc:
+                if (
+                    ctx.streams.get_session(session.session_id) is not session
+                    or session.session_id in self._cancelled_sessions
+                ):
+                    raise
+                self._last_error = f"{type(exc).__name__}: {exc}"
+                ctx.streams.seal_text(
+                    session.session_id,
+                    StreamKind.VISUAL,
+                    start,
+                    error={"start": start, "end": end, "error": self._last_error},
+                )
+                ctx.events.emit(
+                    "vlm.error",
+                    session_id=session.session_id,
+                    start=start,
+                    end=end,
+                    error=self._last_error,
+                )
+                ctx.ui.refresh("vlm.error")
+                raise
+            return self._commit_window(start, end, result)
+        finally:
+            if threading.current_thread() is not self._worker:
+                self._processing_session = None
 
     # ------------------------------------------------------------------
     # Recording mode (full-speed ingest + concurrent windows)
@@ -1096,6 +1123,7 @@ class VlmPlugin(Plugin):
     def _coverage(self, session: Any) -> CoverageStore:
         """Per-session coverage of processed video windows."""
 
+        self._remember_session(session)
         sid = str(getattr(session, "session_id", "") or "")
         with self._lock:
             store = self._coverage_cache.get(sid)
@@ -1114,7 +1142,7 @@ class VlmPlugin(Plugin):
         if not self.enabled():
             return False
         with self._lock:
-            if self._recording_active:
+            if self._recording_active or self._requests:
                 return True
             ctx = self._ctx
             session = ctx.streams.current if ctx is not None else None
@@ -1167,7 +1195,10 @@ class VlmPlugin(Plugin):
 
         try:
             while not self._stop_event.is_set():
-                if sid in self._cancelled_sessions:
+                if (
+                    sid in self._cancelled_sessions
+                    or ctx.streams.get_session(sid) is not session
+                ):
                     return
                 available = session.video.duration
                 # Frames between sampling windows are never used; keep the
@@ -1224,27 +1255,58 @@ class VlmPlugin(Plugin):
                 return
         finally:
             with self._lock:
-                self._recording_cursor[sid] = max(
-                    float(self._recording_cursor.get(sid, 0.0)),
-                    center - half,
-                )
-                self._recording_sessions.add(sid)
+                if ctx.streams.get_session(sid) is session:
+                    self._recording_cursor[sid] = max(
+                        float(self._recording_cursor.get(sid, 0.0)),
+                        center - half,
+                    )
+                    self._recording_sessions.add(sid)
                 self._recording_active = False
 
     # ----------------------------------------------------------------
     # Event handlers
     # ----------------------------------------------------------------
+    def _remember_session(self, session) -> None:
+        sid = session.session_id
+        if self._sessions.get(sid) is session:
+            return
+        with self._lock:
+            if self._sessions.get(sid) is session:
+                return
+            self._sessions[sid] = session
+            self._cancelled_sessions.discard(sid)
+            self._recording_sessions.discard(sid)
+            self._recording_cursor.pop(sid, None)
+            self._coverage_cache.pop(sid, None)
+            self._disabled_at.pop(sid, None)
+            self._session_history.pop(sid, None)
+            if self._prepared_key is not None and self._prepared_key[0] == sid:
+                self._prepared_future.cancel()
+                self._prepared_future = None
+                self._prepared_key = None
+            if self._last_session in ("", sid):
+                self._last_session = ""
+                self._cursor = 0.0
+                self._next_center = self._window_seconds() / 2
+                self._history = deque(maxlen=self._history_windows())
+                self._latest_image_path = ""
+                self._last_window = {}
+                self._last_error = ""
+                self._consecutive_errors = 0
+
     def _on_session_started(self, event: Event) -> None:
         session = self._ctx.streams.get_session(str(event.get("session_id", "")))
+        if session is not None and event.get("started_at") != session.started_at:
+            return
         if session is not None:
-            self._sessions[session.session_id] = session
+            self._remember_session(session)
             self._ctx.streams.set_text_enabled(
                 session.session_id, StreamKind.VISUAL, self.enabled()
             )
 
     def _select_session(self):
         current = self._ctx.streams.current
-        self._sessions[current.session_id] = current
+        self._remember_session(current)
         for session in list(self._sessions.values()):
             if session.session_id in self._cancelled_sessions or session.meta.get(
                 "input_failed"

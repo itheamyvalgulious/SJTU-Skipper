@@ -97,6 +97,7 @@ class STTPlugin(Plugin):
         self._provider: Any | None = None
         self._processing_session: Any = None
         self._states: dict[str, SessionState] = {}
+        self._state_sessions: dict[str, Any] = {}
         self._sessions: dict[str, Any] = {}
         self._disabled_at: dict[str, float] = {}
         self._coverage_cache: dict[str, CoverageStore] = {}
@@ -395,9 +396,16 @@ class STTPlugin(Plugin):
 
     def _state(self, session: Any) -> SessionState:
         with self._lock:
-            return self._states.setdefault(session.session_id, SessionState())
+            sid = session.session_id
+            if self._state_sessions.get(sid) is not session:
+                self._state_sessions[sid] = session
+                self._states[sid] = SessionState()
+                self._coverage_cache.pop(sid, None)
+                self._disabled_at.pop(sid, None)
+            return self._states[sid]
 
     def _coverage(self, session: Any) -> CoverageStore:
+        self._state(session)
         with self._lock:
             sid = session.session_id
             if sid not in self._coverage_cache:
@@ -421,6 +429,8 @@ class STTPlugin(Plugin):
             return False
         session = self._ctx.streams.current
         state = self._state(session)
+        if session.meta.get("processing_cancelled"):
+            return state.active
         return (
             state.active
             or state.partial is not None
@@ -428,8 +438,12 @@ class STTPlugin(Plugin):
         )
 
     def flushing(self) -> bool:
-        return bool(
-            self._ctx is not None and self._state(self._ctx.streams.current).flushing
+        if self._ctx is None:
+            return False
+        session = self._ctx.streams.current
+        state = self._state(session)
+        return (
+            state.active if session.meta.get("processing_cancelled") else state.flushing
         )
 
     def _context_hint(self, session: Any) -> str:
@@ -566,7 +580,9 @@ class STTPlugin(Plugin):
                 candidates = [
                     session
                     for session in sessions
-                    if not self._ctx.streams.text_progress(
+                    if not session.meta.get("processing_cancelled")
+                    and self._ctx.streams.get_session(session.session_id) is session
+                    and not self._ctx.streams.text_progress(
                         session.session_id, StreamKind.TRANSCRIPT
                     ).final
                     and (
@@ -575,6 +591,9 @@ class STTPlugin(Plugin):
                     )
                 ]
                 session = candidates[0] if candidates else self._ctx.streams.current
+                if session.meta.get("processing_cancelled"):
+                    self._stop.wait(0.05)
+                    continue
                 self._sessions[session.session_id] = session
                 state = self._state(session)
                 if state.scheduled >= session.audio.duration - EPS:
@@ -631,7 +650,13 @@ class STTPlugin(Plugin):
                 self._ctx = None
 
     def _cancelled(self, session: Any) -> bool:
-        return self._stop.is_set() or self._cancel.is_set() or not self.enabled()
+        return (
+            self._stop.is_set()
+            or self._cancel.is_set()
+            or not self.enabled()
+            or self._ctx.streams.get_session(session.session_id) is not session
+            or bool(session.meta.get("processing_cancelled"))
+        )
 
     @staticmethod
     def _finished(session: Any) -> bool:
@@ -906,6 +931,8 @@ class STTPlugin(Plugin):
                 state.scheduled = max(state.scheduled, end)
 
     def _success(self, session: Any, start: float, end: float) -> None:
+        if self._ctx.streams.get_session(session.session_id) is not session:
+            return
         self._coverage(session).mark(MediaKind.AUDIO, start, end)
         self._state(session).error = ""
         session.audio_gate.release(end)
@@ -916,6 +943,8 @@ class STTPlugin(Plugin):
         self, session: Any, start: float, end: float, text: str, extra: dict[str, Any]
     ) -> Any:
         text = text.strip()
+        if self._ctx.streams.get_session(session.session_id) is not session:
+            return
         if not text:
             return
         state = self._state(session)
@@ -954,6 +983,8 @@ class STTPlugin(Plugin):
     def _fail(
         self, session: Any, start: float, end: float, error: BaseException
     ) -> None:
+        if self._ctx.streams.get_session(session.session_id) is not session:
+            return
         state = self._state(session)
         state.error = str(error)
         state.failed.append({"start": start, "end": end, "error": str(error)})
@@ -989,7 +1020,10 @@ class STTPlugin(Plugin):
                 result = provider.transcribe(
                     session.audio.read_as_wav(a, b), **metadata
                 )
-                if self._stop.is_set() or self._ctx.streams.current is not session:
+                if (
+                    self._stop.is_set()
+                    or self._ctx.streams.get_session(session.session_id) is not session
+                ):
                     raise SttError("The STT request was cancelled.")
                 if not isinstance(result, dict) or not isinstance(
                     result.get("segments"), list
@@ -1108,7 +1142,10 @@ class STTPlugin(Plugin):
 
     def _on_session_started(self, event: Any) -> None:
         session = self._ctx.streams.get_session(str(event.get("session_id", "")))
+        if session is not None and event.get("started_at") != session.started_at:
+            return
         if session is not None:
+            self._state(session)
             self._sessions[session.session_id] = session
             self._ctx.streams.set_text_enabled(
                 session.session_id, StreamKind.TRANSCRIPT, self.enabled()
@@ -1118,6 +1155,8 @@ class STTPlugin(Plugin):
         if self._ctx is None:
             return
         session = self._ctx.streams.get_session(str(event.get("session_id", "")))
+        if session is not None and event.get("started_at") != session.started_at:
+            return
         if session is None:
             return
         self._sessions[session.session_id] = session

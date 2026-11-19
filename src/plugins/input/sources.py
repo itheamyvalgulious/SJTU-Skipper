@@ -9,6 +9,7 @@ from pathlib import Path
 from enum import StrEnum
 from typing import Any, Callable, Protocol
 
+from core.lecture import source_id
 from core.media import MediaKind, ProcessingMode, SourceKind
 from urllib.parse import urlsplit
 
@@ -944,14 +945,15 @@ class SourceManager:
                 self._hub.audio_sample_rate = self._sample_rate
             except Exception:
                 pass
+            session_id = meta.get("class_id") or source_id(spec.url)
             current = self._hub.current
             reuse = (
                 bool(spec.continue_session)
-                and current.session_id != "boot"
+                and current.session_id == session_id
                 and current.ended_at is None
             )
             if not reuse:
-                current = self._hub.start_session(meta=meta)
+                current = self._hub.start_session(session_id, meta=meta)
             else:
                 current.meta.update(meta)
             current.input_done = False

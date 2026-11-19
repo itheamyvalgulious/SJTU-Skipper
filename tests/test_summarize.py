@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import pytest
 from plugins.summarize.plugin import SummarizePlugin
 
 
@@ -13,14 +14,27 @@ def test_stop_policy_is_session_bound():
     assert calls == ["old-course"]
 
 
-def test_fill_requests_original_course():
+def test_fill_keeps_class_identity():
     calls = []
     plugin = SummarizePlugin()
     plugin.pipeline = SimpleNamespace(finalize=calls.append)
-    fill = SimpleNamespace(meta={"fill_for": "original-course"})
+    fill = SimpleNamespace(meta={"fill_for": "course"})
     plugin.ctx = SimpleNamespace(streams=SimpleNamespace(get_session=lambda sid: fill))
-    plugin._stopped({"session_id": "fill-course"})
-    assert calls == ["original-course"]
+    plugin._stopped({"session_id": "course", "meta": fill.meta})
+    assert calls == ["course"]
+
+
+def test_stale_stop_does_not_finalize_replacement():
+    calls = []
+    plugin = SummarizePlugin()
+    plugin.pipeline = SimpleNamespace(finalize=calls.append)
+    plugin.ctx = SimpleNamespace(
+        streams=SimpleNamespace(
+            get_session=lambda sid: SimpleNamespace(started_at=2, meta={})
+        )
+    )
+    plugin._stopped({"session_id": "course", "started_at": 1, "meta": {}})
+    assert calls == []
 
 
 def test_skip_preserves_preview():
@@ -40,7 +54,7 @@ def test_log_pages_keep_their_session():
     from tests.support import FakeSettings
 
     ui = UIManager()
-    streams = SimpleNamespace(notes_session_id="first")
+    streams = SimpleNamespace(selected_class_id="first")
     states = {
         sid: {
             "session_id": sid,
@@ -71,7 +85,7 @@ def test_log_pages_keep_their_session():
         result = ui.dispatch_action("summarize.logs", {})
         first_page = result.open_page
         ui.open_page(first_page)
-        streams.notes_session_id = "second"
+        streams.selected_class_id = "second"
         second_page = ui.dispatch_action("summarize.logs", {}).open_page
         ui.open_page(second_page)
         assert second_page != first_page
@@ -88,3 +102,61 @@ def test_log_pages_keep_their_session():
     finally:
         plugin.teardown()
     assert not ui.has_page(first_page) and not ui.has_page(second_page)
+
+
+@pytest.mark.parametrize("selected", ["", "boot"])
+def test_empty_selection_hides_notes(selected):
+    plugin = SummarizePlugin()
+    plugin.ctx = SimpleNamespace(
+        streams=SimpleNamespace(
+            selected_class_id=selected,
+            current=SimpleNamespace(session_id="processing"),
+        )
+    )
+    assert plugin._render() == []
+    for action in ("_generate", "_stop", "_delete", "_read", "_logs", "_fill_again"):
+        assert not getattr(plugin, action)({})["ok"]
+
+
+@pytest.mark.parametrize("target", ["", "boot"])
+def test_invalid_action_target_does_not_use_selection(target):
+    plugin = SummarizePlugin()
+    plugin.ctx = SimpleNamespace(streams=SimpleNamespace(selected_class_id="selected"))
+    for action in ("_generate", "_stop", "_delete", "_read", "_logs", "_fill_again"):
+        assert not getattr(plugin, action)({"session_id": target})["ok"]
+
+
+def test_generation_uses_selected_or_explicit_class():
+    calls = []
+    plugin = SummarizePlugin()
+    plugin.ctx = SimpleNamespace(
+        streams=SimpleNamespace(
+            selected_class_id="selected",
+            current=SimpleNamespace(session_id="processing"),
+        )
+    )
+    plugin.pipeline = SimpleNamespace(start=lambda sid: calls.append(sid) or True)
+    assert plugin._generate({})["ok"]
+    plugin.ctx.streams.selected_class_id = ""
+    assert plugin._generate({"session_id": "task-page"})["ok"]
+    assert calls == ["selected", "task-page"]
+
+
+def test_sidebar_status_uses_selected_class():
+    from tests.support import FakeSettings
+
+    calls = []
+    plugin = SummarizePlugin()
+    plugin.ctx = SimpleNamespace(
+        streams=SimpleNamespace(
+            selected_class_id="selected",
+            current=SimpleNamespace(session_id="processing"),
+        )
+    )
+    plugin.settings = FakeSettings()
+    plugin.notices = {}
+    plugin.pipeline = SimpleNamespace(
+        status=lambda sid: calls.append(sid) or {"generation_state": "not_started"}
+    )
+    assert plugin._render()
+    assert calls == ["selected"]

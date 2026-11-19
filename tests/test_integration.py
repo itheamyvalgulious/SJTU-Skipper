@@ -79,7 +79,9 @@ def test_instant_summarize_writes_three_files(tmp_path: Path) -> None:
     runtime.start()
     runtime.services.require("settings").set("notes.chunk_seconds", 60)
     try:
-        session = runtime.hub.start_session(meta={"course": "集成测试"})
+        session = runtime.hub.start_session(
+            "instant-notes", meta={"course": "集成测试"}
+        )
         session.transcript.append(
             "今天我们讲留数定理。" * 80,
             start=0.0,
@@ -143,7 +145,9 @@ def test_whole_lecture_summarize_rewrites_outline(tmp_path: Path) -> None:
     runtime.services.require("settings").set("summarize.review_enabled", False)
     runtime.services.require("settings").set("summarize.on_stop", "skip")
     try:
-        session = runtime.hub.start_session(meta={"course": "集成测试"})
+        session = runtime.hub.start_session(
+            "whole-lecture", meta={"course": "集成测试"}
+        )
         session.transcript.append(
             "留数定理：设 f 在 D 内除有限个孤立奇点外解析……" * 30,
             start=0.0,
@@ -209,7 +213,9 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
     )
     runtime.start()
     try:
-        session = runtime.hub.start_session(meta={"course": "集成测试"})
+        session = runtime.hub.start_session(
+            "instant-asking", meta={"course": "集成测试"}
+        )
         assert runtime.bus.flush(1.0)
         sid = session.session_id
         knowledge = tmp_path / "sessions" / sid / "notes" / "note_knowledge.md"

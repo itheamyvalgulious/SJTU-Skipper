@@ -155,8 +155,8 @@ class SettingsPlugin(Plugin):
         if not groups and not sections:
             return [
                 {
-                    "type": BlockType.MARKDOWN,
-                    "text": ("### 设置\n\n暂无设置项。"),
+                    "type": BlockType.TEXT,
+                    "text": "暂无设置项．",
                 }
             ]
         tabs: list[dict[str, Any]] = []

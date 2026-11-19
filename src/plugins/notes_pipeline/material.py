@@ -18,74 +18,47 @@ def read_log(path: Path) -> list[dict]:
     return records
 
 
-def shift_records(records: list[dict], shift: float) -> list[dict]:
-    result = []
-    for record in records:
-        moved = dict(record)
-        for key in ("start", "end"):
-            if moved.get(key) is not None:
-                moved[key] = float(moved[key]) + shift
-        result.append(moved)
-    return result
-
-
-def fill_sessions(data_dir: Path, session_id: str) -> list[tuple[str, float]]:
-    result = []
-    primary = data_dir / "sessions" / session_id / "meta.json"
-    primary_meta = (
-        json.loads(primary.read_text(encoding="utf-8")) if primary.exists() else {}
-    )
-    started = float(primary_meta.get("started_at", 0) or 0)
-    for path in sorted((data_dir / "sessions").glob("*/meta.json")):
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        meta = raw.get("meta", raw)
-        if meta.get("fill_for") == session_id:
-            begin = float(meta.get("media_begin", 0) or 0)
-            result.append(
-                (path.parent.name, begin - started if begin and started else 0.0)
-            )
-    return result
-
-
 def collect_material(ctx, session_id: str) -> list[dict]:
     result = []
-    for sid, shift in [(session_id, 0.0), *fill_sessions(ctx.data_dir, session_id)]:
-        session = ctx.streams.get_session(sid)
-        for stream, filename in (
-            (StreamKind.TRANSCRIPT, "transcript.jsonl"),
-            (StreamKind.VISUAL, "visual.jsonl"),
-        ):
-            records = read_log(ctx.data_dir / "sessions" / sid / filename)
-            if session is not None:
+    session = ctx.streams.get_session(session_id)
+    for stream, filename in (
+        (StreamKind.TRANSCRIPT, "transcript.jsonl"),
+        (StreamKind.VISUAL, "visual.jsonl"),
+    ):
+        records = read_log(ctx.data_dir / "sessions" / session_id / filename)
+        if session is not None:
 
-                def identity(record):
-                    return (
-                        round(float(record["start"]), 3)
-                        if record.get("start") is not None
-                        else None,
-                        round(float(record["end"]), 3)
-                        if record.get("end") is not None
-                        else None,
-                        record.get("text"),
-                    )
+            def identity(record):
+                return (
+                    round(float(record["start"]), 3)
+                    if record.get("start") is not None
+                    else None,
+                    round(float(record["end"]), 3)
+                    if record.get("end") is not None
+                    else None,
+                    record.get("text"),
+                )
 
-                known = Counter(identity(record) for record in records)
-                for item in getattr(session, stream).items_since(0):
-                    record = {"text": item.text, "start": item.start, "end": item.end}
-                    key = identity(record)
-                    if known[key]:
-                        known[key] -= 1
-                    else:
-                        records.append(record)
-            for record in shift_records(records, shift):
-                if stream == StreamKind.VISUAL and record.get("error"):
-                    error = record["error"]
-                    record["text"] = (
+            known = Counter(identity(record) for record in records)
+            for item in getattr(session, stream).items_since(0):
+                record = {"text": item.text, "start": item.start, "end": item.end}
+                key = identity(record)
+                if known[key]:
+                    known[key] -= 1
+                else:
+                    records.append(record)
+        for record in records:
+            if stream == StreamKind.VISUAL and record.get("error"):
+                error = record["error"]
+                record = {
+                    **record,
+                    "text": (
                         f"该时间段未取得板书：{error['message']} "
                         f"({error['code']}, attempts={error['attempts']})"
-                    )
-                if str(record.get("text", "")).strip():
-                    result.append({**record, "stream": stream, "origin": sid})
+                    ),
+                }
+            if str(record.get("text", "")).strip():
+                result.append({**record, "stream": stream, "origin": session_id})
     return sorted(
         result,
         key=lambda record: (

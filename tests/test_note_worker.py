@@ -166,7 +166,7 @@ def test_note_runs_send_only_session_and_instruction(tmp_path):
 
 def test_empty_finalization_releases_generation(tmp_path):
     with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
-        session = pipeline.ctx.streams.start_session()
+        session = pipeline.ctx.streams.start_session("empty-finalization")
         session.input_done = True
         with pipeline.condition:
             assert pipeline.finalize(session.session_id)
@@ -183,7 +183,7 @@ def test_chunk_only_completion_releases_generation(tmp_path):
     with pipeline_context(tmp_path, None) as (pipeline, agent, sdk):
         pipeline.settings.set("instant-summarize.enabled", True)
         pipeline.settings.set("summarize.on_stop", OnStopAction.SKIP)
-        session = pipeline.ctx.streams.start_session()
+        session = pipeline.ctx.streams.start_session("chunk-completion")
         with pipeline.condition:
             state = pipeline._state(session.session_id)
             assert (

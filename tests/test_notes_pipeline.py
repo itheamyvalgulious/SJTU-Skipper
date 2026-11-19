@@ -39,7 +39,7 @@ def test_visual_gap_survives_reload(tmp_path):
     from plugins.notes_pipeline.material import collect_material, render
 
     hub = StreamHub()
-    session = hub.start_session()
+    session = hub.start_session("visual-gap")
     root = tmp_path / "sessions" / session.session_id
     root.mkdir(parents=True)
     detail = {"code": "thinking_loop", "message": "Repeated board", "attempts": 3}
@@ -93,7 +93,7 @@ def test_gap_reaches_chunk_and_final_source(tmp_path):
         return write_notes(session, "Known theorem")
 
     with note_pipeline(tmp_path, run) as env:
-        session = env.hub.start_session()
+        session = env.hub.start_session("gap-source")
         root = tmp_path / "sessions" / session.session_id
         root.mkdir(parents=True, exist_ok=True)
         (root / "visual.jsonl").write_text(
@@ -126,23 +126,25 @@ def test_gap_reaches_chunk_and_final_source(tmp_path):
         assert "Known theorem" in final
 
 
-def test_fill_gap_time_shift(tmp_path):
+def test_fill_material_uses_class_directory(tmp_path):
     import json
     from plugins.notes_pipeline.material import collect_material, render
 
     primary = tmp_path / "sessions" / "primary"
-    fill = tmp_path / "sessions" / "fill"
     primary.mkdir(parents=True)
-    fill.mkdir()
-    (primary / "meta.json").write_text(json.dumps({"started_at": 100}))
-    (fill / "meta.json").write_text(
-        json.dumps({"meta": {"fill_for": "primary", "media_begin": 120}})
-    )
-    (fill / "visual.jsonl").write_text(
+    (primary / "meta.json").write_text(
         json.dumps(
             {
-                "start": 2,
-                "end": 4,
+                "session_id": "primary",
+                "meta": {"fill_for": "primary"},
+            }
+        )
+    )
+    (primary / "visual.jsonl").write_text(
+        json.dumps(
+            {
+                "start": 22,
+                "end": 24,
                 "error": {
                     "code": "thinking_loop",
                     "message": "Repeated board",
@@ -155,7 +157,8 @@ def test_fill_gap_time_shift(tmp_path):
     records = collect_material(
         SimpleNamespace(data_dir=tmp_path, streams=StreamHub()), "primary"
     )
-    assert records[0]["origin"] == "fill"
+    assert len(records) == 1
+    assert records[0]["origin"] == "primary"
     assert "[22.000s-24.000s] 板书识别缺口" in render(records)
 
 
@@ -477,12 +480,14 @@ def write_notes(session, body):
 
 @contextmanager
 def note_pipeline(tmp_path, run, *, settings=None, releases=()):
+    from core.events import Event
+
     callbacks = {}
     updates = queue.Queue()
 
     def emit(name, **payload):
         for callback in tuple(callbacks.get(name, ())):
-            callback(payload)
+            callback(Event(name, payload, 0, 0))
 
     def on(name, callback, **kwargs):
         callbacks.setdefault(name, []).append(callback)
@@ -578,7 +583,7 @@ def test_log_and_stream_record_once(tmp_path):
     from plugins.notes_pipeline.material import collect_material
 
     hub = StreamHub()
-    session = hub.start_session()
+    session = hub.start_session("log-and-stream")
     session.transcript.append("condition", start=1.0001, end=2.0001)
     directory = tmp_path / "sessions" / session.session_id
     directory.mkdir(parents=True)
@@ -597,7 +602,7 @@ def test_late_visual_window_blocks_chunk():
     from plugins.notes_pipeline.plugin import NotesPipelinePlugin
 
     hub = StreamHub()
-    session = hub.start_session()
+    session = hub.start_session("late-visual-window")
     pipeline = NotesPipelinePlugin()
     pipeline.ctx = SimpleNamespace(streams=hub, service=lambda name: object())
     hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 600)
@@ -623,7 +628,7 @@ def test_disabled_source_does_not_end_lecture():
     from plugins.notes_pipeline.plugin import NotesPipelinePlugin
 
     hub = StreamHub()
-    session = hub.start_session()
+    session = hub.start_session("disabled-source")
     pipeline = NotesPipelinePlugin()
     pipeline.ctx = SimpleNamespace(streams=hub, service=lambda name: object())
     hub.set_text_enabled(session.session_id, StreamKind.VISUAL, False)
@@ -650,7 +655,7 @@ def test_chunks_publish_in_source_order(tmp_path):
         return result
 
     with note_pipeline(tmp_path, run, releases=(release_first,)) as env:
-        session = env.hub.start_session()
+        session = env.hub.start_session("source-order")
         session.transcript.append("first-core", start=0, end=10)
         session.transcript.append("second-core", start=10, end=20)
         env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 20)
@@ -690,7 +695,7 @@ def test_final_request_survives_busy_chunk(tmp_path):
         return write_notes(session, source)
 
     with note_pipeline(tmp_path, run, releases=(release_chunk,)) as env:
-        session = env.hub.start_session(meta={"total_media_seconds": 13})
+        session = env.hub.start_session("short-tail", meta={"total_media_seconds": 13})
         session.transcript.append("initial-core", start=0, end=10)
         env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 10)
         assert chunk_started.wait(8)
@@ -741,7 +746,7 @@ def test_failed_chunk_keeps_full_final_source(tmp_path):
         return write_notes(session, "Recovered from complete original source")
 
     with note_pipeline(tmp_path, run, releases=(release_writer,)) as env:
-        session = env.hub.start_session()
+        session = env.hub.start_session("complete-original")
         session.transcript.append(
             "Required theorem and every condition", start=0, end=10
         )
@@ -795,16 +800,20 @@ def test_final_tasks_keep_session_sources_when_selection_changes(tmp_path):
             "First lecture unique condition",
             "Second lecture unique theorem",
         ):
-            session = env.hub.start_session(meta={"title": marker})
+            session = env.hub.start_session(
+                f"lecture-{len(lectures) + 1}", meta={"title": marker}
+            )
             session.transcript.append(marker, start=0, end=10)
             env.hub.end_session()
             env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 10, final=True)
             lectures.append((session.session_id, marker))
             assert env.pipeline.start(session.session_id)
         both_writers.wait(8)
-        third = env.hub.start_session(meta={"title": "Unrelated selected lecture"})
+        third = env.hub.start_session(
+            "lecture-3", meta={"title": "Unrelated selected lecture"}
+        )
         third.transcript.append("Do not copy this third lecture", start=0, end=1)
-        env.hub.set_notes_session(third.session_id)
+        env.hub.select_class(third.session_id)
         release_writers.set()
         env.wait_until(
             lambda: all(
@@ -833,7 +842,7 @@ def test_published_review_survives_restart(tmp_path):
     with note_pipeline(
         tmp_path, lambda session, instruction: write_notes(session, "Complete lecture")
     ) as env:
-        session = env.hub.start_session()
+        session = env.hub.start_session("published-review")
         session.transcript.append("Definition", start=0, end=10)
         env.hub.end_session()
         env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 10, final=True)
@@ -863,7 +872,7 @@ def test_manual_entries_keep_incremental_occurrences(tmp_path):
         return write_notes(session, source)
 
     with note_pipeline(tmp_path, run) as env:
-        session = env.hub.start_session()
+        session = env.hub.start_session("incremental-occurrences")
         session.transcript.append("Repeated condition")
         env.wait_until(lambda: len(sources) == 1)
         session.transcript.append("Repeated condition")
@@ -877,9 +886,9 @@ def test_manual_entries_keep_incremental_occurrences(tmp_path):
 def test_lecture_context_uses_target_session(tmp_path):
     hub = StreamHub()
     target = hub.start_session(
-        meta={"course_name": "Target course", "date": "2026-11-10"}
+        "target-course", meta={"course_name": "Target course", "date": "2026-11-10"}
     )
-    hub.start_session(meta={"course_name": "Other course"})
+    hub.start_session("other-course", meta={"course_name": "Other course"})
     pipeline = NotesPipelinePlugin()
     pipeline.ctx = SimpleNamespace(streams=hub, data_dir=tmp_path)
     context = pipeline._lecture_context(target.session_id)
@@ -1213,7 +1222,7 @@ def test_initial_failure_cannot_continue(tmp_path, draft):
         tmp_path, run, settings={"instant-summarize.enabled": False}
     ) as env:
         pipeline = env.pipeline
-        session = env.hub.start_session()
+        session = env.hub.start_session("cancelled-review")
         session.transcript.append("Definition", start=0, end=10)
         env.hub.end_session()
         env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 10, final=True)
@@ -1425,3 +1434,214 @@ def test_continuation_accepts_sdk_title_envelope(tmp_path):
             env.pipeline.queue.clear()
             env.pipeline.writer_messages.clear()
             env.pipeline.continuations.clear()
+
+
+def test_same_id_reprocess_replaces_notes(tmp_path):
+    def run(session, instruction):
+        return write_notes(session, session.workspace.text(SOURCE_FILENAME))
+
+    with note_pipeline(
+        tmp_path, run, settings={"instant-summarize.enabled": False}
+    ) as env:
+        old = env.hub.start_session("same-class")
+        old.transcript.append("Old unique theorem", start=0, end=2)
+        env.hub.end_session()
+        env.hub.seal_text(old.session_id, StreamKind.TRANSCRIPT, 2, final=True)
+        assert env.pipeline.start(old.session_id)
+        env.wait_until(
+            lambda: env.pipeline.status(old.session_id)["phase"] == NotePhase.PUBLISHED
+        )
+        assert env.pipeline.reset(old.session_id)
+        root = tmp_path / "sessions" / old.session_id
+        assert not (root / "notes").exists()
+        assert not (root / "note_work").exists()
+        assert not (root / SOURCE_FILENAME).exists()
+        assert not env.pipeline.writer_messages
+        assert not env.pipeline.continuations
+
+        session = env.hub.start_session(old.session_id)
+        assert env.pipeline.status(session.session_id)["total_chunks"] == 0
+        session.transcript.append("Fresh unique theorem", start=0, end=1)
+        env.hub.end_session()
+        env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 1, final=True)
+        assert env.pipeline.start(session.session_id)
+        env.wait_until(
+            lambda: (
+                env.pipeline.status(session.session_id)["phase"] == NotePhase.PUBLISHED
+            )
+        )
+        source = env.pipeline.source_path(session.session_id).read_text()
+        assert "Fresh unique theorem" in source
+        assert "Old unique theorem" not in source
+        for filename, _ in env.pipeline.note_files(NotePublication.FINAL).values():
+            text = (root / "notes" / filename).read_text()
+            assert "Fresh unique theorem" in text
+            assert "Old unique theorem" not in text
+
+
+def test_same_id_fill_keeps_published_notes(tmp_path):
+    with note_pipeline(
+        tmp_path,
+        lambda session, instruction: write_notes(session, "Valid notes"),
+        settings={"instant-summarize.enabled": False},
+    ) as env:
+        old = env.hub.start_session("fill-class")
+        old.transcript.append("Valid theorem", start=0, end=2)
+        env.hub.end_session()
+        env.hub.seal_text(old.session_id, StreamKind.TRANSCRIPT, 2, final=True)
+        assert env.pipeline.start(old.session_id)
+        env.wait_until(
+            lambda: env.pipeline.status(old.session_id)["phase"] == NotePhase.PUBLISHED
+        )
+        source = env.pipeline.source_path(old.session_id).read_text()
+        session = env.hub.start_session(
+            old.session_id, meta={"fill_for": old.session_id}
+        )
+        assert env.pipeline.status(session.session_id)["phase"] == NotePhase.PUBLISHED
+        assert env.pipeline.source_path(session.session_id).read_text() == source
+
+
+def test_reset_drains_running_writer(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+    reset_done = threading.Event()
+
+    def run(session, instruction):
+        started.set()
+        assert release.wait(8)
+        return write_notes(session, "Cancelled output")
+
+    with note_pipeline(
+        tmp_path,
+        run,
+        settings={"instant-summarize.enabled": False},
+        releases=(release,),
+    ) as env:
+        session = env.hub.start_session("reset-writer")
+        session.transcript.append("Theorem", start=0, end=2)
+        env.hub.end_session()
+        env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 2, final=True)
+        assert env.pipeline.start(session.session_id)
+        assert started.wait(8)
+
+        def reset():
+            env.pipeline.reset(session.session_id)
+            reset_done.set()
+
+        worker = threading.Thread(target=reset)
+        worker.start()
+        try:
+            with env.pipeline.condition:
+                assert env.pipeline.condition.wait_for(
+                    lambda: env.pipeline._state(session.session_id).get(
+                        "restart_cancelled"
+                    ),
+                    timeout=8,
+                )
+            assert not reset_done.is_set()
+            release.set()
+            assert reset_done.wait(8)
+            root = tmp_path / "sessions" / session.session_id
+            assert not (root / "notes").exists()
+            assert not (root / "note_work").exists()
+            assert not env.pipeline.active
+        finally:
+            release.set()
+            worker.join(8)
+
+
+def test_empty_selection_does_not_create_note_state(tmp_path):
+    with note_pipeline(tmp_path, lambda *args: note_result()) as env:
+        for processing in (False, True):
+            if processing:
+                env.hub.start_session("processing")
+            with env.pipeline.condition:
+                sessions = set(env.pipeline.sessions)
+                status = env.pipeline.status()
+                assert status["session_id"] == ""
+                assert status["generation_state"] == GenerationState.NOT_STARTED
+                assert status["tasks"] == []
+                for target in (None, "", "boot"):
+                    for action in ("start", "finalize", "stop", "reset", "delete"):
+                        assert not getattr(env.pipeline, action)(target)
+                    assert env.pipeline.draft_paths(target) == {}
+                    assert env.pipeline.source_path(target) is None
+                assert set(env.pipeline.sessions) == sessions
+        assert not (tmp_path / "sessions" / "note_work").exists()
+        assert not (tmp_path / "sessions" / "notes").exists()
+        assert not (tmp_path / "sessions" / "boot").exists()
+
+
+def test_selected_status_does_not_follow_processing(tmp_path):
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+
+    def run(session, instruction):
+        writer_started.set()
+        assert release_writer.wait(8)
+        return write_notes(session, "Background source")
+
+    with note_pipeline(
+        tmp_path,
+        run,
+        settings={"instant-summarize.enabled": False},
+        releases=(release_writer,),
+    ) as env:
+        session = env.hub.start_session("processing")
+        session.transcript.append("Background source", start=0, end=10)
+        env.hub.end_session()
+        env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 10, final=True)
+        assert env.pipeline.start(session.session_id)
+        assert writer_started.wait(8)
+        env.hub.select_class("unprocessed")
+        status = env.pipeline.status()
+        assert status["session_id"] == "unprocessed"
+        assert status["generation_state"] == GenerationState.NOT_STARTED
+        assert status["tasks"] == []
+        assert status["published_end"] == 0
+        assert env.pipeline.status(session.session_id)["generation_state"] == (
+            GenerationState.GENERATING
+        )
+        for target in ("", "boot"):
+            assert not env.pipeline.finalize(target)
+            assert not env.pipeline.stop(target)
+            assert env.pipeline.status(target)["session_id"] == ""
+        env.hub.select_class("")
+        assert env.pipeline.status()["session_id"] == ""
+        assert env.pipeline.source_path() is None
+        release_writer.set()
+        env.wait_until(
+            lambda: (
+                env.pipeline.status(session.session_id)["phase"] == NotePhase.PUBLISHED
+            )
+        )
+        source = env.pipeline.source_path(session.session_id).read_text()
+        assert "Background source" in source
+        assert env.hub.selected_class_id == ""
+
+
+def test_startup_loads_class_state_without_boot(tmp_path):
+    import json
+
+    for sid in ("boot", "real-course"):
+        root = tmp_path / "sessions" / sid / "note_work"
+        root.mkdir(parents=True)
+        (root / "state.json").write_text(
+            json.dumps(
+                {
+                    "session_id": sid,
+                    "source_digest": "",
+                    "chunks": [],
+                    "published_end": 12.0,
+                    "finalize_requested": False,
+                    "phase": NotePhase.PUBLISHED,
+                    "error": "",
+                }
+            )
+        )
+    with note_pipeline(tmp_path, lambda *args: note_result()) as env:
+        assert set(env.pipeline.sessions) == {"real-course"}
+        status = env.pipeline.status("real-course")
+        assert status["phase"] == NotePhase.PUBLISHED
+        assert status["published_end"] == 12
+        assert env.pipeline.status()["session_id"] == ""

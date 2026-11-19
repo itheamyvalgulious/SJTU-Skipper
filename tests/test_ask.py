@@ -412,3 +412,17 @@ def test_live_qa_messages_keep_one_owning_run(tmp_path):
     finally:
         release.set()
         runtime.stop()
+
+
+def test_course_context_uses_only_selection():
+    from core.streams import StreamHub
+
+    hub = StreamHub()
+    hub.start_session("processing", meta={"course_name": "Background course"})
+    plugin = AskPlugin()
+    plugin.ctx = SimpleNamespace(streams=hub)
+    assert plugin._course_name() == "未知课程"
+    hub.select_class("selected", {"course_name": "Selected course"})
+    assert plugin._course_name() == "Selected course"
+    hub.select_class("unprocessed")
+    assert plugin._course_name() == "未知课程"

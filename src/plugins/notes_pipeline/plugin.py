@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import threading
 import time
 from collections import deque
@@ -56,25 +57,28 @@ class NotesPipelineService:
     def __init__(self, pipeline):
         self._pipeline = pipeline
 
-    def start(self, session_id=""):
+    def start(self, session_id=None):
         return self._pipeline.start(session_id)
 
-    def finalize(self, session_id=""):
+    def finalize(self, session_id=None):
         return self._pipeline.finalize(session_id)
 
-    def status(self, session_id=""):
+    def status(self, session_id=None):
         return self._pipeline.status(session_id)
 
-    def stop(self, session_id=""):
+    def stop(self, session_id=None):
         return self._pipeline.stop(session_id)
 
-    def delete(self, session_id=""):
+    def reset(self, session_id=None):
+        return self._pipeline.reset(session_id)
+
+    def delete(self, session_id=None):
         return self._pipeline.delete(session_id)
 
-    def draft_paths(self, session_id=""):
+    def draft_paths(self, session_id=None):
         return self._pipeline.draft_paths(session_id)
 
-    def source_path(self, session_id=""):
+    def source_path(self, session_id=None):
         return self._pipeline.source_path(session_id)
 
     def note_files(self, kind):
@@ -178,7 +182,9 @@ class NotesPipelinePlugin(Plugin):
         )
         self.agent_running = 0
         for path in ctx.data_dir.glob("sessions/*/note_work/state.json"):
-            self._state(path.parent.parent.name)
+            sid = path.parent.parent.name
+            if sid != "boot":
+                self._state(sid)
         ctx.register_service(self.id, NotesPipelineService(self))
         ctx.ui.register_task_provider(self.running_tasks, plugin_id=self.id)
         ctx.ui.register_action(
@@ -209,17 +215,16 @@ class NotesPipelinePlugin(Plugin):
     def setting(self, key, default):
         return self.settings.get(key, default)
 
-    def _sid(self, sid=""):
-        return (
-            sid
-            or self.ctx.streams.notes_session_id
-            or self.ctx.streams.current.session_id
-        )
+    def _sid(self, sid=None):
+        sid = self.ctx.streams.selected_class_id if sid is None else sid
+        return "" if not sid or sid == "boot" else str(sid)
 
     def _directory(self, sid):
         return self.ctx.data_dir / "sessions" / sid / "note_work"
 
     def _state(self, sid):
+        if not sid or sid == "boot":
+            raise ValueError("A class ID is required")
         if sid not in self.sessions:
             path = self._directory(sid) / "state.json"
             state: dict[str, Any] = (
@@ -346,10 +351,14 @@ class NotesPipelinePlugin(Plugin):
         sid = str(event.get("session_id", ""))
         if not sid or sid == "boot":
             return
+        session = self.ctx.streams.get_session(sid)
+        if getattr(event, "type", "") == "session.started":
+            if session is None or event.get("started_at") != session.started_at:
+                return
+            with self.condition:
+                self._state(sid).pop("restart_cancelled", None)
         with self.condition:
             state = self._state(sid)
-            if getattr(event, "type", "") == "session.started":
-                state.pop("restart_cancelled", None)
             if event.get("error"):
                 failure = {"source": event.get("stream"), **event.get("error")}
                 key = lambda row: tuple(
@@ -361,7 +370,7 @@ class NotesPipelinePlugin(Plugin):
                     state["errors"].append(failure)
             self.condition.notify_all()
 
-    def start(self, session_id="") -> bool:
+    def start(self, session_id=None) -> bool:
 
         sid = self._sid(session_id)
         if not sid or sid == "boot":
@@ -384,8 +393,10 @@ class NotesPipelinePlugin(Plugin):
             self.condition.notify_all()
         return True
 
-    def finalize(self, session_id=""):
+    def finalize(self, session_id=None):
         sid = self._sid(session_id)
+        if not sid:
+            return False
         with self.condition:
             state = self._state(sid)
             if (
@@ -486,8 +497,10 @@ class NotesPipelinePlugin(Plugin):
             "refresh": False,
         }
 
-    def stop(self, session_id=""):
+    def stop(self, session_id=None):
         sid = self._sid(session_id)
+        if not sid:
+            return False
         with self.condition:
             state = self._state(sid)
             if self._generation_state(sid) != GenerationState.GENERATING:
@@ -522,8 +535,34 @@ class NotesPipelinePlugin(Plugin):
         self.ctx.ui.refresh("notes.stopped")
         return True
 
-    def delete(self, session_id=""):
+    def reset(self, session_id=None):
         sid = self._sid(session_id)
+        if not sid or sid == "boot":
+            return False
+        self.stop(sid)
+        with self.condition:
+            self.queue = deque(task for task in self.queue if task[0] != sid)
+            self.writer_messages.pop(sid, None)
+            self.continuations.pop(sid, None)
+            root = self.ctx.data_dir / "sessions" / sid
+            with publication_lock(root / "notes"):
+                for name in ("note_work", "notes"):
+                    path = root / name
+                    if path.exists():
+                        shutil.rmtree(path)
+                (root / SOURCE_FILENAME).unlink(missing_ok=True)
+            self.sessions.pop(sid, None)
+            state = self._state(sid)
+            state["restart_cancelled"] = True
+            state["errors"] = []
+            self.condition.notify_all()
+        self.ctx.ui.refresh("notes.reset")
+        return True
+
+    def delete(self, session_id=None):
+        sid = self._sid(session_id)
+        if not sid:
+            return False
         with self.condition:
             state = self._state(sid)
             if self._generation_state(sid) != GenerationState.FINISHED:
@@ -553,8 +592,25 @@ class NotesPipelinePlugin(Plugin):
         self.ctx.ui.refresh("notes.deleted")
         return True
 
-    def status(self, session_id=""):
+    def status(self, session_id=None):
         sid = self._sid(session_id)
+        if not sid:
+            return {
+                "session_id": "",
+                "generation_state": GenerationState.NOT_STARTED,
+                "phase": NotePhase.COLLECTING,
+                "pending_chunks": 0,
+                "running_chunks": 0,
+                "published_end": 0.0,
+                "review_passed": False,
+                "completed_chunks": 0,
+                "total_chunks": 0,
+                "expected_chunks": None,
+                "chunk_enabled": bool(self.setting("instant-summarize.enabled", True)),
+                "tasks": [],
+                "error": "",
+                "errors": [],
+            }
         with self.condition:
             state = self._state(sid)
             session = self.ctx.streams.get_session(sid)
@@ -634,16 +690,22 @@ class NotesPipelinePlugin(Plugin):
         prefix = "instant_note" if kind == NotePublication.INSTANT else "note"
         return {key: (f"{prefix}_{key}.md", LABELS[key]) for key in KINDS}
 
-    def draft_paths(self, session_id=""):
-        directory = self.ctx.data_dir / "sessions" / self._sid(session_id) / "notes"
+    def draft_paths(self, session_id=None):
+        sid = self._sid(session_id)
+        if not sid:
+            return {}
+        directory = self.ctx.data_dir / "sessions" / sid / "notes"
         return {
             key: directory / name
             for key, (name, _) in self.note_files(NotePublication.INSTANT).items()
             if (directory / name).exists()
         }
 
-    def source_path(self, session_id=""):
-        path = self.ctx.data_dir / "sessions" / self._sid(session_id) / SOURCE_FILENAME
+    def source_path(self, session_id=None):
+        sid = self._sid(session_id)
+        if not sid:
+            return None
+        path = self.ctx.data_dir / "sessions" / sid / SOURCE_FILENAME
         return path if path.exists() else None
 
     def running_tasks(self):

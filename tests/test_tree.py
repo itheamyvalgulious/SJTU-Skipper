@@ -112,6 +112,9 @@ def test_build_tree_live_session_is_marked() -> None:
     nodes = build_tree(COURSES, recordings, lives, now=now)
     maths = nodes[0]
     assert maths["live"] is True
+    assert maths["expanded"] is False
+    expanded = build_tree(COURSES, recordings, lives, now=now, expanded={"1"})
+    assert expanded[0]["expanded"] is True
     live_child = next(child for child in maths["children"] if child.get("live"))
     assert live_child["action"]["value"]["kind"] is SourceKind.LIVE
     assert live_child["action"]["value"]["live_id"] == "L1"
@@ -164,7 +167,7 @@ def test_build_tree_current_class_is_active_and_expanded() -> None:
         [],
         now=datetime(2026, 11, 6, 12, 0),
         expanded={"1"},
-        current_class_id="class:1:rec:a",
+        current_class_id="1-20261105-0800",
     )
     assert nodes[0]["expanded"] is True
     assert nodes[0]["children"][0]["active"] is True
@@ -239,6 +242,19 @@ def test_a_recorded_part_does_not_hide_the_remaining_live_part() -> None:
     assert len(live_children) == 1
     assert live_children[0]["action"]["value"]["live_id"] == "L10"
     assert live_children[0]["action"]["value"]["parts"] == 1
+    assert len(children) == 1
+    assert live_children[0]["id"] == "1-20261105-1555"
+    recorded = build_tree(
+        COURSES,
+        {
+            "1": recordings["1"]
+            + [_rec("b", "2026-11-05 16:50:20", "2026-11-05 17:45:00")],
+            "2": [],
+        },
+        [],
+        now=datetime(2026, 11, 5, 18, 0),
+    )
+    assert recorded[0]["children"][0]["id"] == live_children[0]["id"]
 
 
 def test_recording_overlap_preserves_both_parts() -> None:

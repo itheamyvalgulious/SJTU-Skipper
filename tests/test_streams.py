@@ -11,6 +11,34 @@ from core.media import MediaKind
 from core.streams import StreamHub, StreamKind, TextSource, TextStream
 
 
+def test_selection_is_independent_of_processing():
+    hub = StreamHub()
+    assert hub.selected_class_id == ""
+    hub.start_session("processing")
+    assert hub.selected_class_meta == {}
+    hub.select_class("viewed", {"name": "Selected lecture"})
+    hub.start_session("background")
+    assert hub.selected_class_id == "viewed"
+    assert hub.selected_class_meta["name"] == "Selected lecture"
+    hub.select_class("")
+    assert hub.selected_class_id == ""
+
+
+def test_selection_snapshot_stays_consistent():
+    hub = StreamHub()
+    hub.select_class("first", {"name": "First"})
+    with hub.class_selection_snapshot():
+        worker = threading.Thread(
+            target=lambda: hub.select_class("second", {"name": "Second"})
+        )
+        worker.start()
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+        assert hub.selected_class_id == "first"
+        assert hub.selected_class_meta["name"] == "First"
+    assert hub.selected_class_id == "second"
+
+
 def test_audio_append_read_and_len() -> None:
     hub = StreamHub()
     audio = hub.current.audio
@@ -107,7 +135,7 @@ def test_stream_hub_events_are_coalesced() -> None:
     hub = StreamHub(
         emit=lambda name, **payload: events.append({"name": name, **payload})
     )
-    session = hub.start_session(meta={"course": "math"})
+    session = hub.start_session("math", meta={"course": "math"})
     events.clear()
     audio = session.audio
     for _ in range(5):
@@ -133,10 +161,10 @@ def test_stream_hub_events_are_coalesced() -> None:
 
 def test_session_switch_keeps_old_stream_readable() -> None:
     hub = StreamHub()
-    first = hub.start_session(meta={"n": 1})
+    first = hub.start_session("first", meta={"n": 1})
     first.audio.append(b"\x00\x00" * 16000)
     first.transcript.append("one")
-    second = hub.start_session(meta={"n": 2})
+    second = hub.start_session("second", meta={"n": 2})
     assert second.session_id != first.session_id
     assert second.audio.duration == 0
     assert first.audio.duration == pytest.approx(1.0)
@@ -144,9 +172,122 @@ def test_session_switch_keeps_old_stream_readable() -> None:
     assert len(hub.list_sessions()) >= 3
 
 
+@pytest.mark.parametrize("with_content", [False, True])
+def test_same_id_restart_replaces_stream(with_content) -> None:
+    events = []
+    resolved = []
+
+    def emit(name, **payload):
+        events.append((name, payload))
+        if name in ("session.started", "session.stopped"):
+            resolved.append((name, hub.get_session(payload["session_id"])))
+
+    hub = StreamHub()
+    hub._emit = emit
+    first = hub.start_session("lecture", meta={"run": 1})
+    if with_content:
+        first.audio.append(b"\x00\x00" * 16000)
+    hub.seal_text("lecture", StreamKind.TRANSCRIPT, 1, final=True)
+    events.clear()
+    resolved.clear()
+
+    second = hub.start_session("lecture", meta={"run": 2})
+
+    lifecycle = [(name, data) for name, data in events if name.startswith("session.")]
+    assert [name for name, _ in lifecycle] == ["session.stopped", "session.started"]
+    assert resolved == [("session.stopped", second), ("session.started", second)]
+    assert lifecycle[0][1]["meta"] == {"run": 1}
+    assert lifecycle[0][1]["started_at"] == first.started_at
+    assert lifecycle[0][1]["ended_at"] == first.ended_at
+    assert first.ended_at is not None
+    assert not first.audio_gate.wait(0)
+    assert not first.video_gate.wait(0)
+    assert second is hub.current is hub.get_session("lecture")
+    assert second is not first and second.audio.duration == 0
+    assert hub.selected_class_id == "" and hub.selected_class_meta == {}
+    assert [s.session_id for s in hub.list_sessions()].count("lecture") == 1
+    assert not hub.text_progress("lecture", StreamKind.TRANSCRIPT).final
+    events.clear()
+    second.audio.append(b"\x00\x00" * 8000)
+    audio_events = [data for name, data in events if name == "stream.appended"]
+    assert audio_events[0]["old_len"] == 0
+
+
+def test_restart_historical_id_replaces_lookup() -> None:
+    hub = StreamHub()
+    original = hub.start_session("first")
+    other = hub.start_session("second")
+    replacement = hub.start_session("first")
+    assert hub.get_session("first") is replacement is not original
+    assert hub.get_session("second") is other
+    assert other.ended_at is not None
+    assert [session.session_id for session in hub.list_sessions()] == [
+        "boot",
+        "second",
+        "first",
+    ]
+
+
+def test_queued_stop_keeps_old_metadata() -> None:
+    from core.events import EventBus
+
+    bus = EventBus()
+    events = []
+    bus.on("session.stopped", events.append)
+    hub = StreamHub(emit=bus.emit)
+    first = hub.start_session("lecture", meta={"run": 1})
+    second = hub.start_session("lecture", meta={"run": 2})
+    assert bus.flush()
+    assert len(events) == 1
+    assert events[0].get("meta") == {"run": 1}
+    assert events[0].get("started_at") == first.started_at
+    assert events[0].get("ended_at") == first.ended_at
+    assert hub.get_session(events[0].get("session_id")) is second
+
+
+def test_session_callbacks_release_hub_lock() -> None:
+    hub = StreamHub()
+    callbacks = []
+
+    def emit(name, **payload):
+        if not name.startswith("session."):
+            return
+        completed = threading.Event()
+
+        def read_session():
+            hub.get_session(payload["session_id"])
+            completed.set()
+
+        reader = threading.Thread(target=read_session, daemon=True)
+        reader.start()
+        assert completed.wait(1), "session callback holds the hub lock"
+        reader.join()
+        callbacks.append(name)
+
+    hub._emit = emit
+    hub.start_session("lecture")
+    hub.start_session("lecture")
+    assert callbacks == ["session.started", "session.stopped", "session.started"]
+
+
+@pytest.mark.parametrize(
+    "session_id", ["", ".", "..", "../x", "/x", "x/y", "x\\y", "x\x00"]
+)
+def test_session_id_rejects_unsafe_path(session_id) -> None:
+    hub = StreamHub()
+    with pytest.raises(ValueError, match="safe path component"):
+        hub.start_session(session_id)
+    assert hub.current.session_id == "boot"
+
+
+def test_session_id_is_required() -> None:
+    with pytest.raises(TypeError):
+        StreamHub().start_session()  # type: ignore[call-arg]
+
+
 def test_stream_set_status() -> None:
     hub = StreamHub()
-    session = hub.start_session(meta={"course": "topology"})
+    session = hub.start_session("topology", meta={"course": "topology"})
     session.audio.append(b"\x00\x00" * 16000)
     session.transcript.append("abc")
     session.visual.append("defg")
@@ -257,11 +398,11 @@ def test_video_gate_keeps_default_timeout_behavior(monkeypatch) -> None:
 def test_text_progress_is_session_scoped() -> None:
     events = []
     hub = StreamHub(emit=lambda name, **data: events.append((name, data)))
-    first = hub.start_session()
+    first = hub.start_session("first")
     hub.seal_text(
         first.session_id, StreamKind.TRANSCRIPT, 600, error={"start": 10, "end": 20}
     )
-    second = hub.start_session()
+    second = hub.start_session("second")
     hub.seal_text(first.session_id, StreamKind.TRANSCRIPT, 100, final=True)
     snapshot = hub.text_progress(first.session_id, StreamKind.TRANSCRIPT)
     assert snapshot.before == 600 and snapshot.final

@@ -13,6 +13,7 @@ from enum import StrEnum
 from core.media import SourceKind
 
 from typing import Any, Iterable
+from core.lecture import lecture_id, source_id
 
 
 class LiveState(StrEnum):
@@ -161,7 +162,11 @@ def _recording_overlaps(
         return False
     window = timedelta(minutes=40)
     for group in groups:
-        if abs(group["begin"] - live_begin) <= window:
+        if (
+            group["begin"] - window
+            <= live_begin
+            < group.get("end", group["begin"] + window)
+        ):
             return True
     return False
 
@@ -180,6 +185,7 @@ def _recording_child(
     classroom = next((c for c in classrooms if c), "")
     video_ids = [str(p.get("video_id", "")) for p in parts if p.get("video_id")]
     label = _class_label(group["begin"], group["end"])
+    class_id = lecture_id(course_id, group["begin"])
     subtitle = ", ".join(
         part
         for part in (
@@ -189,7 +195,7 @@ def _recording_child(
         if part
     )
     return {
-        "id": f"class:{course_id}:rec:{video_ids[0] if video_ids else ''}",
+        "id": class_id,
         "label": label,
         "subtitle": subtitle,
         "badge": "录播",
@@ -197,7 +203,7 @@ def _recording_child(
         "action": {
             "action": "input.open_class",
             "value": {
-                "id": f"class:{course_id}:rec:{video_ids[0] if video_ids else ''}",
+                "id": class_id,
                 "kind": SourceKind.RECORDING,
                 "course": course_id,
                 "name": str(course.get("name", "")),
@@ -297,7 +303,9 @@ def _live_group_child(
         if part
     )
     live_id = str(active.get("id", ""))
-    child_id = f"class:{course_id}:live:{live_id}"
+    child_id = lecture_id(
+        source_id(course_name) if course_id == "other" else course_id, begin
+    )
     return {
         "id": child_id,
         "label": label,
@@ -356,9 +364,6 @@ def build_tree(
             unmatched.append(live)
             continue
         cid = str(matched.get("id", ""))
-        begin = parse_time(live.get("begin"))
-        if _recording_overlaps(begin, groups_by_course.get(cid, [])):
-            continue
         lives_by_course.setdefault(cid, []).append(live)
         names_by_course[cid] = str(matched.get("name", ""))
 
@@ -366,9 +371,27 @@ def build_tree(
         for group in merge_live_periods(
             items, max_gap_minutes=max_gap_minutes, max_parts=max_parts
         ):
-            child = _live_group_child(cid, names_by_course.get(cid, ""), group, now=now)
+            remaining = [
+                part
+                for part in group["parts"]
+                if not _recording_overlaps(
+                    parse_time(part.get("begin")), groups_by_course.get(cid, [])
+                )
+            ]
+            if not remaining:
+                continue
+            child = _live_group_child(
+                cid,
+                names_by_course.get(cid, ""),
+                {**group, "parts": remaining},
+                now=now,
+            )
             if child is not None:
-                groups_by_course.setdefault(cid, [])
+                groups_by_course[cid] = [
+                    recording
+                    for recording in groups_by_course.get(cid, [])
+                    if not (group["begin"] <= recording["begin"] < group["end"])
+                ]
                 groups_by_course[cid].append(
                     {"__live__": child, "begin": group["begin"]}
                 )
@@ -402,7 +425,7 @@ def build_tree(
                     )
                     if part
                 ),
-                "expanded": (cid in expanded_ids) or is_live,
+                "expanded": cid in expanded_ids,
                 "live": is_live,
                 "children": child_nodes,
                 "toggle": {
@@ -421,7 +444,9 @@ def build_tree(
             for group in merge_live_periods(
                 items, max_gap_minutes=max_gap_minutes, max_parts=max_parts
             ):
-                child = _live_group_child("other", "其他直播", group, now=now)
+                child = _live_group_child(
+                    "other", str(items[0].get("name") or "其他直播"), group, now=now
+                )
                 if child is not None:
                     if current_class_id:
                         child["active"] = child.get("id") == current_class_id

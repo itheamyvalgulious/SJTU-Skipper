@@ -371,7 +371,7 @@ class AskPlugin(Plugin):
         return _DEFAULT_DOC_LABELS.get(name, Path(name).stem)
 
     def _course_name(self) -> str:
-        meta = self.ctx.streams.notes_meta or self.ctx.streams.current.meta or {}
+        meta = self.ctx.streams.selected_class_meta or {}
         name: Any = meta.get("course_name") or meta.get("course")
         if isinstance(name, dict):
             name = name.get("course_name") or name.get("name") or ""

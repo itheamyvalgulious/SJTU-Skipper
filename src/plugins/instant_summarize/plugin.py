@@ -7,7 +7,7 @@ class InstantSummarizeService:
     def __init__(self, pipeline):
         self.pipeline = pipeline
 
-    def draft_paths(self, session_id=""):
+    def draft_paths(self, session_id=None):
         return self.pipeline.draft_paths(session_id)
 
     def note_files(self):
@@ -43,7 +43,10 @@ class InstantSummarizePlugin(Plugin):
         ctx.ui.register_action("instant-summarize.read", self._read, plugin_id=self.id)
 
     def _render(self):
-        status = self.pipeline.status()
+        sid = self.ctx.streams.selected_class_id
+        if not sid or sid == "boot":
+            return []
+        status = self.pipeline.status(sid)
         enabled = bool(self.settings.get("instant-summarize.enabled", True))
         errors = len(status["errors"])
         gaps = f"，缺口 {errors} 项" if errors else ""
@@ -76,7 +79,9 @@ class InstantSummarizePlugin(Plugin):
         return {"ok": True, "refresh": True}
 
     def _read(self, payload):
-        sid = str(payload.get("session_id") or self.ctx.streams.notes_session_id)
+        sid = str(payload.get("session_id", self.ctx.streams.selected_class_id) or "")
+        if not sid or sid == "boot":
+            return {"ok": False, "message": "请先选择课程"}
         docs = [
             {
                 "key": key,

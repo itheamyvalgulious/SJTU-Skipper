@@ -78,7 +78,6 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
 
   const TOAST_KIND = Object.freeze({
     DEFAULT: "",
-    OK: "ok",
     ERR: "err",
   });
 
@@ -131,6 +130,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     lastLoad: 0,
     ws: null,
     wsRetry: 0,
+    wsOpened: false,
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -181,7 +181,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (!message) return;
     const node = $("#toast");
     $(".toast-body", node).textContent = message;
-    node.className = `toast ${kind === TOAST_KIND.ERR ? "theme-danger" : kind === TOAST_KIND.OK ? "theme-success" : "theme-secondary"}`;
+    node.className = `toast ${kind === TOAST_KIND.ERR ? "theme-danger" : "theme-secondary"}`;
     Toast.getOrCreateInstance(node, { delay: 3200 }).show();
   }
 
@@ -248,6 +248,15 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         const ui = await api("/api/ui/state");
         if (version !== state.navigationVersion) return;
         if (navigationVersion === null && state.navigationPending) return;
+        const navigation = navigationFromUrl();
+        if (
+          navigationVersion === null &&
+          ["page", "class", "doc"].some(
+            (key) => (ui.navigation?.[key] || "") !== (navigation[key] || ""),
+          )
+        ) {
+          return true;
+        }
         const previousPage = state.ui?.navigation?.page;
         state.ui = ui;
         state.lastLoad = Date.now();
@@ -269,7 +278,10 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         state.loading = null;
       }
     })();
-    await state.loading;
+    const restore = await state.loading;
+    if (restore && version === state.navigationVersion && !state.navigationPending) {
+      await restoreNavigation();
+    }
   }
 
   function changeNavigation(callback, historyMode = HISTORY_MODE.PUSH) {
@@ -294,19 +306,25 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     return task;
   }
 
-  async function restoreNavigation(initial = false) {
+  async function restoreNavigation() {
     state.navigationVersion += 1;
     const navigation = navigationFromUrl();
-    const hasPage = new URL(window.location.href).searchParams.has("page");
+    if (
+      !("class" in navigation) &&
+      !navigation.page.startsWith("reader:notes:") &&
+      !navigation.page.startsWith("summarize:logs:")
+    ) {
+      navigation.class = "";
+    }
     try {
-      await changeNavigation(async () => {
-        if (!initial || hasPage) {
-          await api("/api/ui/navigate", {
+      await changeNavigation(
+        () =>
+          api("/api/ui/navigate", {
             method: "POST",
             body: JSON.stringify(navigation),
-          });
-        }
-      }, HISTORY_MODE.REPLACE);
+          }),
+        HISTORY_MODE.REPLACE,
+      );
     } catch (err) {
       toast(`加载状态失败：${err.message}`, TOAST_KIND.ERR);
     }
@@ -456,7 +474,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     const hasChildren = children.length > 0;
     const canExpand = hasChildren || !!node.toggle;
     const row = el("div", {
-      class: `d-flex ${canExpand ? "flex-wrap" : "flex-nowrap"} align-items-center gap-1 rounded p-1 ${node.active ? "bg-subtle-primary" : ""}`,
+      class: `d-flex flex-nowrap align-items-center gap-1 rounded p-1 ${node.active ? "bg-subtle-primary" : ""}`,
     });
     if (canExpand) {
       const caret = el("button", {
@@ -475,8 +493,9 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (node.icon) row.appendChild(el("span", { text: node.icon, "aria-hidden": "true" }));
     row.appendChild(
       el("span", {
-        class: canExpand ? "min-w-0 text-break" : "flex-shrink-0 text-nowrap",
+        class: "min-w-0 text-truncate",
         text: node.label || node.id || "",
+        title: node.label || node.id || "",
       }),
     );
     if (node.subtitle)
@@ -2059,19 +2078,13 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     const root =
       existing ||
       el("section", { class: "block task-queue" }, [
-        el("h2", { class: "h4", text: "任务队列" }),
         el("p", { class: "task-summary" }),
-        el("p", {
-          class: "fg-2 task-empty",
-          text: "还没有等待或运行中的任务．开始课程处理或生成笔记后，任务会出现在这里．",
-        }),
         el("ul", { class: "task-list list-group", "aria-label": "任务队列" }),
       ]);
     const tasks = state.ui.tasks || [];
     const pending = tasks.filter((task) => task.state === TASK_STATE.PENDING).length;
     $(".task-summary", root).textContent =
       `等待中 ${pending} 个，运行中 ${tasks.length - pending} 个`;
-    $(".task-empty", root).hidden = tasks.length > 0;
     const list = $(".task-list", root);
     const rows = new Map(Array.from(list.children, (row) => [row.dataset.taskId, row]));
     tasks.forEach((task, index) => {
@@ -2738,10 +2751,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     box.hidden = false;
     box.replaceChildren(
       el("div", { class: "fw-semibold text-break", text: context.title || "" }),
-      el("div", { class: "d-flex flex-wrap align-items-center gap-2 fg-2" }, [
-        el("span", { text: context.subtitle || "" }),
-        context.recent ? el("span", { class: "badge theme-primary", text: "最近一节" }) : null,
-      ]),
+      el("div", { class: "fg-2", text: context.subtitle || "" }),
     );
   }
 
@@ -2816,9 +2826,10 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       if (!(item.blocks || []).length && !item.title && !item.description && !item.page) continue;
       const panel = el("section", { class: "mb-3" });
       const pageId = item.page || null;
-      if (item.title || item.description) {
+      const title = item.title && item.title !== current.title ? item.title : "";
+      if (title || item.description || pageId) {
         const head = el("div", { class: "d-flex flex-wrap align-items-center gap-2 mb-2" }, [
-          el("h3", { class: "h6 mb-0", text: item.title || item.id }),
+          title ? el("h3", { class: "h6 mb-0", text: title }) : null,
           item.description ? el("small", { class: "fg-2", text: item.description }) : null,
         ]);
         if (pageId) {
@@ -2836,13 +2847,6 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       if (item.blocks && item.blocks.length) {
         body.appendChild(
           renderBlocks(item.blocks.filter((block) => block.type !== BLOCK_TYPE.AGENT_ACTIVITY)),
-        );
-      } else {
-        body.appendChild(
-          el("div", {
-            class: "fg-2",
-            text: pageId ? "在页面中查看" : "暂无内容",
-          }),
         );
       }
       panel.appendChild(body);
@@ -3120,7 +3124,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
             item_id: itemId || null,
           }),
         });
-        if (result.message) toast(result.message, result.ok ? TOAST_KIND.OK : TOAST_KIND.ERR);
+        if (result.message) toast(result.message, result.ok ? TOAST_KIND.DEFAULT : TOAST_KIND.ERR);
         if (result.open_url && /^https?:\/\//i.test(result.open_url)) {
           const opened = window.open(result.open_url, "_blank", "noopener");
           if (opened) opened.opener = null;
@@ -3134,7 +3138,9 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       };
       if (!independent) return await changeNavigation(request);
       const result = await request();
-      if (result?.refresh !== false || result?.open_page) await loadState({ quiet: true });
+      if (result?.refresh !== false || result?.open_page) {
+        await loadState({ quiet: true, navigationVersion: state.navigationVersion });
+      }
       return result;
     } catch (err) {
       toast(`操作失败：${err.message}`, TOAST_KIND.ERR);
@@ -3195,6 +3201,8 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       state.wsRetry = 0;
       setConnection(true);
       ws.send("hello");
+      if (state.wsOpened || !state.ui) restoreNavigation();
+      state.wsOpened = true;
     });
     ws.addEventListener("message", (event) => {
       try {
@@ -3226,7 +3234,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     bindAskDialog();
     bindPaletteTrigger();
     window.addEventListener("popstate", () => restoreNavigation());
-    await restoreNavigation(true);
+    await restoreNavigation();
     connectWs();
     setInterval(() => {
       if (Date.now() - state.lastLoad > 2500) loadState({ quiet: true });

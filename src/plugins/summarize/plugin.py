@@ -47,10 +47,10 @@ class SummarizeService:
         state = self.plugin.pipeline.status()
         return state["generation_state"] == GenerationState.GENERATING
 
-    def start(self, session_id=""):
+    def start(self, session_id=None):
         return self.plugin.pipeline.start(session_id)
 
-    def source_path(self, session_id=""):
+    def source_path(self, session_id=None):
         return self.plugin.pipeline.source_path(session_id)
 
     def note_files(self):
@@ -135,7 +135,9 @@ class SummarizePlugin(Plugin):
         ctx.events.on("session.stopped", self._stopped, plugin_id=self.id)
 
     def _render(self):
-        sid = self.ctx.streams.notes_session_id
+        sid = self.ctx.streams.selected_class_id
+        if not sid or sid == "boot":
+            return []
         state = self.pipeline.status(sid)["generation_state"]
         state_label = {
             GenerationState.NOT_STARTED: "未开始",
@@ -189,18 +191,24 @@ class SummarizePlugin(Plugin):
             }
         ]
 
+    def _action_sid(self, payload):
+        sid = str(payload.get("session_id", self.ctx.streams.selected_class_id) or "")
+        return "" if sid == "boot" else sid
+
     def _delete(self, payload):
-        deleted = self.pipeline.delete(
-            str(payload.get("session_id") or self.ctx.streams.notes_session_id)
-        )
+        sid = self._action_sid(payload)
+        if not sid:
+            return {"ok": False, "message": "请先选择课程"}
+        deleted = self.pipeline.delete(sid)
         if not deleted:
             return {"ok": False, "refresh": True, "message": "仅生成结束的笔记可删除"}
         return {"ok": True, "refresh": True, "message": "已删除笔记"}
 
     def _generate(self, payload):
-        started = self.pipeline.start(
-            str(payload.get("session_id") or self.ctx.streams.notes_session_id)
-        )
+        sid = self._action_sid(payload)
+        if not sid:
+            return {"ok": False, "message": "请先选择课程"}
+        started = self.pipeline.start(sid)
         if not started:
             return {
                 "ok": False,
@@ -210,15 +218,18 @@ class SummarizePlugin(Plugin):
         return {"ok": True, "refresh": True, "message": "正在生成笔记"}
 
     def _stop(self, payload):
-        stopped = self.pipeline.stop(
-            str(payload.get("session_id") or self.ctx.streams.notes_session_id)
-        )
+        sid = self._action_sid(payload)
+        if not sid:
+            return {"ok": False, "message": "请先选择课程"}
+        stopped = self.pipeline.stop(sid)
         if not stopped:
             return {"ok": False, "refresh": True, "message": "仅正在生成的笔记可停止"}
         return {"ok": True, "refresh": True, "message": "已停止生成笔记"}
 
     def _read(self, payload):
-        sid = str(payload.get("session_id") or self.ctx.streams.notes_session_id)
+        sid = self._action_sid(payload)
+        if not sid:
+            return {"ok": False, "message": "请先选择课程"}
         docs = [
             {
                 "key": key,
@@ -239,7 +250,9 @@ class SummarizePlugin(Plugin):
         return {"ok": True, "open_page": page}
 
     def _logs(self, payload):
-        sid = str(payload.get("session_id") or self.ctx.streams.notes_session_id)
+        sid = self._action_sid(payload)
+        if not sid:
+            return {"ok": False, "message": "请先选择课程"}
         page = f"summarize:logs:{sid}"
         if not self.ctx.ui.has_page(page):
             self.ctx.ui.add_page(
@@ -287,7 +300,16 @@ class SummarizePlugin(Plugin):
         sid = str(event.get("session_id", ""))
         if not sid or sid == "boot":
             return
-        meta = self._meta(sid)
+        meta = event.get("meta")
+        if meta is None:
+            meta = self._meta(sid)
+        session = self.ctx.streams.get_session(sid)
+        if (
+            event.get("started_at") is not None
+            and session is not None
+            and session.started_at != event.get("started_at")
+        ):
+            return
         if meta.get("input_failed") or meta.get("processing_cancelled"):
             return
         if meta.get("fill_for"):
@@ -300,12 +322,15 @@ class SummarizePlugin(Plugin):
             self._request_fill(sid)
 
     def _fill_again(self, payload):
-        self._request_fill(
-            str(payload.get("session_id") or self.ctx.streams.notes_session_id)
-        )
+        sid = self._action_sid(payload)
+        if not sid:
+            return {"ok": False, "message": "请先选择课程"}
+        self._request_fill(sid)
         return {"ok": True, "message": "正在查找可补录的内容", "refresh": True}
 
     def _request_fill(self, sid):
+        if not sid or sid == "boot":
+            return
         thread = threading.Thread(
             target=self._fill, args=(sid,), name=f"notes-fill-{sid}", daemon=True
         )

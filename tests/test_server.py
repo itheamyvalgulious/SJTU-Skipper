@@ -76,22 +76,27 @@ def test_state_and_action(client) -> None:
     assert payload["message"] == "pong"
 
 
-def test_navigation_restores_dynamic_pages(client):
+@pytest.fixture()
+def navigation_client(client):
     from types import SimpleNamespace
 
     test_client, cfg = client
     runtime = test_client.app.state.runtime
     sid = "lecture-test"
     (cfg.data_dir / "sessions" / sid).mkdir(parents=True)
-    selected = {}
+    selected = {"class_id": "", "opened": []}
 
     def notes(session_id, doc):
         selected.update(session=session_id, doc=doc)
-        runtime.ui.add_page(f"reader:notes:{session_id}:summarize", "Notes")
+        page = f"reader:notes:{session_id}:summarize"
+        if not runtime.ui.has_page(page):
+            runtime.ui.add_page(page, "Notes")
 
     def logs(session_id):
         selected["session"] = session_id
-        runtime.ui.add_page(f"summarize:logs:{session_id}", "Logs")
+        page = f"summarize:logs:{session_id}"
+        if not runtime.ui.has_page(page):
+            runtime.ui.add_page(page, "Logs")
 
     runtime.services.register(
         "summarize", SimpleNamespace(open_notes=notes, open_logs=logs)
@@ -99,9 +104,9 @@ def test_navigation_restores_dynamic_pages(client):
 
     def instant_notes(payload):
         selected.update(session=payload["session_id"], doc=payload["doc"])
-        runtime.ui.add_page(
-            f"reader:notes:{payload['session_id']}:instant-summarize", "Draft notes"
-        )
+        page = f"reader:notes:{payload['session_id']}:instant-summarize"
+        if not runtime.ui.has_page(page):
+            runtime.ui.add_page(page, "Draft notes")
         return {"ok": True}
 
     runtime.ui.register_action("instant-summarize.read", instant_notes)
@@ -112,24 +117,43 @@ def test_navigation_restores_dynamic_pages(client):
             select_document=lambda page, key: selected.update(doc=key),
         ),
     )
+
+    def open_class(key):
+        selected["class_id"] = key
+        selected["opened"].append(key)
+
     runtime.services.register(
         "input",
         SimpleNamespace(
-            open_class=lambda key: selected.update(class_id=key),
+            open_class=open_class,
+            clear_class=lambda: selected.update(class_id=""),
             selected_class=lambda: selected["class_id"],
         ),
     )
     runtime.ui.add_page("input:session", "Class")
+    return test_client, sid, selected
+
+
+def test_navigation_restores_dynamic_pages(navigation_client):
+    test_client, sid, selected = navigation_client
     for route in [
-        {"page": "input:session", "class": "class:math:rec:video"},
-        {"page": f"reader:notes:{sid}:summarize", "doc": "knowledge"},
-        {"page": f"reader:notes:{sid}:instant-summarize", "doc": "notice"},
-        {"page": f"summarize:logs:{sid}"},
-        {"page": ""},
+        {"page": "input:session", "class": sid},
+        {"page": f"reader:notes:{sid}:summarize", "class": sid, "doc": "knowledge"},
+        {
+            "page": f"reader:notes:{sid}:instant-summarize",
+            "class": sid,
+            "doc": "notice",
+        },
+        {"page": f"summarize:logs:{sid}", "class": sid},
+        {"page": "test.page", "class": sid},
+        {"page": "", "class": sid},
     ]:
+        selected["class_id"] = ""
         response = test_client.post("/api/ui/navigate", json=route)
         assert response.status_code == 200
+        assert response.json()["navigation"] == route
         assert test_client.get("/api/ui/state").json()["navigation"] == route
+        assert selected["class_id"] == sid
     assert (
         test_client.post("/api/ui/navigate", json={"page": "missing"}).status_code
         == 404
@@ -140,6 +164,100 @@ def test_navigation_restores_dynamic_pages(client):
         ).status_code
         == 400
     )
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        "reader:notes:{sid}:summarize",
+        "reader:notes:{sid}:instant-summarize",
+        "summarize:logs:{sid}",
+    ],
+)
+def test_notes_navigation_selects_class(navigation_client, page):
+    test_client, sid, selected = navigation_client
+    page = page.format(sid=sid)
+    selected["class_id"] = "other-class"
+    route = {"page": page}
+    if page.startswith("reader:"):
+        route["doc"] = "notice"
+    response = test_client.post("/api/ui/navigate", json=route)
+    assert response.status_code == 200
+    assert response.json()["navigation"] == {**route, "class": sid}
+    assert selected["class_id"] == sid
+    assert test_client.get("/api/ui/state").json()["navigation"] == {
+        **route,
+        "class": sid,
+    }
+
+
+@pytest.mark.parametrize("page", ["", "test.page", "reader:notes:{sid}:summarize"])
+def test_navigation_clears_explicit_class(navigation_client, page):
+    test_client, sid, selected = navigation_client
+    selected["class_id"] = sid
+    response = test_client.post(
+        "/api/ui/navigate", json={"page": page.format(sid=sid), "class": ""}
+    )
+    assert response.status_code == 200
+    assert response.json()["navigation"]["class"] == ""
+    assert test_client.get("/api/ui/state").json()["navigation"]["class"] == ""
+    assert selected["class_id"] == ""
+
+
+@pytest.mark.parametrize("page", ["", "test.page"])
+def test_navigation_preserves_missing_class(navigation_client, page):
+    test_client, sid, selected = navigation_client
+    selected["class_id"] = sid
+    response = test_client.post("/api/ui/navigate", json={"page": page})
+    assert response.status_code == 200
+    assert response.json()["navigation"] == {"page": page, "class": sid}
+    assert selected["opened"] == []
+
+
+def test_state_does_not_reopen_class(navigation_client):
+    test_client, sid, selected = navigation_client
+    selected["class_id"] = sid
+    for _ in range(3):
+        response = test_client.get("/api/ui/state")
+        assert response.status_code == 200
+        assert response.json()["navigation"]["class"] == sid
+    assert selected["opened"] == []
+
+
+def test_navigation_restores_notes_after_reset(navigation_client):
+    test_client, sid, selected = navigation_client
+    route = {
+        "page": f"reader:notes:{sid}:summarize",
+        "class": sid,
+        "doc": "notice",
+    }
+    runtime = test_client.app.state.runtime
+    for _ in range(2):
+        runtime.ui.show_home()
+        selected.update(class_id="", doc="knowledge")
+        response = test_client.post("/api/ui/navigate", json=route)
+        assert response.status_code == 200
+        assert response.json()["navigation"] == route
+        assert test_client.get("/api/ui/state").json()["navigation"] == route
+        assert selected["session"] == sid
+
+
+def test_root_navigation_clears_hub_selection(client):
+    test_client, _cfg = client
+    runtime = test_client.app.state.runtime
+    runtime.hub.select_class("stored-class", {"course_name": "Stored course"})
+    assert test_client.get("/api/ui/state").json()["navigation"] == {
+        "page": "test.page",
+        "class": "stored-class",
+    }
+    response = test_client.post("/api/ui/navigate", json={"page": "", "class": ""})
+    assert response.status_code == 200
+    assert response.json()["navigation"] == {"page": "", "class": ""}
+    assert test_client.get("/api/ui/state").json()["navigation"] == {
+        "page": "",
+        "class": "",
+    }
+    assert runtime.hub.selected_class_id == ""
 
 
 def test_open_close_page(client) -> None:

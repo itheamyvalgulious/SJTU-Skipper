@@ -603,7 +603,6 @@ class ReaderPlugin(Plugin):
         if not docs:
             return [{"type": BlockType.TEXT, "text": "没有可显示的文稿"}]
 
-        title = str(state.get("title") or "")
         active = str(state.get("active") or "")
         sequence = int(state.get("sequence") or 0)
 
@@ -646,7 +645,6 @@ class ReaderPlugin(Plugin):
             )
 
         return [
-            *([{"type": BlockType.MARKDOWN, "text": f"### {title}"}] if title else []),
             {
                 "type": BlockType.TABS,
                 "id": f"{page_id}:{sequence}",

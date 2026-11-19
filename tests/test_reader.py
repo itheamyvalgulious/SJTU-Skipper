@@ -77,8 +77,6 @@ def test_reader_action_opens_page(tmp_path: Path) -> None:
         result = runtime.ui.dispatch_action("reader.open", {"title": "T", "docs": docs})
         assert result.ok
         assert result.open_page == "reader:main"
-        blocks = runtime.ui.state()["page_content"]["reader:main"]
-        assert any(b["type"] == BlockType.MARKDOWN and "T" in b["text"] for b in blocks)
     finally:
         runtime.stop()
 

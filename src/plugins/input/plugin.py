@@ -259,13 +259,11 @@ class InputPlugin(Plugin):
         }
         self._tree_ttl = 30.0
         self._expanded: set[str] = set()
-        self._current_class_id = ""
 
         # Current class / player state.  ``_current_class`` is the class the UI
         # has selected; processing itself runs in a job (see ``_jobs``), so
         # selecting another class never interrupts the running one.
         self._class_lock = threading.RLock()
-        self._current_class: dict[str, Any] | None = None
         self._class_index = 0
         self._class_streams: dict[StreamView, str] = {}
         self._streams_loading = False
@@ -285,7 +283,6 @@ class InputPlugin(Plugin):
         self._part_durations: dict[str, float] = {}
         self._recording_streams: dict[str, dict[StreamView, str]] = {}
         self._processing_started = 0.0
-        self._class_sessions: dict[str, dict[str, Any]] = {}
         self._class_session_meta: dict[str, Any] = {}
         self._class_session_id: str = ""
         # Gap-fill pass state (see _fill_gaps): remaining recording parts.
@@ -345,7 +342,6 @@ class InputPlugin(Plugin):
         ctx.events.on("session.started", self._on_session_event, plugin_id=self.id)
         ctx.events.on("session.stopped", self._on_session_event, plugin_id=self.id)
         ctx.events.on("clock.tick", self._on_clock_tick, plugin_id=self.id)
-        self._load_session_index()
         ctx.events.on("input.status", self._on_input_event, plugin_id=self.id)
         ctx.events.on("input.download", self._on_input_event, plugin_id=self.id)
         ctx.events.on("input.error", self._on_input_event, plugin_id=self.id)
@@ -567,26 +563,7 @@ class InputPlugin(Plugin):
             busy_title = self._active_job.title() if busy_elsewhere else ""
 
         if cls is None:
-            meta = self._ctx.streams.notes_meta
-            if not meta:
-                with self._class_lock:
-                    legacy_busy = self._processing
-                if legacy_busy:
-                    return {
-                        "title": "正在处理",
-                        "subtitle": "补录或手动播放",
-                        "selected": False,
-                        "state": TaskIndicator.BUSY,
-                    }
-                return None
-            title = str(meta.get("course_name") or meta.get("course") or "课程")
-            label = str(meta.get("class_label") or meta.get("lecture") or "")
-            return {
-                "title": title,
-                "subtitle": label,
-                "selected": False,
-                "recent": True,
-            }
+            return None
 
         title = str(cls.get("name") or "课程")
         kind = "直播" if cls.get("kind") == SourceKind.LIVE else "录播"
@@ -622,56 +599,23 @@ class InputPlugin(Plugin):
         }
 
     # ------------------------------------------------------------------
-    # Session index (survives restarts)
+    # Stored class records
     # ------------------------------------------------------------------
-    @staticmethod
-    def _class_key(course: Any, video: Any) -> str:
-        course_text = str(course or "").strip()
-        video_text = str(video or "").strip()
-        if course_text and video_text:
-            return f"{course_text}:{video_text}"
-        return ""
+
+    @property
+    def _current_class(self) -> dict[str, Any] | None:
+        return self._ctx.streams.selected_class_meta or None
+
+    @_current_class.setter
+    def _current_class(self, value: dict[str, Any] | None) -> None:
+        self._ctx.streams.select_class(str((value or {}).get("id") or ""), value)
+
+    @property
+    def _current_class_id(self) -> str:
+        return self._ctx.streams.selected_class_id
 
     def _session_meta_path(self, session_id: str) -> Path:
         return self._ctx.data_dir / "sessions" / session_id / "meta.json"
-
-    def _load_session_index(self) -> None:
-        """Rebuild class → last session from ``meta.json`` files on disk."""
-
-        root = self._ctx.data_dir / "sessions"
-        entries: list[dict[str, Any]] = []
-        try:
-            paths = list(root.glob("*/meta.json"))
-        except OSError:
-            return
-        for path in paths:
-            try:
-                data = json.loads(path.read_text("utf-8"))
-            except (OSError, ValueError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            meta = data.get("meta") or {}
-            if not isinstance(meta, dict):
-                continue
-            sid = str(data.get("session_id") or path.parent.name)
-            key = self._class_key(meta.get("course_id"), meta.get("video_id"))
-            entry = {
-                "session_id": sid,
-                "ended_at": data.get("ended_at") or 0,
-                "meta": meta,
-                "at": float(data.get("started_at") or 0),
-            }
-            entries.append(entry)
-            if key:
-                current = self._class_sessions.get(key)
-                if current is None or entry["at"] >= current["at"]:
-                    self._class_sessions[key] = entry
-        if entries:
-            latest = max(entries, key=lambda item: item["at"])
-            self._ctx.streams.set_notes_session(
-                latest["session_id"], latest.get("meta") or {}
-            )
 
     def _load_session_meta(self, session_id: str) -> dict[str, Any]:
         """Read one session's ``meta.json`` (empty dict when unavailable).
@@ -693,7 +637,7 @@ class InputPlugin(Plugin):
 
     def _on_session_event(self, event: Any) -> None:
         sid = str(event.get("session_id") or "")
-        if not sid:
+        if not sid or sid == "boot":
             return
         path = self._session_meta_path(sid)
         try:
@@ -711,14 +655,6 @@ class InputPlugin(Plugin):
                     json.dumps(payload, ensure_ascii=False, indent=2), "utf-8"
                 )
                 temporary.replace(path)
-                key = self._class_key(meta.get("course_id"), meta.get("video_id"))
-                if key:
-                    self._class_sessions[key] = {
-                        "session_id": sid,
-                        "ended_at": 0,
-                        "meta": meta,
-                        "at": payload["started_at"],
-                    }
             else:
                 data: dict[str, Any] = {}
                 if path.exists():
@@ -726,27 +662,29 @@ class InputPlugin(Plugin):
                         data = json.loads(path.read_text("utf-8"))
                     except (OSError, ValueError):
                         data = {}
+                if (
+                    data.get("started_at")
+                    and event.get("started_at")
+                    and data["started_at"] != event.get("started_at")
+                ):
+                    return
                 data["ended_at"] = float(event.get("ended_at") or time.time())
-                session = self._ctx.streams.get_session(sid)
-                if session is not None:
-                    data["meta"] = dict(session.meta)
+                data["meta"] = dict(event.get("meta") or data.get("meta") or {})
                 temporary = path.with_suffix(".tmp")
                 temporary.write_text(
                     json.dumps(data, ensure_ascii=False, indent=2), "utf-8"
                 )
                 temporary.replace(path)
-                for entry in self._class_sessions.values():
-                    if entry["session_id"] == sid:
-                        entry["ended_at"] = data["ended_at"]
         except OSError:
             return
 
-    def _find_finished_class(self, cls: dict[str, Any]) -> dict[str, Any] | None:
-        videos = cls.get("videos") or []
-        key = self._class_key(cls.get("course"), videos[0] if videos else "")
-        entry = self._class_sessions.get(key)
-        if entry and entry.get("ended_at"):
-            return entry
+    def _find_finished_class(self, class_id: str) -> dict[str, Any] | None:
+        try:
+            data = json.loads(self._session_meta_path(class_id).read_text("utf-8"))
+        except (OSError, ValueError):
+            return None
+        if data.get("ended_at"):
+            return data
         return None
 
     def _on_settings_changed(self, event: Any) -> None:
@@ -801,7 +739,7 @@ class InputPlugin(Plugin):
         if info is None:
             return False
         meta = dict(info.meta)
-        if str(meta.get("kind") or "") != SourceKind.LIVE:
+        if str(meta.get("kind") or "") != SourceKind.LIVE and not meta.get("fill_for"):
             return False
         with self._class_lock:
             busy = self._processing
@@ -825,12 +763,50 @@ class InputPlugin(Plugin):
             return False
 
         self._fill_target = live_session_id
-        self._fill_live_started = started
         self._fill_media_begin = _epoch_seconds(parts[0].get("begin"))
+        origin = float(meta.get("media_begin") or started)
+        shift = origin - self._fill_media_begin if self._fill_media_begin else 0.0
+        if ctx.streams.consumers_busy():
+            return False
+        directory = ctx.data_dir / "sessions" / live_session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        if shift:
+            for name in ("transcript.jsonl", "visual.jsonl"):
+                path = directory / name
+                if not path.exists():
+                    continue
+                records = [
+                    json.loads(line)
+                    for line in path.read_text("utf-8").splitlines()
+                    if line.strip()
+                ]
+                for record in records:
+                    for key in ("start", "end"):
+                        if record.get(key) is not None:
+                            record[key] = float(record[key]) + shift
+                path.write_text(
+                    "".join(
+                        json.dumps(record, ensure_ascii=False) + "\n"
+                        for record in records
+                    ),
+                    "utf-8",
+                )
+            coverage = CoverageStore(ctx.data_dir, live_session_id)
+            (directory / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        kind.value: _shift_intervals(
+                            coverage.coverage(kind).intervals, shift
+                        )
+                        for kind in MediaKind
+                    }
+                ),
+                "utf-8",
+            )
+        self._fill_live_started = self._fill_media_begin
         self._fill_queue = parts[1:]
         self._fill_course = dict(meta)
         with self._class_lock:
-            self._current_class = None
             self._processing = True
             self._processing_started = time.time()
         self._jobs_changed("input.class.processing")
@@ -896,6 +872,7 @@ class InputPlugin(Plugin):
                 "skip_ranges": skip,
             },
             course={
+                "class_id": self._fill_target,
                 "course_id": course_id,
                 "course_name": str(meta.get("course_name") or ""),
                 "class_label": str(meta.get("class_label") or ""),
@@ -970,8 +947,16 @@ class InputPlugin(Plugin):
                 return plugin._load_session_meta(session_id)
 
             def selected_class(self):
+                return plugin._ctx.streams.selected_class_id
+
+            def clear_class(self):
                 with plugin._class_lock:
-                    return str((plugin._current_class or {}).get("id", ""))
+                    plugin._current_class = None
+                    plugin._class_streams = {}
+                    plugin._class_session_id = ""
+                    plugin._class_session_meta = {}
+                    plugin._class_finished = False
+                plugin._apply_tree_state()
 
             def open_class(self, class_id):
                 with plugin._class_lock:
@@ -992,7 +977,27 @@ class InputPlugin(Plugin):
                                 return result
                         return None
 
-                    selected = find(nodes)
+                    meta = plugin._load_session_meta(class_id)
+                    selected = (
+                        {
+                            **meta,
+                            "id": class_id,
+                            "course": str(meta.get("course_id") or ""),
+                            "name": str(meta.get("course_name") or ""),
+                            "label": str(meta.get("class_label") or ""),
+                            "videos": [
+                                str(part["video_id"])
+                                for part in meta.get("media_parts") or []
+                                if part.get("video_id")
+                            ]
+                            or (
+                                [str(meta["video_id"])] if meta.get("video_id") else []
+                            ),
+                            "live_id": str(meta.get("live_id") or ""),
+                        }
+                        if meta
+                        else find(nodes)
+                    )
                     if selected is None:
                         plugin._load_tree()
                         with plugin._tree_lock:
@@ -1225,7 +1230,7 @@ class InputPlugin(Plugin):
                 node_id = str(node.get("id", ""))
                 if node_id.startswith("course:"):
                     cid = node_id.split(":", 1)[1]
-                    node["expanded"] = (cid in expanded) or bool(node.get("live"))
+                    node["expanded"] = cid in expanded
                 if node.get("action"):
                     node["active"] = node_id == current
                     value = node["action"].get("value") or {}
@@ -1345,10 +1350,6 @@ class InputPlugin(Plugin):
     def _render_manual_form(self) -> list[dict[str, Any]]:
         return [
             {
-                "type": BlockType.MARKDOWN,
-                "text": "### 手动输入 URL\n",
-            },
-            {
                 "type": BlockType.FORM,
                 "fields": [
                     {
@@ -1369,8 +1370,8 @@ class InputPlugin(Plugin):
                         "type": FormInputType.SELECT,
                         "options": [
                             {"value": SourceKind.URL, "label": "自动检测"},
-                            {"value": SourceKind.LIVE, "label": "直播 (低延迟)"},
-                            {"value": SourceKind.RECORDING, "label": "录播 (-re 节奏)"},
+                            {"value": SourceKind.LIVE, "label": "直播"},
+                            {"value": SourceKind.RECORDING, "label": "录播"},
                         ],
                         "default": SourceKind.URL,
                     },
@@ -1396,7 +1397,6 @@ class InputPlugin(Plugin):
             job = self._selected_job_locked()
             job_state = job.state if job is not None else None
             job_error = job.error if job is not None else ""
-            active = job is not None and self._active_job is job
             finished = (job is not None and job.state == JobState.DONE) or (
                 job is None and self._class_finished
             )
@@ -1428,18 +1428,6 @@ class InputPlugin(Plugin):
             state_label = "未开始"
 
         details = []
-        if job is not None and not active and job_state == JobState.QUEUED:
-            with self._class_lock:
-                position = self._queue.index(job.id) + 1 if job.id in self._queue else 0
-                running = bool(
-                    self._active_job is not None
-                    and self._active_job.state
-                    in {JobState.RUNNING, JobState.PREPARING, JobState.PAUSED}
-                )
-            if position:
-                details.append(
-                    f"排队第 {position} 位" + ("（有课程正在处理）" if running else "")
-                )
         if error:
             details.append(error)
 
@@ -1563,7 +1551,7 @@ class InputPlugin(Plugin):
         if not ordered:
             return []
         rows: list[dict[str, Any]] = []
-        for position, job in enumerate(ordered, start=1):
+        for job in ordered:
             if job is active:
                 if job.state == JobState.RUNNING:
                     state = "处理中"
@@ -1583,7 +1571,7 @@ class InputPlugin(Plugin):
                     state = "等待中"
                     action, label = "input.queue_cancel", "取消"
             else:
-                state = f"排队第 {position - 1} 位"
+                state = ""
                 action, label = "input.queue_cancel", "取消"
             detail = "；".join(
                 part
@@ -1609,7 +1597,7 @@ class InputPlugin(Plugin):
               <div class="fw-semibold text-break">{escape(row["title"])}</div>
               <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-1">
                 <span class="fg-2">{escape(row["subtitle"])}</span>
-                {f'<button type="button" class="btn-text" data-action="{row["action"]}" data-id="{job_id}">{escape(row["label"])}</button>' if row["value"]["id"] != selected_id else ""}
+                <button type="button" class="btn-text" data-action="{row["action"]}" data-id="{job_id}">{escape(row["label"])}</button>
               </div>
             </li>""")
         controls = []
@@ -1673,8 +1661,8 @@ class InputPlugin(Plugin):
         if cls is None:
             return [
                 {
-                    "type": BlockType.MARKDOWN,
-                    "text": "### 课堂\n\n从左侧课程树选择一节课。",
+                    "type": BlockType.TEXT,
+                    "text": "从左侧课程树选择一节课．",
                 }
             ]
 
@@ -1693,7 +1681,6 @@ class InputPlugin(Plugin):
             text = f"排队中（第 {position} 位）。"
             if busy:
                 text += f"当前正在处理：{busy}。"
-            text += "切换到其他课程不会中断它。"
             blocks.append({"type": BlockType.TEXT, "text": text})
             if not live:
                 return blocks
@@ -2065,6 +2052,12 @@ class InputPlugin(Plugin):
         """
 
         class_id = str(payload.get("id", ""))
+        if (
+            not class_id
+            or Path(class_id).name != class_id
+            or class_id in {".", "..", "boot"}
+        ):
+            return {"ok": False, "message": "无效的课次 ID"}
         kind = SourceKind(payload.get("kind") or SourceKind.RECORDING)
         videos = payload.get("videos") or []
         if isinstance(videos, str):
@@ -2086,11 +2079,10 @@ class InputPlugin(Plugin):
                 # Re-selecting the same class must not reset it.
                 return {"ok": True, "open_page": "input:session"}
 
-        record = self._find_finished_class(
-            {"course": payload.get("course", ""), "videos": videos}
-        )
+        record = self._find_finished_class(class_id)
         with self._class_lock:
             self._current_class = {
+                **((record.get("meta") or {}) if record else {}),
                 "id": class_id,
                 "kind": kind,
                 "course": str(payload.get("course", "")),
@@ -2127,14 +2119,6 @@ class InputPlugin(Plugin):
                 or job.state in _JOB_TERMINAL
                 or not job.streams.get(StreamView.MAIN)
             )
-        if record:
-            # Let the notes pages show this class's handout.
-            self._ctx.streams.set_notes_session(
-                record["session_id"], record.get("meta") or {}
-            )
-
-        with self._tree_lock:
-            self._current_class_id = class_id
         self._apply_tree_state()
 
         if should_resolve:
@@ -2368,6 +2352,7 @@ class InputPlugin(Plugin):
             audio_gate_limit=self._gate_limit(MediaKind.AUDIO),
             video_gate_limit=self._gate_limit(MediaKind.VIDEO) if not live else 0.0,
             course={
+                "class_id": job.id,
                 "course_id": str(cls.get("course", "")),
                 "course_name": job.course,
                 "class_label": label,
@@ -2511,9 +2496,26 @@ class InputPlugin(Plugin):
             self._streams_loading = True
             self._streams_error = ""
             self._want_processing = True
+        sid = str(cls["id"])
+        session = self._ctx.streams.get_session(sid)
+        if session is not None:
+            session.meta["processing_cancelled"] = True
         if was_active:
             self._sources.stop()
             self._end_open_session("reprocess")
+        vlm = self._ctx.service("vlm")
+        if vlm is not None:
+            vlm.cancel(sid)
+        while (
+            session is self._ctx.streams.current and self._ctx.streams.consumers_busy()
+        ):
+            time.sleep(0.05)
+        notes = self._ctx.service("notes-pipeline")
+        if notes is not None:
+            notes.reset(sid)
+        directory = self._ctx.data_dir / "sessions" / sid
+        for name in ("transcript.jsonl", "visual.jsonl", "coverage.json"):
+            (directory / name).unlink(missing_ok=True)
         return self._act_start_processing(payload)
 
     def _act_start_processing(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2684,8 +2686,6 @@ class InputPlugin(Plugin):
             while job.id in self._queue:
                 self._queue.remove(job.id)
             self._jobs.pop(job.id, None)
-        with self._tree_lock:
-            self._current_class_id = job.id
         self._apply_tree_state()
         return self._act_reprocess({})
 
