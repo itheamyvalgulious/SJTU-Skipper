@@ -623,6 +623,18 @@ class TestVlmPlugin:
         assert seg["start"] == 10.0
         assert seg["end"] == 11.0
 
+    def test_full_reply(self, vlm_plugin, vlm_ctx):
+        from html import unescape
+
+        text = "\n\n".join(f"公式 {i}: $x_{{{i}}} = {i}$" for i in range(50))
+        vlm_plugin._commit_window(0, 18, {"text": text})
+        vlm_plugin._commit_window(20, 38, {"text": text})
+        assert vlm_plugin.status()["last_window"]["text"] == text
+        blocks = vlm_plugin._render_board_page()
+        reply = next(b for b in blocks if b["type"] == "html")
+        assert text in unescape(reply["html"])
+        assert len(vlm_ctx.streams.current.visual) == 1
+
     def test_process_window_skips_blank_board(
         self, vlm_plugin: VlmPlugin, vlm_ctx: PluginContext
     ):

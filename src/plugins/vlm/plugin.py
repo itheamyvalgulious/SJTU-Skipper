@@ -20,6 +20,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
 from concurrent.futures import ThreadPoolExecutor
+from html import escape
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -505,14 +506,18 @@ class VlmPlugin(Plugin):
             blocks.append(
                 {
                     "type": BlockType.TEXT,
-                    "text": f"最近窗口 {stamp}：{last.get('note', '')}"
-                    + (
-                        f"\n\n模型原始回复：\n{last['text']}"
-                        if last.get("text")
-                        else ""
-                    ),
+                    "text": f"最近窗口 {stamp}：{last.get('note', '')}",
                 }
             )
+            if last.get("text"):
+                blocks.append(
+                    {
+                        "type": BlockType.HTML,
+                        "html": '<pre class="vlm-raw-reply" aria-label="模型原始回复">'
+                        + escape(f"模型原始回复：\n{last['text']}")
+                        + "</pre>",
+                    }
+                )
 
         # Collect recent visual items
         visual = self._ctx.streams.current.visual
@@ -921,7 +926,8 @@ class VlmPlugin(Plugin):
         ctx = self._ctx
         session = self._processing_session or ctx.streams.current
 
-        text = str(result.get("text", "") or "")
+        raw_text = str(result.get("text", "") or "")
+        text = raw_text
         image_path = str(result.get("image_path", "") or "")
         if not text:
             note = WindowOutcome.EMPTY_RESPONSE
@@ -949,7 +955,7 @@ class VlmPlugin(Plugin):
                 "end": end,
                 "note": note,
                 "chars": len(text),
-                "text": text[:400],
+                "text": raw_text,
             }
         logger.info(
             "VLM window %s-%s: %s (%d chars)",
