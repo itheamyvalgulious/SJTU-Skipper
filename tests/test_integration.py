@@ -34,7 +34,7 @@ def _notes_llm(contents, role):
 
 
 class StubLLM(Plugin):
-    """Provide the plugin id required by llm-agent; service is injected."""
+    """Provide the plugin id required by agent. The service is injected."""
 
     id = "llm"
     requires = ("settings",)

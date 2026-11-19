@@ -78,7 +78,7 @@ LLM 模型和角色配置保存在 `data/agent/settings.json` 的 `llm.models` �
         ├──────────────► STT 插件 ──► TextStream(transcript)
         └──────────────► VLM 插件 ──► TextStream(visual)
                                       │
-行为层（llm-agent / notes / 自定义插件）
+行为层（agent / notes / 自定义插件）
   事件总线、时钟、服务注册、UI、项目 OMP SDK 运行时
                                       │
 Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
@@ -92,17 +92,17 @@ Web UI（左右多 tab 边栏 + toolbox + 中间 pages）
 
 内置插件：
 
-| 插件 ID     | 作用                                                                                                    |
-| ----------- | ------------------------------------------------------------------------------------------------------- |
-| `settings`  | 设置注册、持久化、设置页                                                                                |
-| `llm`       | 项目 Bun 运行时、模型角色配置与提供方鉴权                                                               |
-| `input`     | Canvas/SJTU 录播、直播、ffmpeg 源                                                                       |
-| `stt`       | 供应商适配：兼容 HTTP/WebSocket 服务（流式临时文字、定稿）或 Google Cloud Speech-to-Text v2（批量窗口） |
-| `vlm`       | 视频流 -> 融合板书 -> 文字流                                                                            |
-| `llm-agent` | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权                                      |
-| `notes`     | 整理分段笔记、汇总与审阅，提供笔记页面及课后 direct/fill/skip 策略                                      |
-| `ask`       | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存                                     |
-| `reader`    | 通用 Markdown 阅读页（每门课程一页），持有选中菜单与内联问答块                                          |
+| 插件 ID    | 作用                                                                                                    |
+| ---------- | ------------------------------------------------------------------------------------------------------- |
+| `settings` | 设置注册、持久化、设置页                                                                                |
+| `llm`      | 项目 Bun 运行时、模型角色配置与提供方鉴权                                                               |
+| `input`    | Canvas/SJTU 录播、直播、ffmpeg 源                                                                       |
+| `stt`      | 供应商适配：兼容 HTTP/WebSocket 服务（流式临时文字、定稿）或 Google Cloud Speech-to-Text v2（批量窗口） |
+| `vlm`      | 视频流 -> 融合板书 -> 文字流                                                                            |
+| `agent`    | SDK 多会话助手，原生 read/grep/glob/edit/write，流式事件与文件授权                                      |
+| `notes`    | 整理分段笔记、汇总与审阅，提供笔记页面及课后 direct/fill/skip 策略                                      |
+| `ask`      | 笔记内问答：选中提问，快速 / 研究两种强度，流式回答，答案随笔记保存                                     |
+| `reader`   | 通用 Markdown 阅读页（每门课程一页），持有选中菜单与内联问答块                                          |
 
 分段核心区间由 `notes.chunk_seconds` 设置，`notes.overlap_seconds` 提供左侧原文上下文．重叠原文不重复计入正文．`notes.concurrency` 限制笔记 agent 并发数．分段预览标为未审阅；`note_review` 统一检查完整笔记的来源覆盖与正确性．
 

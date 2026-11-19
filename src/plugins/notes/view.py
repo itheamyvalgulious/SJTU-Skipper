@@ -63,17 +63,18 @@ class NotesView:
         self.notices = {}
         self.fill_threads = []
         self.log_pages = set()
-        for key, default, kind in (
-            ("fill_wait_minutes", 20, SettingType.INT),
-            ("fill_max_attempts", 6, SettingType.INT),
+        for key, default, label, order in (
+            ("fill_wait_minutes", 20, "补录重试间隔（分钟）", 110),
+            ("fill_max_attempts", 6, "补录尝试次数上限", 120),
         ):
             self.settings.register(
                 SettingsSpec(
                     key=f"notes.{key}",
                     default=default,
-                    type=kind,
-                    label=key,
+                    type=SettingType.INT,
+                    label=label,
                     group="笔记",
+                    order=order,
                 ),
                 plugin_id=self.id,
             )
@@ -85,6 +86,7 @@ class NotesView:
                 label="课后处理",
                 options=list(self.ON_STOP_LABELS),
                 group="笔记",
+                order=100,
             ),
             plugin_id=self.id,
         )

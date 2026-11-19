@@ -410,10 +410,9 @@ _AGENT_SETTINGS_GROUP = "Agent"
 
 
 class AgentPlugin(Plugin):
-    id = "llm-agent"
+    id = "agent"
     requires = ("settings", "llm")
     provides = ("agent",)
-    action_namespace = "agent"
 
     def __init__(self) -> None:
         self.ctx: PluginContext | None = None

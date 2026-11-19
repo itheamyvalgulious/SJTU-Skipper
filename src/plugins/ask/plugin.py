@@ -1,6 +1,6 @@
 """Ask plugin: in-note question answering with streaming and two intensities.
 
-The plugin owns *questions*, not the agent loop: the ``llm-agent`` plugin runs
+The plugin owns *questions*, not the agent loop: the ``agent`` plugin runs
 the model, builds the tools from the declarations below and streams deltas
 back.  Answers live in the note as ``qa`` markdown blocks (owned by ``reader``).
 """
@@ -38,7 +38,7 @@ from .prompts import ASK_PROMPT_TEMPLATE, INSTANT_SYSTEM_PROMPT, RESEARCH_SYSTEM
 
 ACTION = "ask.ask"
 SELECTION_ID = "ask.ask"
-# Follow-up channel owned by the llm-agent plugin; advertised only while present.
+# The agent plugin owns this channel. Show it only when the action exists.
 MESSAGE_ACTION = "agent.message"
 
 
@@ -59,7 +59,7 @@ class AskService:
 
 class AskPlugin(Plugin):
     id = "ask"
-    requires = ("settings", "llm-agent", "reader")
+    requires = ("settings", "agent", "reader")
     optional_requires = ("notes",)
     provides = ("ask",)
     uses_actions = (MESSAGE_ACTION,)

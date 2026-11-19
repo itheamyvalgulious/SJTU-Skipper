@@ -10,9 +10,8 @@ from core.ui import Side
 
 
 class MyPlugin(Plugin):
-    id = "my-plugin"
+    id = "my"
     requires = ("settings", "llm")   # 插件 id，不是服务名
-    action_namespace = "my"          # 可选；UI action 前缀，缺省等于 id
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
@@ -226,7 +225,7 @@ def device_login(payload: dict):
 
 Action 归属：
 
-- action id 必须以插件的命名空间开头，后接 `.`．命名空间默认是插件 id，可用 `action_namespace` 指定．插件不能以其他插件的 id 注册 action，也不能重复注册同一个 action id．
+- action id 必须以插件 `id` 开头，后接 `.`．插件不能以其他插件的 id 注册 action，也不能重复注册同一个 action id．
 - `ctx.ui.unregister_action(action_id)` 只允许移除本插件注册的 action．
 - `ctx.ui.action_owner(action_id)` 返回注册方插件 id 或 `None`，`ctx.ui.has_action(action_id)` 判断是否存在．
 - 驱动其他插件的 action 时，用 `uses_actions = ("other.action",)` 声明．如果声明的 action 不存在，或注册方未加载，插件加载失败．

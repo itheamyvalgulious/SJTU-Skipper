@@ -20,8 +20,7 @@ from support import FakeLLM
 
 
 class DemoUI(Plugin):
-    id = "test-ui"
-    action_namespace = "test"
+    id = "test"
 
     def setup(self, ctx: PluginContext) -> None:
         ctx.ui.add_tab(Side.LEFT, "test", "测试", icon="◈")
@@ -379,7 +378,7 @@ def test_health(client) -> None:
     test_client, _cfg = client
     payload = test_client.get("/api/health").json()
     assert payload["ok"] is True
-    assert payload["plugin_order"] == ["test-ui"]
+    assert payload["plugin_order"] == ["test"]
 
 
 def test_settings_save_accepts_http_flat_payload(tmp_path: Path) -> None:

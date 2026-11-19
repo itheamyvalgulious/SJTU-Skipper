@@ -23,14 +23,14 @@ Canvas / SJTU 视频门户 / 本地文件 / 手动 URL
                     |
            UIManager / Web UI
 
-llm-agent / llm -> JSON Lines IPC -> Bun / OMP SDK
+agent / llm -> JSON Lines IPC -> Bun / OMP SDK
 ```
 
 - `PluginManager` 按依赖拓扑顺序调用 `setup`，逆序调用 `teardown`．缺失必需依赖或循环依赖会阻止加载．
 - `requires` 指定必需插件．`optional_requires` 在插件存在时约束加载顺序．
 - `PluginContext` 提供事件、流、LLM、UI、服务、元信息和日志接口．插件通过服务注册与调用公开能力．
-- `settings`、`llm`、`llm-agent`、`reader` 和 `ask` 由内置插件组合加载．输入、识别和笔记插件由应用配置控制．
-- `notes-pipeline` 依赖 `settings`、`llm-agent`、`llm`，可选依赖 `stt`、`vlm`．
+- `settings`、`llm`、`agent`、`reader` 和 `ask` 由内置插件组合加载．输入、识别和笔记插件由应用配置控制．
+- `notes` 依赖 `settings`、`agent`、`reader`，可选依赖 `stt`、`vlm`．
 
 ## 流与事件
 

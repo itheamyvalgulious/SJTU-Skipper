@@ -59,73 +59,29 @@ class NotesPipeline:
         self.ctx = ctx
         self.settings = ctx.require("settings")
         self.agent = ctx.require("agent")
-        for key, default, label in (
-            ("chunk_seconds", 600, "片段秒数"),
-            ("overlap_seconds", 60, "前文秒数"),
-            ("concurrency", 8, "笔记并发数"),
+        for order, (key, default, kind, label) in enumerate(
+            (
+                ("chunks_enabled", True, SettingType.BOOL, "课中自动整理"),
+                ("chunk_seconds", 600, SettingType.INT, "分段时长（秒）"),
+                ("overlap_seconds", 60, SettingType.INT, "前文时长（秒）"),
+                ("concurrency", 8, SettingType.INT, "笔记并发数"),
+                ("review_enabled", True, SettingType.BOOL, "启用审阅"),
+                ("review_max_rounds", 0, SettingType.INT, "审阅轮数上限（0 为不限）"),
+                ("chunk_system_prompt", SYSTEM, SettingType.TEXT, "课中整理提示词"),
+                ("system_prompt", SYSTEM, SettingType.TEXT, "完整笔记提示词"),
+                ("reviewer_prompt", REVIEW_SYSTEM, SettingType.TEXT, "审阅提示词"),
+            ),
+            start=1,
         ):
             self.settings.register(
                 SettingsSpec(
                     key=f"notes.{key}",
                     default=default,
-                    type=SettingType.INT,
-                    label=label,
-                    group="笔记",
-                    description="修改后重启服务生效" if key == "concurrency" else "",
-                ),
-                plugin_id=self.id,
-            )
-        for key, default, kind, label, group in (
-            (
-                "notes.system_prompt",
-                SYSTEM,
-                SettingType.TEXT,
-                "system_prompt",
-                "笔记",
-            ),
-            (
-                "notes.reviewer_prompt",
-                REVIEW_SYSTEM,
-                SettingType.TEXT,
-                "reviewer_prompt",
-                "笔记",
-            ),
-            (
-                "notes.review_enabled",
-                True,
-                SettingType.BOOL,
-                "review_enabled",
-                "笔记",
-            ),
-            (
-                "notes.review_max_rounds",
-                0,
-                SettingType.INT,
-                "review_max_rounds",
-                "笔记",
-            ),
-            (
-                "notes.chunk_system_prompt",
-                SYSTEM,
-                SettingType.TEXT,
-                "系统提示词",
-                "分段笔记",
-            ),
-            (
-                "notes.chunks_enabled",
-                True,
-                SettingType.BOOL,
-                "分段笔记",
-                "分段笔记",
-            ),
-        ):
-            self.settings.register(
-                SettingsSpec(
-                    key=key,
-                    default=default,
                     type=kind,
                     label=label,
-                    group=group,
+                    group="笔记",
+                    order=order * 10,
+                    description="修改后重启服务生效" if key == "concurrency" else "",
                 ),
                 plugin_id=self.id,
             )

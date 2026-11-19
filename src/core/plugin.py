@@ -37,8 +37,6 @@ class Plugin:
     requires: tuple[str, ...] = ()
     optional_requires: tuple[str, ...] = ()
     provides: tuple[str, ...] = ()
-    # Prefix every UI action of this plugin must use; defaults to ``id``.
-    action_namespace: str = ""
     # UI action ids owned by other plugins that this plugin drives.
     uses_actions: tuple[str, ...] = ()
 
@@ -53,12 +51,11 @@ class Plugin:
 
 
 class _ScopedUI(UIManager):
-    __slots__ = ("_scope_plugin_id", "_scope_namespace")
+    __slots__ = ("_scope_plugin_id",)
 
-    def __init__(self, target: UIManager, plugin_id: str, namespace: str = "") -> None:
+    def __init__(self, target: UIManager, plugin_id: str) -> None:
         self.__dict__ = target.__dict__
         self._scope_plugin_id = plugin_id
-        self._scope_namespace = namespace or plugin_id
 
     def add_tab(
         self,
@@ -131,10 +128,10 @@ class _ScopedUI(UIManager):
             raise PluginError(
                 f"Plugin '{owner}' cannot register UI actions for '{plugin_id}'"
             )
-        if not action_id.startswith(f"{self._scope_namespace}."):
+        if not action_id.startswith(f"{owner}."):
             raise PluginError(
                 f"Plugin '{owner}' must register UI actions under "
-                f"'{self._scope_namespace}.*', not {action_id!r}"
+                f"'{owner}.*', not {action_id!r}"
             )
         super().register_action(action_id, handler, plugin_id=owner)
 
@@ -248,11 +245,11 @@ class _ScopedServices(ServiceRegistry):
         super().register(name, obj, plugin_id=plugin_id)
 
 
-def _scoped_ui(ui: Any, plugin_id: str, namespace: str = "") -> Any:
+def _scoped_ui(ui: Any, plugin_id: str) -> Any:
     if not plugin_id or ui is None or isinstance(ui, _ScopedUI):
         return ui
     if isinstance(ui, UIManager):
-        return _ScopedUI(ui, plugin_id, namespace)
+        return _ScopedUI(ui, plugin_id)
     return ui
 
 
@@ -287,12 +284,9 @@ class PluginContext:
     # the DAG boundary check (used by unit tests that build a context by hand).
     allowed_dependencies: set[str] | None = None
     declared_provides: tuple[str, ...] = field(default_factory=tuple)
-    action_namespace: str = ""
 
     def __post_init__(self) -> None:
-        self.ui = _scoped_ui(
-            self.ui, self.plugin_id, self.action_namespace or self.plugin_id
-        )
+        self.ui = _scoped_ui(self.ui, self.plugin_id)
         self.events = _scoped_events(self.events, self.plugin_id)
         self.meta = _scoped_meta(self.meta, self.plugin_id)
         if (
@@ -523,12 +517,6 @@ class PluginManager:
             }
         if not getattr(ctx, "declared_provides", ()):
             ctx.declared_provides = tuple(plugin.provides)
-        if not getattr(ctx, "action_namespace", ""):
-            ctx.action_namespace = plugin.action_namespace or plugin.id
-        # ``__post_init__`` already wrapped ``ctx.ui``; re-wrap it so the scope
-        # carries the declared action namespace instead of assuming the id.
-        if self._ui is not None and isinstance(ctx.ui, UIManager):
-            ctx.ui = _scoped_ui(self._ui, plugin.id, ctx.action_namespace)
         return ctx
 
     @staticmethod
