@@ -29,6 +29,7 @@ import {
   type Emit,
   type ModelSettings,
   type ModelsConfiguration,
+  type RuntimePersistence,
   modelsConfigurationSchema,
   rolesConfigurationSchema,
   credentialSchema,
@@ -78,6 +79,7 @@ interface RunControl {
 export class Runtime {
   private auth?: AuthStorage;
   private initialization?: Promise<void>;
+  private persistenceError?: Error;
   private config?: Configuration;
   private sessions = new Map<string, Conversation>();
   private generations = new Map<string, AbortController>();
@@ -86,7 +88,10 @@ export class Runtime {
     string,
     { input: number; output: number; cacheRead: number; totalTokens: number }
   > = {};
-  constructor(private root: string) {}
+  constructor(
+    private root: string,
+    private persistence?: RuntimePersistence,
+  ) {}
   private async message(params: Record<string, unknown>) {
     const conversation = this.sessions.get(String(params.session_id));
     const control = conversation?.run;
@@ -193,28 +198,54 @@ export class Runtime {
 
   private async initialize() {
     this.initialization ??= (async () => {
-      await mkdir(this.root, { recursive: true });
-      for (const [name, text] of [
-        [
-          "models.yml",
-          "providers:\n  deepseek:\n    baseUrl: https://api.deepseek.com\n    api: openai-completions\n    auth: apiKey\n    models:\n      - id: deepseek-flash\n        input:\n          - text\n          - image\n        reasoning: true\n        contextWindow: 1000000\n        maxTokens: 384000\n",
-        ],
-        [
-          "roles.yml",
-          ROLE_NAMES.map(
-            (role) =>
-              `${role}: deepseek/deepseek-flash:${role === AgentRole.BOARD_RECOGNITION ? "off" : "xhigh"}\n`,
-          ).join(""),
-        ],
-      ]) {
-        try {
-          await writeFile(path.join(this.root, name), text, { flag: "wx", mode: 0o600 });
-        } catch (error) {
-          if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
-        }
-      }
+      await mkdir(this.root, { recursive: true, mode: 0o700 });
       this.auth = await AuthStorage.create(path.join(this.root, "credentials.db"));
       await this.auth.credentials.reload();
+      for (const [provider, credential] of Object.entries(this.persistence?.credentials ?? {})) {
+        await this.auth.credentials.set(provider, credential);
+      }
+      if (this.persistence) {
+        // Keep this listener for the pool lifetime: close can finish after an OAuth exchange.
+        this.auth.credentials.onGeneration(() => {
+          try {
+            this.persistence!.save({ credentials: this.auth!.credentials.all() });
+          } catch (error) {
+            // The SDK isolates listener errors. Fail IPC requests instead of losing a saved token.
+            this.persistenceError ??= new Error("Credential persistence failed", { cause: error });
+          }
+        });
+      }
+      const models = this.persistence?.models ?? {
+        providers: {
+          deepseek: {
+            baseUrl: "https://api.deepseek.com",
+            api: "openai-completions",
+            auth: "apiKey",
+            models: [
+              {
+                id: "deepseek-flash",
+                input: ["text", "image"],
+                reasoning: true,
+                contextWindow: 1000000,
+                maxTokens: 384000,
+              },
+            ],
+          },
+        },
+      };
+      const roles =
+        this.persistence?.roles ??
+        Object.fromEntries(
+          ROLE_NAMES.map((role) => [
+            role,
+            `deepseek/deepseek-flash:${role === AgentRole.BOARD_RECOGNITION ? "off" : "xhigh"}`,
+          ]),
+        );
+      const config = await this.configuration(
+        Bun.YAML.stringify(models),
+        Bun.YAML.stringify(roles),
+      );
+      await this.storeConfiguration(config, !this.persistence?.models || !this.persistence?.roles);
     })();
     await this.initialization;
   }
@@ -254,7 +285,6 @@ export class Runtime {
   }
 
   private async configuration(models: string, roles: string): Promise<Configuration> {
-    await this.initialize();
     const parsed = validate(modelsConfigurationSchema, Bun.YAML.parse(models), "models.yml");
     const selectors = validate(rolesConfigurationSchema, Bun.YAML.parse(roles), "roles.yml");
     for (const [provider, value] of Object.entries(parsed.providers)) {
@@ -320,15 +350,12 @@ export class Runtime {
   }
 
   private async load() {
-    if (this.config) return this.config;
-    const models = await readFile(path.join(this.root, "models.yml"), "utf8");
-    const roles = await readFile(path.join(this.root, "roles.yml"), "utf8");
-    this.config = await this.configuration(models, roles);
-    return this.config;
+    await this.initialize();
+    return this.config!;
   }
 
   /** Write a validated configuration atomically, restoring the previous files on failure. */
-  private async storeConfiguration(config: Configuration) {
+  private async storeConfiguration(config: Configuration, persist = true) {
     const previous = this.config;
     const entries = [
       ["models.yml", config.models],
@@ -349,6 +376,14 @@ export class Runtime {
       throw error;
     }
     this.config = config;
+    if (persist) {
+      this.persistence?.save({
+        settings: {
+          models: validate(modelsConfigurationSchema, Bun.YAML.parse(config.models), "models.yml"),
+          roles: config.selectors,
+        },
+      });
+    }
   }
 
   /** Parsed models.yml and roles.yml of the active configuration. */
@@ -490,6 +525,17 @@ export class Runtime {
   }
 
   async dispatch(method: IpcMethod, params: Record<string, unknown>, emit: Emit): Promise<unknown> {
+    if (this.persistenceError) throw this.persistenceError;
+    const result = await this.dispatchRequest(method, params, emit);
+    if (this.persistenceError) throw this.persistenceError;
+    return result;
+  }
+
+  private async dispatchRequest(
+    method: IpcMethod,
+    params: Record<string, unknown>,
+    emit: Emit,
+  ): Promise<unknown> {
     if (method === IpcMethod.MESSAGE) return this.message(params);
     if (method === IpcMethod.SESSION_TRANSCRIPT)
       return this.sessionTranscript(String(params.session_id));
@@ -830,7 +876,7 @@ export class Runtime {
           enableLsp: false,
           enableIrc: false,
           skipPythonPreflight: true,
-          cacheWarming: false,
+          cacheWarming: "off",
           disableModelFallback: true,
           disableServerSideFallback: true,
           assertDispatchModel: (model) => {
@@ -1107,7 +1153,7 @@ export class Runtime {
     for (const controller of this.generations.values()) controller.abort();
     await Promise.all(
       [...this.sessions.keys()].map((id) =>
-        this.dispatch(IpcMethod.CLOSE_SESSION, { session_id: id }, () => {}),
+        this.dispatchRequest(IpcMethod.CLOSE_SESSION, { session_id: id }, () => {}),
       ),
     );
     this.auth?.close();

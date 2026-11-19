@@ -1662,7 +1662,7 @@ class InputPlugin(Plugin):
             return [
                 {
                     "type": BlockType.TEXT,
-                    "text": "从左侧课程树选择一节课．",
+                    "text": "未选择课程",
                 }
             ]
 

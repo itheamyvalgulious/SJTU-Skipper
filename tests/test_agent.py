@@ -409,6 +409,63 @@ def test_runtime_rejects_string_method(tmp_path):
     assert client._process is None
 
 
+def test_runtime_json_survives_restart(tmp_path):
+    from agent_runtime.client import RuntimeClient
+
+    if shutil.which("bun") is None:
+        pytest.skip("Bun is required for the runtime")
+    auth = {"users": {"alice": {"password": "test"}}, "session_secret": "unchanged"}
+    (tmp_path / "auth.json").write_text(json.dumps(auth))
+    client = RuntimeClient(tmp_path)
+    try:
+        initial = client.call(IpcMethod.INFO)
+        directory = client.runtime_dir
+        client.call(IpcMethod.CREDENTIALS, provider="deepseek", key="test-key")
+        client.call(
+            IpcMethod.IMPORT_CREDENTIALS,
+            provider="opencode-go",
+            credential={
+                "type": "oauth",
+                "access": "access",
+                "refresh": "refresh",
+                "expires": 9999999999999,
+            },
+        )
+        client.call(IpcMethod.ROLE_SET, role="ask_instant", selector="@default")
+        saved = json.loads((tmp_path / "settings.json").read_text())
+        assert saved["llm.roles"]["ask_instant"] == "@default"
+        credentials = json.loads((tmp_path / "auth.json").read_text())
+        assert credentials["users"] == auth["users"]
+        assert credentials["session_secret"] == "unchanged"
+        assert credentials["llm"]["deepseek"]["key"] == "test-key"
+        assert (tmp_path / "auth.json").stat().st_mode & 0o777 == 0o600
+    finally:
+        client.close()
+    assert not directory.exists()
+    assert not (tmp_path / "llm_runtime").exists()
+    replacement = RuntimeClient(tmp_path)
+    try:
+        restored = replacement.call(IpcMethod.INFO)
+        assert (
+            json.loads((tmp_path / "settings.json").read_text())["llm.models"]
+            == saved["llm.models"]
+        )
+        assert restored["roles"]["ask_instant"] == restored["roles"]["default"]
+        assert (
+            json.loads((replacement.runtime_dir / "bootstrap.json").read_text())[
+                "credentials"
+            ]
+            == credentials["llm"]
+        )
+        assert replacement.session_transcript("old-conversation") is None
+        replacement.call(IpcMethod.LOGOUT, provider="opencode-go")
+        assert (
+            "opencode-go" not in json.loads((tmp_path / "auth.json").read_text())["llm"]
+        )
+    finally:
+        replacement.close()
+
+
 def test_cleanup_does_not_start_runtime(tmp_path, monkeypatch):
     from agent_runtime.client import RuntimeClient
 
@@ -571,8 +628,8 @@ def test_can_resume_reads_saved_transcript_through_runtime(tmp_path):
             False,
             "saved session transcript is unavailable",
         )
-        pointer = tmp_path / "session-writer.path"
-        transcript = tmp_path / "writer.jsonl"
+        pointer = client.runtime_dir / "session-writer.path"
+        transcript = client.runtime_dir / "writer.jsonl"
         pointer.write_text(str(transcript), encoding="utf-8")
         assert not agent.can_resume("writer")[0]
         transcript.write_text("{}\n", encoding="utf-8")

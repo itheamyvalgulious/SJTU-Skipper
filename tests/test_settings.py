@@ -469,7 +469,7 @@ def test_action_and_readonly_settings_fields(tmp_path: Path) -> None:
 class ConfigurationRuntime:
     """In-memory stand-in for the Bun runtime's configuration surface."""
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, *, settings=None) -> None:
         self.directory = directory
         self.calls: list[tuple[IpcMethod, dict]] = []
         self.fail_configure = False

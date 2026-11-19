@@ -1,4 +1,5 @@
 import { Effort, type, type Type } from "@oh-my-pi/pi-ai";
+import type { AuthStorageData } from "@oh-my-pi/pi-ai";
 
 export enum AgentRole {
   DEFAULT = "default",
@@ -38,6 +39,7 @@ export enum IpcResponseType {
   ERROR = "error",
   EVENT = "event",
   RESULT = "result",
+  PERSISTENCE = "persistence",
 }
 
 export enum RuntimeEvent {
@@ -166,12 +168,29 @@ const oauthCredentialSchema = type({
   "inferenceRegion?": "'global' | 'eu' | 'us'",
   "activeOrganizationId?": "string",
   "authorizedAt?": finiteNumber.atLeast(0),
-}).pipe(({ org_id, ...credential }) => ({
-  ...credential,
-  ...((credential.orgId ?? org_id) === undefined ? {} : { orgId: credential.orgId ?? org_id }),
-}));
-export const credentialSchema = apiKeyCredentialSchema.or(oauthCredentialSchema);
-export const credentialsSchema = type({ "[string]": credentialSchema });
+});
+const storedCredentialSchema = apiKeyCredentialSchema.or(oauthCredentialSchema);
+function normalizeCredential(credential: typeof storedCredentialSchema.infer) {
+  if (credential.type === "api_key") return credential;
+  const { org_id, ...oauth } = credential;
+  return {
+    ...oauth,
+    ...((oauth.orgId ?? org_id) === undefined ? {} : { orgId: oauth.orgId ?? org_id }),
+  };
+}
+export const credentialSchema = storedCredentialSchema.pipe(normalizeCredential);
+export const credentialsSchema = type({
+  "[string]": storedCredentialSchema.or(storedCredentialSchema.array()),
+}).pipe((providers) =>
+  Object.fromEntries(
+    Object.entries(providers).map(([provider, credential]) => [
+      provider,
+      Array.isArray(credential)
+        ? credential.map(normalizeCredential)
+        : normalizeCredential(credential),
+    ]),
+  ),
+);
 export type Credential = typeof credentialSchema.infer;
 
 // The SDK validates native model fields. Preserve them for its configuration parser.
@@ -195,6 +214,22 @@ export const rolesConfigurationSchema = type({
   default: nonemptyString,
   "[string]": nonemptyString,
 });
+
+export const runtimeBootstrapSchema = type({
+  "models?": modelsConfigurationSchema,
+  "roles?": rolesConfigurationSchema,
+  credentials: credentialsSchema,
+});
+export interface PersistenceSnapshot {
+  settings?: { models: ModelsConfiguration; roles: Record<string, string> };
+  credentials?: AuthStorageData;
+}
+export interface RuntimePersistence {
+  models?: ModelsConfiguration;
+  roles?: Record<string, string>;
+  credentials?: AuthStorageData;
+  save: (snapshot: PersistenceSnapshot) => void;
+}
 
 export const openCodeTokenResponseSchema = type({
   access_token: nonemptyString,

@@ -114,7 +114,7 @@ class LLMPlugin(Plugin):
     def setup(self, ctx: PluginContext) -> None:
         self._ctx = ctx
         self._settings = ctx.require("settings")
-        runtime = RuntimeClient(ctx.data_dir / "llm_runtime")
+        runtime = RuntimeClient(ctx.data_dir, settings=self._settings)
         self._runtime = runtime
         ctx.register_service("llm", runtime)
         handlers = (

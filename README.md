@@ -53,24 +53,22 @@ devShell 提供 Python、Bun、uv、ffmpeg 和动态库路径．非 Nix 系统�
 
 录播下载与音视频解码共用本地字节缓存．支持 Range 的来源可在完整下载前开始处理．不支持 Range 且索引位于文件尾时，解码等待下载．完整录像下载成功后才显示本地播放链接．
 
-LLM 配置保存在 `data/agent/llm_runtime/models.yml` 和 `roles.yml`．设置页提供图形化编辑，并保留一份原始 YAML 供批量修改．配置变更只影响随后创建的模型会话．
+LLM 模型和角色配置保存在 `data/agent/settings.json` 的 `llm.models` 与 `llm.roles` 中．设置页提供图形化编辑与 YAML 编辑器．运行时从 JSON 生成临时文件，退出后清理；LLM 对话不跨服务重启恢复．
 
 设置页按「概览 / 提供方 / 模型 / 角色 / 原始配置」组织，每页只处理一件事：
 
 - 「概览」列出默认模型、提供方与模型数量、缺少的凭据和角色分配；待处理项直接指向要改的页面．
-- 「提供方」一张卡片一个端点，端点地址、协议、鉴权与 API Key 在同一张表单里保存；内置预设 `opencode-go`（`https://opencode.ai/inference/go/openai/v1`，OAuth）与 `deepseek`（API Key），也可填写自定义 OpenAI 兼容端点．新提供方保存时请求 `${baseUrl}/models`，把返回的模型写入 `models.yml`．
+- 「提供方」一张卡片一个端点，端点地址、协议、鉴权与 API Key 在同一张表单里保存；内置预设 `opencode-go`（`https://opencode.ai/inference/go/openai/v1`，OAuth）与 `deepseek`（API Key），也可填写自定义 OpenAI 兼容端点．新提供方保存时请求 `${baseUrl}/models`，把返回的模型写入配置．
 - OpenCode Go 用设备授权：点「关联套餐」后，授权链接、验证码与有效期固定显示在「提供方」页顶部（新标签页打开，可复制），并带「重新开始授权」「取消授权」．服务端通常没有浏览器，所以不会替客户端打开页面；授权完成后页面自动刷新．
 - 「模型」先选提供方，再「检查端点模型」读取 `${baseUrl}/models`：只列出本地尚未添加的模型，可逐个或全部添加；已配置模型以表格展示上下文、输出、输入格式、推理能力与使用角色，选中一行在下方编辑器里修改，删除前会提示仍在使用该模型的角色．
 - 「角色」一表列出设置值与生效模型；选中某个角色后在下方选择模型与思考级别．`board_recognition` 会校验 `image` 输入，缺少时拒绝保存．
 - 「原始配置」保留两份 YAML，整体替换并交由运行时校验．
 - 端点未公布的限制按默认值落库（上下文 128000、输出 8192、`text` 输入），随后在「模型」逐个调整．OpenCode 等端点公布 `limit.context`、`limit.output`、`modalities.input` 与 `capabilities.reasoning` 时按其填写．
-- `models.yml` 使用 OMP `providers` 结构．提供方配置 `baseUrl`、`api`、鉴权和 headers，模型配置 `contextWindow`、`maxTokens`、`input`（`text`/`image`）与 `reasoning`．`api` 接受已安装 OMP SDK 支持的协议，包括 `openai-completions` 和 `openai-responses`．
-- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、笔记写作、审阅、问答与上下文压缩．`note_writer` 负责写作和修订，`note_review` 负责独立审阅．未填写的角色继承 `default`．
+- `llm.models` 使用 OMP `providers` 结构．提供方配置 `baseUrl`、`api`、鉴权和 headers，模型配置 `contextWindow`、`maxTokens`、`input`（`text`/`image`）与 `reasoning`．`api` 接受已安装 OMP SDK 支持的协议，包括 `openai-completions` 和 `openai-responses`．
+- `llm.roles` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、笔记写作、审阅、问答与上下文压缩．`note_writer` 负责写作和修订，`note_review` 负责独立审阅．未填写的角色继承 `default`．
 - 板书角色 `board_recognition` 必须选择支持图像输入的模型．无效选择器、角色循环或不支持的思考级别会阻止保存．
 - 默认模型为 `deepseek-flash`．省略 `maxTokens` 时继承 OMP 模型能力信息；显式填写时使用配置值．
-- 提供方凭据由项目 OMP `AuthStorage` 管理，保存在 `data/agent/llm_runtime/credentials.db`．API key 与 OpenCode OAuth 凭据分别保存，设置页只显示配置状态．无鉴权服务设置 `auth: none`．
-
-模型与角色由设置页的图形表单保存到 YAML（`llm.catalog`/`models_set`/`provider_set`/`role_set` 等运行时方法负责校验与写盘），凭据写入项目 `AuthStorage`．普通插件设置保存在 `data/agent/settings.json`．首次使用时在设置页配置提供方、角色与密钥．
+- 提供方凭据保存在 `data/agent/auth.json` 的 `llm` 字段中．API Key、OAuth 登录与刷新即时保存，设置页只显示配置状态．无鉴权服务设置 `auth: none`．
 
 ## 架构一览
 

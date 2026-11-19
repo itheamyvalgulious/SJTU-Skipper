@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import subprocess
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -15,13 +17,63 @@ from core.agent_types import IpcMethod, RuntimeFrameType
 
 
 class RuntimeClient:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, *, settings=None):
         self.data_dir = Path(data_dir).resolve()
+        self._settings = settings
+        self._temporary: tempfile.TemporaryDirectory | None = None
+        self._reader: threading.Thread | None = None
         self._process = None
         self._lock = threading.RLock()
+        self._pending_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._pending: dict[str, queue.Queue] = {}
+        self._reader_error: str | None = None
         self._closed = False
+
+    @property
+    def runtime_dir(self) -> Path:
+        if self._temporary is None:
+            raise RuntimeError("Agent runtime has not started")
+        return Path(self._temporary.name)
+
+    def _settings_store(self):
+        from plugins.settings.store import SettingsStore
+
+        return SettingsStore(self.data_dir / "settings.json")
+
+    def _bootstrap(self):
+        settings = self._settings or self._settings_store()
+        auth_path = self.data_dir / "auth.json"
+        auth = json.loads(auth_path.read_text("utf-8")) if auth_path.exists() else {}
+        bootstrap = {"credentials": auth.get("llm", {})}
+        for key in ("models", "roles"):
+            value = settings.get(f"llm.{key}")
+            if value is not None:
+                bootstrap[key] = value
+        return bootstrap
+
+    def _persist(self, message):
+        if "settings" in message:
+            values = {f"llm.{key}": value for key, value in message["settings"].items()}
+            if self._settings is not None:
+                self._settings.set_many(values)
+            else:
+                self._settings_store().update(values)
+        if "credentials" in message:
+            auth_path = self.data_dir / "auth.json"
+            auth = (
+                json.loads(auth_path.read_text("utf-8")) if auth_path.exists() else {}
+            )
+            auth["llm"] = message["credentials"]
+            descriptor, name = tempfile.mkstemp(
+                prefix="auth-", suffix=".tmp", dir=self.data_dir
+            )
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                    json.dump(auth, output, ensure_ascii=False, indent=2)
+                os.replace(name, auth_path)
+            finally:
+                Path(name).unlink(missing_ok=True)
 
     def _start(self):
         with self._lock:
@@ -30,9 +82,20 @@ class RuntimeClient:
             if self._process is not None and self._process.poll() is None:
                 return
             self.data_dir.mkdir(parents=True, exist_ok=True)
+            if self._reader is not None:
+                self._reader.join()
+            if self._temporary is not None:
+                self._temporary.cleanup()
+            self._temporary = tempfile.TemporaryDirectory(prefix="skipper-llm-")
+            bootstrap = self.runtime_dir / "bootstrap.json"
+            bootstrap.write_text(
+                json.dumps(self._bootstrap(), ensure_ascii=False), "utf-8"
+            )
+            bootstrap.chmod(0o600)
+            self._reader_error = None
             entry = Path(__file__).with_name("main.ts")
             self._process = subprocess.Popen(
-                ["bun", str(entry), str(self.data_dir)],
+                ["bun", str(entry), str(self.runtime_dir)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -41,7 +104,10 @@ class RuntimeClient:
                 bufsize=1,
             )
             process = self._process
-            threading.Thread(target=self._read, args=(process,), daemon=True).start()
+            self._reader = threading.Thread(
+                target=self._read, args=(process,), daemon=True
+            )
+            self._reader.start()
             threading.Thread(target=self._logs, args=(process,), daemon=True).start()
 
     def _logs(self, process):
@@ -52,17 +118,24 @@ class RuntimeClient:
         try:
             for line in process.stdout:
                 message = json.loads(line)
+                if message.get("type") == "persistence":
+                    self._persist(message)
+                    continue
                 message["type"] = RuntimeFrameType(message["type"])
-                with self._lock:
+                with self._pending_lock:
                     target = self._pending.get(str(message.get("id", "")))
                 if target is not None:
                     target.put(message)
         except Exception as exc:
             reason = str(exc)
+            if process.poll() is None:
+                process.kill()
+                process.wait()
         else:
             reason = f"Agent runtime exited ({process.wait()})"
-        with self._lock:
+        with self._pending_lock:
             if self._process is process:
+                self._reader_error = reason
                 for target in self._pending.values():
                     target.put({"type": RuntimeFrameType.ERROR, "error": reason})
 
@@ -83,7 +156,9 @@ class RuntimeClient:
                 self._start()
         request_id = uuid.uuid4().hex
         target = queue.Queue()
-        with self._lock:
+        with self._pending_lock:
+            if self._reader_error is not None:
+                raise RuntimeError(self._reader_error)
             self._pending[request_id] = target
         try:
             with self._write_lock:
@@ -107,7 +182,7 @@ class RuntimeClient:
                 if message["type"] == RuntimeFrameType.RESULT:
                     break
         finally:
-            with self._lock:
+            with self._pending_lock:
                 self._pending.pop(request_id, None)
 
     def call(self, method: IpcMethod, **params) -> dict[str, Any]:
@@ -133,6 +208,9 @@ class RuntimeClient:
             process = self._process
             self._closed = True
         if process is None:
+            if self._temporary is not None:
+                self._temporary.cleanup()
+                self._temporary = None
             return
         if process.poll() is None:
             assert process.stdin is not None
@@ -146,3 +224,8 @@ class RuntimeClient:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+        if self._reader is not None:
+            self._reader.join()
+        if self._temporary is not None:
+            self._temporary.cleanup()
+            self._temporary = None

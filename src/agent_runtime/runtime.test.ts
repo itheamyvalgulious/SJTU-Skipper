@@ -3,6 +3,8 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { AuthStorageData } from "@oh-my-pi/pi-ai";
+import { registerOAuthProvider, unregisterOAuthProvider } from "@oh-my-pi/pi-ai/oauth";
 import { Runtime } from "./runtime";
 import {
   AgentRole,
@@ -11,6 +13,8 @@ import {
   WorkspaceTool,
   ipcRequestSchema,
   validate,
+  runtimeBootstrapSchema,
+  type PersistenceSnapshot,
 } from "./schemas";
 
 test("first request creates missing runtime configuration", async () => {
@@ -23,6 +27,349 @@ test("first request creates missing runtime configuration", async () => {
   } finally {
     await runtime.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("default configuration persists once", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "runtime-defaults-"));
+  const snapshots: PersistenceSnapshot[] = [];
+  const runtime = new Runtime(root, {
+    save: (snapshot) => snapshots.push(structuredClone(snapshot)),
+  });
+  try {
+    await runtime.dispatch(IpcMethod.PING, {}, () => {});
+    await runtime.dispatch(IpcMethod.INFO, {}, () => {});
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0].settings?.models.providers.deepseek.models[0].id).toBe("deepseek-flash");
+    expect(snapshots[0].settings?.roles.board_recognition).toBe("deepseek/deepseek-flash:off");
+    expect((await stat(path.join(root, "roles.yml"))).mode & 0o777).toBe(0o600);
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function persistenceFixture(credentials: AuthStorageData = {}) {
+  const root = await mkdtemp(path.join(tmpdir(), "runtime-persistence-"));
+  const snapshots: PersistenceSnapshot[] = [];
+  const events: unknown[] = [];
+  const bootstrap = validate(
+    runtimeBootstrapSchema,
+    {
+      models: {
+        providers: {
+          local: {
+            api: "openai-completions",
+            auth: "none",
+            baseUrl: "http://127.0.0.1:1/v1",
+            models: [{ id: "proof", input: ["text", "image"], reasoning: true }],
+          },
+        },
+      },
+      roles: { default: "local/proof:off" },
+      credentials,
+    },
+    "runtime bootstrap",
+  );
+  const runtime = new Runtime(root, {
+    models: bootstrap.models,
+    roles: bootstrap.roles,
+    credentials: bootstrap.credentials,
+    save: (snapshot) => snapshots.push(structuredClone(snapshot)),
+  });
+  const emit = (name: RuntimeEvent, data: Record<string, unknown>) => events.push({ name, data });
+  return {
+    root,
+    runtime,
+    snapshots,
+    events,
+    emit,
+    async close() {
+      await runtime.close();
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+test("bootstrap preserves accounts without emitting secrets", async () => {
+  const credentials: AuthStorageData = {
+    local: { type: "api_key", key: "bootstrap-key" },
+    accounts: [
+      {
+        type: "oauth",
+        access: "first-access",
+        refresh: "first-refresh",
+        expires: 4_000_000_000_000,
+        accountId: "first",
+      },
+      {
+        type: "oauth",
+        access: "second-access",
+        refresh: "second-refresh",
+        expires: 4_000_000_000_000,
+        accountId: "second",
+      },
+    ],
+  };
+  const fixture = await persistenceFixture(credentials);
+  try {
+    const catalog = await fixture.runtime.dispatch(IpcMethod.CATALOG, {}, fixture.emit);
+    const auth = fixture.runtime["auth"]!;
+    expect(auth.credentials.all()).toEqual(credentials);
+    expect(catalog).toHaveProperty("selectors.default", "local/proof:off");
+    expect(fixture.snapshots).toEqual([]);
+    expect(fixture.events).toEqual([]);
+    expect(JSON.stringify(catalog)).not.toContain("bootstrap-key");
+    expect(JSON.stringify(catalog)).not.toContain("first-refresh");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("bootstrap rejects null configuration", () => {
+  expect(() =>
+    validate(runtimeBootstrapSchema, { models: null, credentials: {} }, "runtime bootstrap"),
+  ).toThrow();
+  expect(() =>
+    validate(runtimeBootstrapSchema, { roles: null, credentials: {} }, "runtime bootstrap"),
+  ).toThrow();
+});
+
+test("only valid configuration edits persist", async () => {
+  const fixture = await persistenceFixture();
+  try {
+    await fixture.runtime.dispatch(IpcMethod.PING, {}, fixture.emit);
+    await expect(
+      fixture.runtime.dispatch(
+        IpcMethod.ROLE_SET,
+        {
+          role: AgentRole.NOTE_WRITER,
+          selector: "local/missing:high",
+        },
+        fixture.emit,
+      ),
+    ).rejects.toThrow();
+    expect(fixture.snapshots).toEqual([]);
+    await fixture.runtime.dispatch(
+      IpcMethod.ROLE_SET,
+      {
+        role: AgentRole.NOTE_WRITER,
+        selector: "local/proof:high",
+      },
+      fixture.emit,
+    );
+    expect(fixture.snapshots).toHaveLength(1);
+    expect(fixture.snapshots[0].settings?.roles.note_writer).toBe("local/proof:high");
+    await fixture.runtime.dispatch(
+      IpcMethod.MODELS_SET,
+      {
+        provider: "local",
+        models: [{ id: "proof", input: ["text", "image"], reasoning: true, contextWindow: 64000 }],
+      },
+      fixture.emit,
+    );
+    expect(fixture.snapshots).toHaveLength(2);
+    expect(fixture.snapshots[1].settings?.models.providers.local.models[0].contextWindow).toBe(
+      64000,
+    );
+    await expect(
+      fixture.runtime.dispatch(
+        IpcMethod.CONFIGURE,
+        {
+          models: "providers: {}",
+          roles: "default: local/proof:off",
+        },
+        fixture.emit,
+      ),
+    ).rejects.toThrow();
+    expect(fixture.snapshots).toHaveLength(2);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("key changes and logout persist credential snapshots", async () => {
+  const fixture = await persistenceFixture({ retained: { type: "api_key", key: "retained-key" } });
+  try {
+    await fixture.runtime.dispatch(
+      IpcMethod.CREDENTIALS,
+      { provider: "local", key: "saved-key" },
+      fixture.emit,
+    );
+    expect(fixture.snapshots.at(-1)?.credentials).toEqual({
+      retained: { type: "api_key", key: "retained-key" },
+      local: { type: "api_key", key: "saved-key" },
+    });
+    await fixture.runtime.dispatch(
+      IpcMethod.IMPORT_CREDENTIALS,
+      {
+        provider: "local",
+        credential: {
+          type: "oauth",
+          access: "import-access",
+          refresh: "import-refresh",
+          expires: 4_000_000_000_000,
+          accountId: "imported",
+        },
+      },
+      fixture.emit,
+    );
+    expect(fixture.snapshots.at(-1)?.credentials?.local).toEqual({
+      type: "oauth",
+      access: "import-access",
+      refresh: "import-refresh",
+      expires: 4_000_000_000_000,
+      accountId: "imported",
+    });
+    await fixture.runtime.dispatch(IpcMethod.LOGOUT, { provider: "local" }, fixture.emit);
+    expect(fixture.snapshots.at(-1)?.credentials).toEqual({
+      retained: { type: "api_key", key: "retained-key" },
+    });
+    await fixture.runtime.dispatch(IpcMethod.LOGOUT, { provider: "retained" }, fixture.emit);
+    expect(fixture.snapshots.at(-1)?.credentials).toEqual({});
+    expect(fixture.events).toEqual([]);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("OAuth refresh persists rotated tokens and sibling accounts", async () => {
+  const provider = `runtime-refresh-${crypto.randomUUID()}`;
+  registerOAuthProvider({
+    id: provider,
+    name: "Runtime refresh test",
+    async login() {
+      throw new Error("Login is not used");
+    },
+    getApiKey: (credential) => credential.access,
+    async refreshToken(credential) {
+      return {
+        ...credential,
+        access: "rotated-access",
+        refresh: "rotated-refresh",
+        expires: Date.now() + 3600000,
+      };
+    },
+  });
+  const fixture = await persistenceFixture({
+    [provider]: [
+      {
+        type: "oauth",
+        access: "expired-access",
+        refresh: "old-refresh",
+        expires: 1,
+        accountId: "first",
+      },
+      {
+        type: "oauth",
+        access: "sibling-access",
+        refresh: "sibling-refresh",
+        expires: 4_000_000_000_000,
+        accountId: "second",
+      },
+    ],
+  });
+  try {
+    await fixture.runtime.dispatch(IpcMethod.PING, {}, fixture.emit);
+    const auth = fixture.runtime["auth"]!;
+    const row = auth.credentials
+      .list(provider)
+      .find(
+        (entry) => entry.credential.type === "oauth" && entry.credential.accountId === "first",
+      )!;
+    await auth.oauth.refresh(row.id);
+    expect(fixture.snapshots.at(-1)?.credentials?.[provider]).toEqual([
+      expect.objectContaining({
+        access: "rotated-access",
+        refresh: "rotated-refresh",
+        accountId: "first",
+      }),
+      expect.objectContaining({
+        access: "sibling-access",
+        refresh: "sibling-refresh",
+        accountId: "second",
+      }),
+    ]);
+    expect(fixture.events).toEqual([]);
+  } finally {
+    unregisterOAuthProvider(provider);
+    await fixture.close();
+  }
+});
+
+test("OAuth refresh persists after runtime close", async () => {
+  const provider = `runtime-close-refresh-${crypto.randomUUID()}`;
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  registerOAuthProvider({
+    id: provider,
+    name: "Runtime close refresh test",
+    async login() {
+      throw new Error("Login is not used");
+    },
+    getApiKey: (credential) => credential.access,
+    async refreshToken(credential) {
+      entered.resolve();
+      await release.promise;
+      return {
+        ...credential,
+        access: "closing-access",
+        refresh: "closing-refresh",
+        expires: Date.now() + 3600000,
+      };
+    },
+  });
+  const fixture = await persistenceFixture({
+    [provider]: {
+      type: "oauth",
+      access: "expired-access",
+      refresh: "old-refresh",
+      expires: 1,
+      accountId: "closing-account",
+    },
+  });
+  let access: Promise<unknown> | undefined;
+  try {
+    await fixture.runtime.dispatch(IpcMethod.PING, {}, fixture.emit);
+    const auth = fixture.runtime["auth"]!;
+    access = auth.oauth.refresh(auth.credentials.list(provider)[0].id);
+    await entered.promise;
+    await fixture.runtime.close();
+    release.resolve();
+    await access;
+    expect(fixture.snapshots.at(-1)?.credentials?.[provider]).toEqual(
+      expect.objectContaining({
+        access: "closing-access",
+        refresh: "closing-refresh",
+        accountId: "closing-account",
+      }),
+    );
+    expect(fixture.events).toEqual([]);
+  } finally {
+    release.resolve();
+    await access;
+    unregisterOAuthProvider(provider);
+    await fixture.close();
+  }
+});
+
+test("credential persistence errors fail requests", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "runtime-persistence-error-"));
+  const runtime = new Runtime(root, {
+    save(snapshot) {
+      if (snapshot.credentials) throw new Error("Storage is unavailable");
+    },
+  });
+  try {
+    await expect(
+      runtime.dispatch(IpcMethod.CREDENTIALS, { provider: "local", key: "secret" }, () => {}),
+    ).rejects.toThrow("Credential persistence failed");
+    await expect(runtime.dispatch(IpcMethod.PING, {}, () => {})).rejects.toThrow(
+      "Credential persistence failed",
+    );
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 

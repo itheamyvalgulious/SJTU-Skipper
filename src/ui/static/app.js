@@ -2780,10 +2780,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       tabsEl.replaceChildren();
       tabsEl.hidden = true;
       toolboxEl.replaceChildren(
-        el("div", { class: "vstack gap-2 fg-2" }, [
-          el("b", { text: "还没有选择课程" }),
-          el("span", { text: "从左侧课程树展开课程，点一节课开始．" }),
-        ]),
+        el("div", { class: "vstack gap-2 fg-2" }, [el("b", { text: "未选择课程" })]),
       );
       return;
     }
@@ -2958,13 +2955,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (!active || !blocks) {
       if (!samePage || !container.children.length)
         container.replaceChildren(
-          el("div", { class: "text-center p-5" }, [
-            el("h2", { text: "选择一节课" }),
-            el("p", {
-              class: "fg-2",
-              text: "左侧课程树里展开课程，选择录播或直播．按 Ctrl+P 打开命令面板．",
-            }),
-          ]),
+          el("div", { class: "text-center p-5" }, [el("h2", { text: "未选择课程" })]),
         );
     } else complete = updateBlocks(container, blocks);
     state.pageKey = complete ? key : null;

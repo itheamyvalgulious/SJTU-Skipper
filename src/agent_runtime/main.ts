@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import type { IpcRequest } from "./schemas";
@@ -12,10 +12,24 @@ for (const key of Object.keys(process.env)) {
 }
 process.env.PI_CODING_AGENT_DIR = root;
 // SDK imports read environment settings. Load them only after environment isolation.
-const [{ Runtime }, { IpcResponseType, ipcRequestHeaderSchema, ipcRequestSchema }] =
-  await Promise.all([import("./runtime"), import("./schemas")]);
-const runtime = new Runtime(root);
+const [
+  { Runtime },
+  { IpcResponseType, ipcRequestHeaderSchema, ipcRequestSchema, runtimeBootstrapSchema, validate },
+] = await Promise.all([import("./runtime"), import("./schemas")]);
+const bootstrap = validate(
+  runtimeBootstrapSchema,
+  JSON.parse(await readFile(path.join(root, "bootstrap.json"), "utf8")),
+  "runtime bootstrap",
+);
 const send = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`);
+const runtime = new Runtime(root, {
+  models: bootstrap.models ?? undefined,
+  roles: bootstrap.roles ?? undefined,
+  credentials: bootstrap.credentials,
+  save: (snapshot) => {
+    send({ type: IpcResponseType.PERSISTENCE, ...snapshot });
+  },
+});
 const input = createInterface({ input: process.stdin });
 const requests = new Set<Promise<void>>();
 for await (const line of input) {
