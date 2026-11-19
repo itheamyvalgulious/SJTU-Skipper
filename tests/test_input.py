@@ -1791,32 +1791,6 @@ class TestProcessingQueue:
 
         plugin.teardown()
 
-    def test_queue_item_is_listed_in_right_sidebar(self, monkeypatch):
-        ctx, plugin, _started = self._setup(monkeypatch)
-        self._open(ctx, plugin, "class:a", "高等数学")
-        plugin._class_streams = {StreamView.MAIN: "https://example.com/a.mp4"}
-        plugin._streams_loading = False
-        ctx.ui.dispatch_action("input.start_processing", {})
-        self._open(ctx, plugin, "class:b", "线性代数")
-        plugin._class_streams = {StreamView.MAIN: "https://example.com/b.mp4"}
-        plugin._streams_loading = False
-        ctx.ui.dispatch_action("input.start_processing", {})
-
-        state = ctx.ui.state()
-        items = {
-            item["id"]: item for tab in state["right_tabs"] for item in tab["toolbox"]
-        }
-        rows = next(
-            block
-            for block in items["input.queue"]["blocks"]
-            if block["type"] == BlockType.ROWS
-        )
-        assert len(rows["items"]) == 2
-        assert "高等数学" in rows["items"][0]["title"]
-        assert "线性代数" in rows["items"][1]["title"]
-
-        plugin.teardown()
-
     def test_context_names_the_selected_class(self, monkeypatch):
         ctx, plugin, _started = self._setup(monkeypatch)
         assert ctx.ui.state()["context"] is None

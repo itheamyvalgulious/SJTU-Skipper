@@ -118,7 +118,6 @@ def test_qa_begin_and_finish_render_blocks(tmp_path: Path) -> None:
         assert qa_block["status"] == qa.QaStatus.PENDING
         assert qa_block["question"] == "为什么这一步成立？"
         assert qa_block["delete_action"] == "reader.qa_delete"
-        assert "为什么这一步成立" in qa_block["question_html"]
 
         reader.qa_finish(str(path), qa_id, answer="因为 $a+b>c$。")
         blocks = _tabs(runtime, page_id)[0]["blocks"]

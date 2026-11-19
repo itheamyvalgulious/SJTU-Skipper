@@ -42,7 +42,7 @@ where = ["src"]
 include = ["agent_runtime*", "core*", "plugins*", "ui*", "integrations*"]
 
 [tool.setuptools.package-data]
-ui = ["static/*"]
+ui = ["static/*", "static/vendor/**/*"]
 agent_runtime = ["*.ts", "prompts/*.md"]
 
 [tool.pytest.ini_options]

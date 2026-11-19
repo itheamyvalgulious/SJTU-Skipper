@@ -43,7 +43,7 @@ devShell 提供 Python、Bun、uv、ffmpeg 和动态库路径．非 Nix 系统�
 4. 展开左侧课程树，选择录播或直播并开始处理．
 5. 在课堂页查看进度和识别内容，在「笔记」面板打开笔记或 Agent 日志．
 
-左右面板可通过标题栏的 × 收起，通过拖动或双击分隔条调整宽度．右侧顶部显示选中的课堂．
+桌面端左右面板可通过标题栏的 × 收起，通过拖动或双击分隔条调整宽度．窄屏通过「课程」「详情」按钮打开抽屉，按 Esc 关闭．右侧顶部显示选中的课堂．
 
 处理课程时可以选择其他课程．点击「开始处理」将课程加入队列，直播优先．媒体输入按课程排队，语音、板书和笔记任务可同时执行．
 
@@ -65,7 +65,7 @@ LLM 配置保存在 `data/agent/llm_runtime/models.yml` 和 `roles.yml`．设置
 - 「原始配置」保留两份 YAML，整体替换并交由运行时校验．
 - 端点未公布的限制按默认值落库（上下文 128000、输出 8192、`text` 输入），随后在「模型」逐个调整．OpenCode 等端点公布 `limit.context`、`limit.output`、`modalities.input` 与 `capabilities.reasoning` 时按其填写．
 - `models.yml` 使用 OMP `providers` 结构．提供方配置 `baseUrl`、`api`、鉴权和 headers，模型配置 `contextWindow`、`maxTokens`、`input`（`text`/`image`）与 `reasoning`．`api` 接受已安装 OMP SDK 支持的协议，包括 `openai-completions` 和 `openai-responses`．
-- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、笔记写作、审阅、修订、问答与上下文压缩．未填写的角色继承 `default`．
+- `roles.yml` 将职责映射到 `provider/model:level` 或 `@role`．角色包括板书、分段、笔记写作、审阅、问答与上下文压缩．`note_writer` 负责写作和修订，`note_review` 负责独立审阅．未填写的角色继承 `default`．
 - 板书角色 `board_recognition` 必须选择支持图像输入的模型．无效选择器、角色循环或不支持的思考级别会阻止保存．
 - 默认模型为 `deepseek-flash`．省略 `maxTokens` 时继承 OMP 模型能力信息；显式填写时使用配置值．
 - 提供方凭据由项目 OMP `AuthStorage` 管理，保存在 `data/agent/llm_runtime/credentials.db`．API key 与 OpenCode OAuth 凭据分别保存，设置页只显示配置状态．无鉴权服务设置 `auth: none`．

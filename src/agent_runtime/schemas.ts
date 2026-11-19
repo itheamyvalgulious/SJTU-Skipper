@@ -6,7 +6,6 @@ export enum AgentRole {
   NOTE_CHUNK = "note_chunk",
   NOTE_WRITER = "note_writer",
   NOTE_REVIEW = "note_review",
-  NOTE_REVISION = "note_revision",
   ASK_INSTANT = "ask_instant",
   ASK_RESEARCH = "ask_research",
   COMPACTION = "compaction",

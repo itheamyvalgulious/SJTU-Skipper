@@ -1,3 +1,5 @@
+import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.bundle.min.js";
+
 (() => {
   "use strict";
 
@@ -115,6 +117,7 @@
 
   const state = {
     ui: null,
+    connected: null,
     activeTab: { left: null, right: null },
     blockTabs: {},
     pageKey: null,
@@ -177,12 +180,9 @@
   function toast(message, kind = TOAST_KIND.DEFAULT) {
     if (!message) return;
     const node = $("#toast");
-    node.textContent = message;
-    node.className = `toast show ${kind}`;
-    clearTimeout(toast._timer);
-    toast._timer = setTimeout(() => {
-      node.className = "toast";
-    }, 3200);
+    $(".toast-body", node).textContent = message;
+    node.className = `toast ${kind === TOAST_KIND.ERR ? "theme-danger" : kind === TOAST_KIND.OK ? "theme-success" : "theme-secondary"}`;
+    Toast.getOrCreateInstance(node, { delay: 3200 }).show();
   }
 
   async function api(path, options = {}) {
@@ -313,9 +313,9 @@
   }
 
   function setConnection(ok) {
-    const pill = $("#connection");
-    pill.textContent = ok ? "已连接" : "连接断开";
-    pill.className = `pill ${ok ? "pill-ok" : "pill-err"}`;
+    state.connected = ok;
+    const connection = $("#connection");
+    if (connection) connection.textContent = ok ? "已连接" : "连接断开";
   }
 
   function typeset(node = $("#page-content")) {
@@ -344,7 +344,13 @@
     }
   }
 
-  function actionButton(label, action, value = undefined, cls = "btn btn-sm", disabled = false) {
+  function actionButton(
+    label,
+    action,
+    value = undefined,
+    cls = "btn-subtle theme-secondary btn-sm",
+    disabled = false,
+  ) {
     const attrs = { class: cls, dataset: { action } };
     if (value !== undefined) attrs.dataset.value = JSON.stringify(value);
     attrs.type = FIELD_INPUT.BUTTON;
@@ -354,15 +360,15 @@
   }
 
   function renderLog(block) {
-    const pre = el("pre", { class: "log" });
+    const pre = el("pre", { class: "log bg-2 border rounded p-3 overflow-auto" });
     const lines = Array.isArray(block.lines) ? block.lines : [];
     for (const line of lines) {
       if (typeof line === "string") {
-        pre.appendChild(el("span", { class: "log-line", text: line }));
+        pre.appendChild(el("span", { class: "d-block", text: line }));
       } else {
         pre.appendChild(
-          el("span", { class: "log-line" }, [
-            line.time ? el("span", { class: "ts", text: String(line.time) }) : null,
+          el("span", { class: "d-block" }, [
+            line.time ? el("span", { class: "fg-2 me-2", text: String(line.time) }) : null,
             document.createTextNode(String(line.text ?? line.message ?? "")),
           ]),
         );
@@ -372,8 +378,8 @@
   }
 
   function renderTable(block) {
-    const wrap = el("div", { class: "table-wrap" });
-    const table = el("table", { class: "data-table" });
+    const wrap = el("div", { class: "table-responsive" });
+    const table = el("table", { class: "table table-hover align-middle" });
     const columns = Array.isArray(block.columns) ? block.columns : [];
     const rows = Array.isArray(block.rows) ? block.rows : [];
     const rowActions = Array.isArray(block.row_actions) ? block.row_actions : [];
@@ -382,7 +388,7 @@
     const colKey = (c, i) => (typeof c === "string" ? c : (c.key ?? i));
     const thead = el("thead");
     const tr = el("tr");
-    for (const c of columns) tr.appendChild(el("th", { text: colLabel(c) }));
+    for (const c of columns) tr.appendChild(el("th", { scope: "col", text: colLabel(c) }));
     if (rowActions.length) tr.appendChild(el("th", { text: "操作" }));
     thead.appendChild(tr);
     table.appendChild(thead);
@@ -401,7 +407,7 @@
         tr.appendChild(el("td", { text: value ?? "" }));
       }
       if (rowActions.length) {
-        const td = el("td", { class: "row-actions" });
+        const td = el("td", { class: "text-nowrap" });
         for (const action of rowActions) {
           let value = action.value ? { ...action.value } : {};
           if (Array.isArray(action.keys)) {
@@ -414,7 +420,7 @@
               action.label || "执行",
               action.action,
               value,
-              action.class || "btn btn-sm",
+              action.class || "btn-subtle theme-secondary btn-sm",
             ),
           );
         }
@@ -424,17 +430,17 @@
     }
     table.appendChild(tbody);
     wrap.appendChild(table);
-    if (!rows.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!rows.length) wrap.appendChild(el("p", { class: "fg-2 p-3", text: "暂无数据" }));
     return wrap;
   }
 
   function renderTree(block) {
-    const wrap = el("div", { class: "tree" });
+    const wrap = el("div");
     const nodes = Array.isArray(block.nodes) ? block.nodes : [];
     if (!nodes.length) {
       wrap.appendChild(
         el("div", {
-          class: "tree-empty",
+          class: "fg-2 p-3",
           text: block.empty_text || "暂无内容",
         }),
       );
@@ -445,31 +451,46 @@
   }
 
   function renderTreeNode(node) {
-    const box = el("div", { class: "tree-node" });
+    const box = el("div", { class: "user-select-none" });
     const children = Array.isArray(node.children) ? node.children : [];
     const hasChildren = children.length > 0;
     const canExpand = hasChildren || !!node.toggle;
     const row = el("div", {
-      class: `tree-row ${node.active ? "active" : ""} ${node.live ? "live" : ""}`,
+      class: `d-flex ${canExpand ? "flex-wrap" : "flex-nowrap"} align-items-center gap-1 rounded p-1 ${node.active ? "bg-subtle-primary" : ""}`,
     });
-    const caret = el("button", {
-      class: `tree-caret ${canExpand ? "" : "leaf"}`,
-      type: FIELD_INPUT.BUTTON,
-      text: node.expanded ? "▾" : "▸",
-      title: canExpand ? (node.expanded ? "折叠" : "展开") : "",
-    });
-    caret.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (canExpand) runNodeAction(node.toggle);
-    });
-    row.appendChild(caret);
-    if (node.icon) row.appendChild(el("span", { class: "tree-icon", text: node.icon }));
-    row.appendChild(el("span", { class: "tree-label", text: node.label || node.id || "" }));
-    if (node.subtitle) row.appendChild(el("span", { class: "tree-sub", text: node.subtitle }));
+    if (canExpand) {
+      const caret = el("button", {
+        class: "btn-text btn-sm flex-shrink-0",
+        type: FIELD_INPUT.BUTTON,
+        text: node.expanded ? "▾" : "▸",
+        title: node.expanded ? "折叠" : "展开",
+        "aria-expanded": String(Boolean(node.expanded)),
+      });
+      caret.addEventListener("click", (event) => {
+        event.stopPropagation();
+        runNodeAction(node.toggle);
+      });
+      row.appendChild(caret);
+    }
+    if (node.icon) row.appendChild(el("span", { text: node.icon, "aria-hidden": "true" }));
+    row.appendChild(
+      el("span", {
+        class: canExpand ? "min-w-0 text-break" : "flex-shrink-0 text-nowrap",
+        text: node.label || node.id || "",
+      }),
+    );
+    if (node.subtitle)
+      row.appendChild(
+        el("span", {
+          class: "small fg-2 flex-grow-1 min-w-0 text-truncate",
+          text: node.subtitle,
+          title: node.subtitle,
+        }),
+      );
     if (node.badge) {
       row.appendChild(
         el("span", {
-          class: `tree-badge ${node.badge_class || ""}`,
+          class: `badge flex-shrink-0 ${node.badge_class === "live" ? "theme-warning" : node.badge_class === "upcoming" ? "theme-primary" : "theme-secondary"}`,
           text: node.badge,
         }),
       );
@@ -480,7 +501,7 @@
     });
     box.appendChild(row);
     if (hasChildren && node.expanded) {
-      const kids = el("div", { class: "tree-children" });
+      const kids = el("div", { class: "ms-2 border-start ps-1" });
       for (const child of children) kids.appendChild(renderTreeNode(child));
       box.appendChild(kids);
     }
@@ -493,45 +514,55 @@
   }
 
   function renderRows(block) {
-    const wrap = el("div", { class: "row-list block" });
+    const wrap = el("div", { class: "block list-group" });
     for (const item of block.items || []) {
       const row = el("div", {
-        class: `row-item ${item.active ? "active" : ""}`,
+        class: `list-group-item d-flex flex-wrap align-items-center gap-2 ${item.active ? "active" : ""}`,
       });
-      const main = el("div", { class: "row-main" }, [
-        el("div", { class: "row-title", text: item.title || item.text || "" }),
-        item.subtitle ? el("div", { class: "row-sub", text: item.subtitle }) : null,
-        item.meta ? el("div", { class: "row-meta", text: item.meta }) : null,
+      const main = el("div", { class: "flex-grow-1 text-break" }, [
+        el("div", { class: "fw-semibold", text: item.title || item.text || "" }),
+        item.subtitle ? el("div", { class: "small", text: item.subtitle }) : null,
+        item.meta ? el("div", { class: "small", text: item.meta }) : null,
       ]);
       row.appendChild(main);
       if (item.action) {
         row.appendChild(
-          actionButton(item.label || "打开", item.action, item.value, item.class || "btn btn-sm"),
+          actionButton(
+            item.label || "打开",
+            item.action,
+            item.value,
+            item.class || "btn-outline theme-primary btn-sm",
+          ),
         );
       }
       wrap.appendChild(row);
     }
-    if (!wrap.children.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!wrap.children.length) wrap.appendChild(el("p", { class: "fg-2 p-3", text: "暂无数据" }));
     return wrap;
   }
 
   function renderCards(block, existing = null) {
-    const wrap = existing || el("div", { class: "cards" });
+    const wrap = existing || el("div", { class: "vstack gap-3" });
     const previous = new Map(Array.from(wrap.children, (card) => [card._cardKey, card]));
     const wanted = new Set();
     (block.items || []).forEach((item, index) => {
       const key = item.id || item.key || `card:${index}`;
       let card = previous.get(key);
       if (!card) {
-        card = el("div", { class: "card" }, [el("div"), el("div"), el("div")]);
+        card = el("article", { class: "card" }, [
+          el("header", { class: "card-header" }),
+          el("div", { class: "card-body" }),
+          el("footer", { class: "card-footer d-flex flex-wrap gap-2" }),
+        ]);
         card._cardKey = key;
       }
       const [head, body, actions] = card.children;
       head.replaceChildren();
-      if (item.title) head.appendChild(el("div", { class: "card-title", text: item.title }));
-      if (item.subtitle) head.appendChild(el("div", { class: "card-sub", text: item.subtitle }));
+      if (item.title) head.appendChild(el("h3", { class: "h5 mb-1", text: item.title }));
+      if (item.subtitle)
+        head.appendChild(el("p", { class: "small fg-2 mb-0", text: item.subtitle }));
       if (item.meta) {
-        const meta = el("div", { class: "card-meta" });
+        const meta = el("div", { class: "d-flex flex-wrap gap-2 small fg-2" });
         for (const entry of Array.isArray(item.meta) ? item.meta : Object.entries(item.meta))
           meta.appendChild(
             el("span", {
@@ -541,7 +572,7 @@
         head.appendChild(meta);
       }
       updateBlocks(body, item.blocks || []);
-      actions.className = "card-actions";
+      head.hidden = !head.childNodes.length;
       actions.replaceChildren();
       for (const action of item.actions || [])
         actions.appendChild(
@@ -549,9 +580,10 @@
             action.label || "执行",
             action.action,
             action.value,
-            action.class || "btn btn-sm",
+            action.class || "btn-outline theme-primary btn-sm",
           ),
         );
+      actions.hidden = !actions.childNodes.length;
       wanted.add(card);
       if (wrap.children[index] !== card && !composingWithin(card))
         moveActivityNode(wrap, card, wrap.children[index] || null);
@@ -561,7 +593,7 @@
         destroyPlayers(card);
         card.remove();
       }
-    if (!wrap.children.length) wrap.appendChild(el("div", { class: "empty", text: "暂无数据" }));
+    if (!wrap.children.length) wrap.appendChild(el("p", { class: "fg-2 p-3", text: "暂无数据" }));
     wrap._deferred = Array.from(wrap.children).some(
       (card) => !wanted.has(card) || composingWithin(card) || card.children[1]?._deferred,
     );
@@ -571,31 +603,30 @@
   function renderForm(block) {
     const submitSpec = block.submit || {};
     const action = block.action || submitSpec.action || "";
-    const form = el("form", { class: "form" });
+    const form = el("form", { class: "vstack gap-3" });
     if (action) form.dataset.action = action;
     const conditionalRows = [];
     for (const field of block.fields || []) {
-      const row = el("div", { class: "form-row" });
+      const row = el("div", { class: "form-field" });
       if (field.visible_when) {
         row._visibleWhen = field.visible_when;
         conditionalRows.push(row);
       }
       const id = `f-${Math.random().toString(36).slice(2)}`;
       const fieldName = field.name || field.key;
-      row.appendChild(el("label", { for: id, text: field.label || fieldName }));
+      const label = el("label", { for: id, text: field.label || fieldName });
+      row.appendChild(label);
       if (field.type === SETTING_TYPE.ACTION || field.input === FIELD_INPUT.BUTTON) {
-        row.appendChild(
-          el("div", { class: "form-inline" }, [
-            actionButton(
-              field.button_label || field.label || "执行",
-              field.action,
-              field.value && typeof field.value === "object" ? field.value : undefined,
-              field.button_class || "btn btn-sm btn-primary",
-            ),
-          ]),
+        const button = actionButton(
+          field.button_label || field.label || "执行",
+          field.action,
+          field.value && typeof field.value === "object" ? field.value : undefined,
+          field.button_class || "btn-outline theme-primary",
         );
+        button.id = id;
+        row.appendChild(el("div", {}, [button]));
         if (field.description)
-          row.appendChild(el("div", { class: "hint", text: field.description }));
+          row.appendChild(el("small", { class: "form-text", text: field.description }));
         form.appendChild(row);
         continue;
       }
@@ -604,7 +635,7 @@
       let input;
       if (type === FIELD_INPUT.TEXTAREA) {
         input = el("textarea", {
-          class: "textarea",
+          class: "form-control",
           id,
           name: fieldName,
           placeholder: field.placeholder || "",
@@ -612,7 +643,7 @@
         input.value = field.value ?? "";
         if (field.rows) input.rows = Number(field.rows);
       } else if (type === FIELD_INPUT.SELECT) {
-        input = el("select", { class: "select", id, name: fieldName });
+        input = el("select", { class: "form-control", id, name: fieldName });
         const options = field.option_items || field.options || [];
         for (const option of options) {
           const value = typeof option === "object" ? option.value : option;
@@ -627,16 +658,15 @@
       } else if (type === FIELD_INPUT.CHECKBOX || rawType === SETTING_TYPE.BOOL) {
         input = el("input", {
           type: FIELD_INPUT.CHECKBOX,
+          class: "check",
           id,
           name: fieldName,
         });
         input.checked = Boolean(field.value);
-        const label = row.querySelector("label");
-        label.classList.add("checkbox");
-        label.prepend(input);
+        row.insertBefore(input, label);
       } else {
         input = el("input", {
-          class: "input",
+          class: "form-control",
           id,
           name: fieldName,
           type:
@@ -663,36 +693,36 @@
       }
       input.dataset.fieldType = rawType;
       if (field.readonly) {
-        input.readOnly = true;
-        input.classList.add("input-readonly");
+        if (input.type === FIELD_INPUT.CHECKBOX || input.tagName === "SELECT")
+          input.disabled = true;
+        else input.readOnly = true;
       }
       if (input.type !== FIELD_INPUT.CHECKBOX) row.appendChild(input);
       if (field.secret) {
         const status = el("div", {
-          class: `form-status ${field.is_set ? "ok" : ""}`,
-          text: field.is_set
-            ? `已配置，${field.secret_length || "?"} 字符；真实值不会回传前端`
-            : "未配置",
+          class: `small ${field.is_set ? "fg-success" : "fg-2"}`,
+          text: field.is_set ? `已配置，${field.secret_length || "?"} 字符` : "未配置",
         });
-        const line = el("div", { class: "form-inline" }, [status]);
+        const line = el("div", { class: "d-flex flex-wrap align-items-center gap-2" }, [status]);
         if (field.is_set) {
           line.appendChild(
             actionButton(
               "清除",
               "settings.clear_secret",
               { key: fieldName },
-              "btn btn-sm btn-danger",
+              "btn-outline theme-danger btn-sm",
             ),
           );
         }
         row.appendChild(line);
       }
-      if (field.description) row.appendChild(el("div", { class: "hint", text: field.description }));
+      if (field.description)
+        row.appendChild(el("small", { class: "form-text", text: field.description }));
       form.appendChild(row);
     }
-    const actions = el("div", { class: "form-actions" });
+    const actions = el("div", { class: "d-flex gap-2" });
     const submit = el("button", {
-      class: "btn btn-primary",
+      class: "btn-solid theme-primary",
       type: FIELD_INPUT.SUBMIT,
       text: block.submit_label || submitSpec.label || "保存",
     });
@@ -710,21 +740,19 @@
           ? String(controller.type === FIELD_INPUT.CHECKBOX ? controller.checked : controller.value)
           : "";
         const visible = (condition.values || []).map(String).includes(value);
-        row.style.display = visible ? "" : "none";
+        row.hidden = !visible;
         row.dataset.hidden = visible ? "0" : "1";
       }
     };
     applyVisibility();
-    form.addEventListener("change", (event) => {
-      if (event.target && event.target.tagName === "SELECT") applyVisibility();
-    });
+    form.addEventListener("change", applyVisibility);
     return form;
   }
 
   function renderTabs(block, existing = null) {
-    const wrap = existing || el("div", { class: "tabs" });
+    const wrap = existing || el("div", { class: "vstack gap-3" });
     if (!wrap._tabState) {
-      const bar = el("div", { class: "tabs-bar" });
+      const bar = el("div", { class: "nav nav-tabs", role: "tablist" });
       wrap.appendChild(bar);
       wrap._tabState = {
         bar,
@@ -770,7 +798,11 @@
       data.active = target;
       if (remember) state.blockTabs[key] = tabs[index].title || "";
       for (const [id, panel] of data.panels) panel.hidden = id !== target;
-      for (const [id, button] of data.buttons) button.classList.toggle("active", id === target);
+      for (const [id, button] of data.buttons) {
+        button.classList.toggle("active", id === target);
+        button.setAttribute("aria-selected", String(id === target));
+        button.tabIndex = 0;
+      }
       const panel = data.panels.get(target);
       for (const view of agentViews.values())
         if (changed && panel.contains(view.root) && view.input.getClientRects().length) {
@@ -787,8 +819,20 @@
       let panel = data.panels.get(id);
       let button = data.buttons.get(id);
       if (!panel) {
-        panel = el("div", { class: "tabs-body" });
-        button = el("button", { class: "tab-btn", type: FIELD_INPUT.BUTTON });
+        const panelId = `panel-${Math.random().toString(36).slice(2)}`;
+        panel = el("div", {
+          class: "tabs-body",
+          id: panelId,
+          role: "tabpanel",
+          "aria-labelledby": `${panelId}-tab`,
+        });
+        button = el("button", {
+          class: "tab-btn nav-link",
+          id: `${panelId}-tab`,
+          role: "tab",
+          "aria-controls": panelId,
+          type: FIELD_INPUT.BUTTON,
+        });
         data.panels.set(id, panel);
         data.buttons.set(id, button);
         wrap.appendChild(panel);
@@ -901,22 +945,22 @@
   function renderPlayer(block) {
     const key = playerKey(block);
     const cache = state.playerCache[key] || {};
-    const wrap = el("div", { class: "player" });
-    const grid = el("div", { class: "player-grid" });
+    const wrap = el("div", { class: "vstack gap-3" });
+    const grid = el("div", { class: "row g-3" });
     const videos = [];
     const sources = Array.isArray(block.sources) ? block.sources : [];
 
     for (const source of sources) {
       const saved = block.live ? {} : cache[source.key] || {};
-      const pane = el("div", { class: "player-pane" });
+      const pane = el("div", { class: "card overflow-hidden min-w-0" });
       pane.appendChild(
         el("div", {
-          class: "player-label",
+          class: "card-header",
           text: source.label || source.key || "",
         }),
       );
       const video = el("video", {
-        class: "player-video",
+        class: "w-100 ratio-16x9 object-fit-contain",
         controls: "controls",
         playsinline: "",
         preload: "metadata",
@@ -933,8 +977,9 @@
       video.addEventListener("timeupdate", remember);
       video.addEventListener("pause", remember);
       video.addEventListener("seeked", remember);
-      const hint = el("div", { class: "player-error", text: "" });
+      const hint = el("div", { class: "fg-danger p-2", role: "status", hidden: true });
       video.addEventListener("error", () => {
+        hint.hidden = false;
         hint.textContent =
           video._mpegts || video._hls
             ? "视频加载失败：转发代理无法连上视频源"
@@ -943,23 +988,22 @@
       videos.push(video);
       pane.appendChild(video);
       pane.appendChild(hint);
-      grid.appendChild(pane);
+      grid.appendChild(el("div", { class: "col-12 xl:col-6" }, [pane]));
     }
 
     if (block.screen_missing) {
       grid.appendChild(
-        el("div", {
-          class: "player-pane player-empty",
-          text: "该课程没有屏幕流",
-        }),
+        el("div", { class: "col-12 xl:col-6" }, [
+          el("div", { class: "card p-3 fg-2", text: "该课程没有屏幕流" }),
+        ]),
       );
     }
     wrap.appendChild(grid);
 
-    const bar = el("div", { class: "player-actions" });
+    const bar = el("div", { class: "d-flex flex-wrap align-items-center gap-3" });
     const finished = Boolean(block.finished);
     const live = Boolean(block.live);
-    let processing = Boolean(block.processing);
+    const processing = Boolean(block.processing);
 
     const stateText = () => {
       if (finished) return "已结束";
@@ -967,13 +1011,7 @@
       if (live) return processing ? "直播，处理中" : "直播，已暂停处理";
       return processing ? "处理中" : "已暂停";
     };
-    const stateEl = el("span", { class: "player-state", text: stateText() });
-    const toggle = el("button", {
-      class: "btn btn-sm btn-primary",
-      type: FIELD_INPUT.BUTTON,
-      text: finished ? "已结束" : block.queued ? "提前处理" : processing ? "暂停处理" : "继续处理",
-    });
-    toggle.disabled = finished;
+    const stateEl = el("span", { class: "badge theme-secondary", text: stateText() });
 
     const playAll = () => {
       for (const video of videos) {
@@ -986,40 +1024,6 @@
         tryPlay();
       }
     };
-    const pauseAll = () => {
-      for (const video of videos) {
-        try {
-          video.pause();
-        } catch (_) {}
-      }
-    };
-
-    if (!finished) {
-      toggle.addEventListener("click", async () => {
-        if (block.queued) {
-          // Already waiting in line: the server moves it to the front; the
-          // next poll reports whether it actually got the engine slot.
-          await postAction(block.start_action, {});
-          stateEl.textContent = stateText();
-          toggle.textContent = "提前处理";
-          return;
-        }
-        const action = processing ? block.pause_action : block.start_action;
-        const result = await postAction(action, {});
-        if (!result || result.ok === false) return;
-        if (!processing && String(result.message || "").includes("准备")) {
-          // Streams are still resolving; the server starts processing as soon
-          // as they are ready and the page re-renders in the running state.
-          stateEl.textContent = "准备中…";
-          return;
-        }
-        processing = !processing;
-        toggle.textContent = processing ? "暂停处理" : "继续处理";
-        stateEl.textContent = stateText();
-        if (processing) playAll();
-        else if (!live) pauseAll();
-      });
-    }
 
     // Live video keeps playing while processing is paused; recordings only
     // play while processing is running.
@@ -1028,29 +1032,30 @@
     }
 
     bar.appendChild(stateEl);
-    bar.appendChild(toggle);
     wrap.appendChild(bar);
     return wrap;
   }
 
   function renderSwitch(block) {
-    const wrap = el("div", { class: "block switch-block" });
+    const id = `switch-${Math.random().toString(36).slice(2)}`;
     const input = el("input", {
       type: FIELD_INPUT.CHECKBOX,
-      class: "switch-input",
+      role: "switch",
+      switch: "",
+      id,
     });
     input.checked = Boolean(block.checked);
-    const label = el("label", { class: "switch-label" }, [
-      input,
-      el("span", { class: "switch-track" }),
-      el("span", { class: "switch-text", text: block.label || "" }),
-    ]);
     input.addEventListener("change", () => {
       postAction(block.action, { enabled: input.checked });
     });
-    wrap.appendChild(label);
-    if (block.hint) wrap.appendChild(el("div", { class: "hint", text: block.hint }));
-    return wrap;
+    const content = el("div", { class: "form-field-content" }, [
+      el("label", { for: id, text: block.label || "" }),
+      block.hint ? el("small", { class: "form-text", text: block.hint }) : null,
+    ]);
+    return el("div", { class: "block form-field" }, [
+      el("div", { class: "switch" }, [input]),
+      content,
+    ]);
   }
 
   function qaPreview(text) {
@@ -1118,16 +1123,16 @@
     }
     const collapsed = Boolean(block.collapsed) && !pending && !retained;
     const wrap = el("section", {
-      class: `qa ${collapsed ? "collapsed" : ""}`,
+      class: `qa card min-w-0 ${collapsed ? "collapsed" : ""}`,
       dataset: {
         qaId: block.id || "",
         qaPath: block.path || "",
         qaStatus: block.status || "",
       },
     });
-    const head = el("div", { class: "qa-head" });
+    const head = el("div", { class: "card-header d-flex flex-wrap align-items-center gap-2" });
     const toggle = el("button", {
-      class: "qa-toggle",
+      class: "qa-toggle btn-text btn-sm",
       type: FIELD_INPUT.BUTTON,
       text: collapsed ? "▸" : "▾",
       title: "折叠 / 展开",
@@ -1143,24 +1148,29 @@
       });
     });
     head.appendChild(toggle);
-    head.appendChild(el("span", { class: "qa-badge qa-badge-q", text: "问" }));
-    head.appendChild(el("span", { class: "qa-summary", text: qaPreview(block.question) }));
+    head.appendChild(el("span", { class: "badge theme-primary", text: "问" }));
+    head.appendChild(
+      el("span", { class: "text-break flex-grow-1", text: qaPreview(block.question) }),
+    );
     const level = qaLevelLabel(block.intensity);
-    if (level) head.appendChild(el("span", { class: "qa-level", text: level }));
-    if (block.ts) head.appendChild(el("span", { class: "qa-time", text: block.ts }));
-    if (pending) head.appendChild(el("span", { class: "qa-pending", text: "回答中…" }));
+    if (level) head.appendChild(el("span", { class: "badge theme-secondary", text: level }));
+    if (block.ts) head.appendChild(el("time", { class: "small fg-2", text: block.ts }));
+    if (pending)
+      head.appendChild(
+        el("span", { class: "qa-pending badge theme-info", role: "status", text: "回答中…" }),
+      );
     head.appendChild(
       actionButton(
         "删除",
         block.delete_action || "reader.qa_delete",
         { path: block.path, id: block.id },
-        "btn btn-sm btn-danger qa-delete",
+        "btn-outline theme-danger btn-sm",
       ),
     );
 
-    const body = el("div", { class: "qa-body" });
+    const body = el("div", { class: "qa-body card-body" });
     const answerBox = el("div", {
-      class: `qa-answer ${pending ? "pending" : ""} ${block.status === QA_STATUS.ERROR ? "qa-failed" : ""}`,
+      class: `qa-answer ${block.status === QA_STATUS.ERROR ? "fg-danger" : ""}`,
     });
     if (pending || retained) {
       const activity = qaActivity(block);
@@ -1211,8 +1221,7 @@
     const view = Array.from(agentViews.values()).find((item) => item.root === activity);
     const retained = retainAgentView(view);
     if (answerBox) {
-      answerBox.classList.remove("pending");
-      answerBox.classList.toggle("qa-failed", payload.status === QA_STATUS.ERROR);
+      answerBox.classList.toggle("fg-danger", payload.status === QA_STATUS.ERROR);
       let answer = answerBox.querySelector(".qa-text");
       if (!answer) {
         answer = el("div", { class: "qa-text markdown" });
@@ -1355,6 +1364,7 @@
 
   function destroyPlayers(root) {
     if (!root) return;
+    for (const button of $$("[data-bs-toggle='menu']", root)) Menu.getInstance(button)?.dispose();
     for (const video of $$("video", root)) {
       if (video._hls) {
         try {
@@ -1621,38 +1631,47 @@
           : block.kind === EXECUTION_BLOCK_KIND.REVIEW
             ? `Review report${block.round !== undefined ? ` ${block.round}` : ""}`
             : `${block.kind === EXECUTION_BLOCK_KIND.USER ? "User" : "Text"}${text ? `: ${text.trim().split("\n")[0]}` : ""}`;
-    row.className = `execution-block execution-${block.kind || EXECUTION_BLOCK_KIND.TEXT}`;
+    row.className = "execution-block font-monospace border-bottom min-w-0 text-break";
     row.dataset.status = block.status || EXECUTION_BLOCK_STATUS.COMPLETED;
-    const header = el(isRead ? "div" : "summary", { class: "execution-header" }, [
-      el("span", { class: "execution-title", text: title }),
-      el("span", {
-        class: "execution-status",
-        text: block.status || EXECUTION_BLOCK_STATUS.COMPLETED,
-      }),
-      el("span", {
-        class: "execution-seconds",
-        text: executionNumber(block.seconds) ? `${block.seconds.toFixed(1)}s` : "",
-      }),
-    ]);
+    const header = el(
+      isRead ? "div" : "summary",
+      { class: "d-flex flex-wrap align-items-center gap-2 p-2" },
+      [
+        el("span", { class: "flex-grow-1 min-w-0 text-break", text: title }),
+        block.status && block.status !== EXECUTION_BLOCK_STATUS.COMPLETED
+          ? el("span", {
+              class: `small ${block.status === EXECUTION_BLOCK_STATUS.FAILED ? "fg-danger" : "fg-2"}`,
+              text: block.status,
+            })
+          : null,
+        el("span", {
+          class: "small fg-2",
+          text: executionNumber(block.seconds) ? `${block.seconds.toFixed(1)}s` : "",
+        }),
+      ],
+    );
     if (isRead) {
       row.replaceChildren(header);
       return;
     }
-    const body = el("div", { class: "execution-body" });
+    const body = el("div", { class: "execution-body p-3" });
     if (block.kind === EXECUTION_BLOCK_KIND.TOOL) {
       body.append(
-        el("h4", { text: "Arguments" }),
+        el("h4", { class: "h6", text: "Arguments" }),
         el("pre", { text: executionText(block.arguments) || "Unavailable" }),
       );
       if (block.result !== undefined)
-        body.append(el("h4", { text: "Result" }), el("pre", { text: executionText(block.result) }));
+        body.append(
+          el("h4", { class: "h6", text: "Result" }),
+          el("pre", { text: executionText(block.result) }),
+        );
     } else if (block.kind === EXECUTION_BLOCK_KIND.REVIEW) {
       const report = executionArgs(block.report);
       const verdict = report.correct;
       if (typeof verdict === "boolean")
         body.appendChild(
           el("strong", {
-            class: "execution-verdict",
+            class: verdict ? "fg-success" : "fg-danger",
             text: verdict ? "Correct" : "Incorrect",
           }),
         );
@@ -1662,7 +1681,7 @@
       } else if (text) body.appendChild(el("pre", { text }));
       for (const finding of report.findings || []) {
         body.appendChild(
-          el("article", { class: "execution-finding" }, [
+          el("article", { class: "border-start ps-3 mb-3" }, [
             el("strong", {
               text: `${finding.priority !== undefined ? `P${finding.priority} ` : ""}${finding.title || "Finding"}`,
             }),
@@ -1678,7 +1697,7 @@
       if (!Object.keys(report).length && block.report)
         body.appendChild(el("pre", { text: executionText(block.report) }));
     } else body.appendChild(el("pre", { text }));
-    const preview = el("pre", { class: "execution-preview", text: "" });
+    const preview = el("pre", { class: "execution-preview w-100 overflow-hidden", text: "" });
     if (block.kind === EXECUTION_BLOCK_KIND.TOOL) {
       if (["grep", "glob"].includes(name) && block.result !== undefined) {
         const result = block.result;
@@ -1726,42 +1745,52 @@
     const key = JSON.stringify([state.ui.active_page, block.id]);
     let view = agentViews.get(key);
     if (!view) {
-      const root = el("section", { class: "block agent-workflow" });
+      const root = el("section", {
+        class: "block agent-workflow vstack gap-3 flex-grow-1 min-w-0 min-h-0 overflow-hidden",
+      });
       const select = el("button", {
-        class: "execution-select",
+        class: "btn-outline theme-secondary",
         type: FIELD_INPUT.BUTTON,
         "aria-label": "查看会话",
+        "data-bs-toggle": "menu",
         "aria-haspopup": "listbox",
         "aria-expanded": "false",
       });
       const menu = el("div", {
-        class: "execution-session-menu",
+        class: "menu execution-session-menu overflow-auto",
         role: "listbox",
         "aria-label": "选择会话",
-        hidden: true,
       });
       document.body.appendChild(menu);
       const metrics = el("div", {
-        class: "execution-metrics",
+        class: "d-flex flex-wrap justify-content-end ms-auto gap-2 small fg-2",
         "aria-label": "Execution metrics",
       });
       const log = el("div", {
-        class: "execution-log",
+        class: "execution-log border rounded p-2 flex-grow-1 min-h-0 overflow-auto",
         tabindex: "0",
         "aria-label": "Execution blocks",
       });
       const input = el("textarea", {
-        class: "execution-message",
+        class: "form-control flex-grow-1 min-w-0",
         rows: "3",
         "aria-label": "发送给 Agent",
       });
       const send = el("button", {
         type: FIELD_INPUT.BUTTON,
-        class: "btn btn-primary",
+        class: "btn-solid theme-primary",
         text: "发送",
       });
-      const composer = el("div", { class: "execution-composer" }, [input, send]);
-      root.append(el("div", { class: "execution-bar" }, [select, metrics]), log, composer);
+      const composer = el(
+        "div",
+        { class: "execution-composer d-flex align-items-end gap-2 flex-shrink-0" },
+        [input, send],
+      );
+      root.append(
+        el("div", { class: "d-flex flex-wrap align-items-center gap-2" }, [select, metrics]),
+        log,
+        composer,
+      );
       view = {
         key,
         page: state.ui.active_page,
@@ -1780,23 +1809,13 @@
         agents: [],
         composer,
       };
-      const close = () => {
-        menu.hidden = true;
-        select.setAttribute("aria-expanded", "false");
-      };
-      view.close = close;
-      select.addEventListener("click", () => {
-        if (!menu.hidden) {
-          close();
-          return;
-        }
-        const rect = select.getBoundingClientRect();
-        menu.style.left = `${rect.left}px`;
-        menu.style.top = `${rect.bottom + 4}px`;
-        menu.hidden = false;
-        select.setAttribute("aria-expanded", "true");
-        (menu.querySelector('[aria-selected="true"]') || menu.firstElementChild)?.focus();
+      const menuController = new Menu(select, {
+        menu,
+        container: document.body,
+        strategy: "fixed",
       });
+      const close = () => menuController.hide();
+      view.close = close;
       menu.addEventListener("click", (event) => {
         const option = event.target.closest("[data-target]");
         if (!option) return;
@@ -1810,30 +1829,8 @@
         showAgentExecution(view, key);
         select.focus();
       });
-      menu.addEventListener("keydown", (event) => {
-        const options = Array.from(menu.children);
-        const index = options.indexOf(document.activeElement);
-        if (event.key === "Escape") {
-          close();
-          select.focus();
-        } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
-          event.preventDefault();
-          const next =
-            event.key === "Home"
-              ? 0
-              : event.key === "End"
-                ? options.length - 1
-                : (index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
-          options[next]?.focus();
-        }
-      });
-      const onPointerDown = (event) => {
-        if (!menu.hidden && !menu.contains(event.target) && !select.contains(event.target)) close();
-      };
-      document.addEventListener("pointerdown", onPointerDown);
       view.dispose = () => {
-        close();
-        document.removeEventListener("pointerdown", onPointerDown);
+        menuController.dispose();
         menu.remove();
         root.remove();
         view.revision = (view.revision || 0) + 1;
@@ -1939,6 +1936,7 @@
       if (!option) {
         option = el("button", {
           type: FIELD_INPUT.BUTTON,
+          class: "menu-item",
           role: "option",
           dataset: { target: value },
         });
@@ -1978,8 +1976,10 @@
     view.root.dataset.sessionId = view.targets.get(target)?.session_id || "";
     const label = `${view.options.get(target)?.textContent || "查看会话"} ▾`;
     if (select.textContent !== label) select.textContent = label;
-    for (const [value, option] of view.options)
+    for (const [value, option] of view.options) {
       option.setAttribute("aria-selected", String(value === target));
+      option.classList.toggle("selected", value === target);
+    }
     const latest = view.targets.get(target) || {};
     const agents = [latest];
     const context =
@@ -2026,7 +2026,7 @@
     if (!rows.length)
       rows.push(
         el("p", {
-          class: "execution-empty",
+          class: "fg-2",
           text: "Waiting for execution blocks",
         }),
       );
@@ -2059,13 +2059,13 @@
     const root =
       existing ||
       el("section", { class: "block task-queue" }, [
-        el("h2", { class: "block-title", text: "任务队列" }),
+        el("h2", { class: "h4", text: "任务队列" }),
         el("p", { class: "task-summary" }),
         el("p", {
-          class: "empty task-empty",
+          class: "fg-2 task-empty",
           text: "还没有等待或运行中的任务．开始课程处理或生成笔记后，任务会出现在这里．",
         }),
-        el("ul", { class: "task-list", "aria-label": "任务队列" }),
+        el("ul", { class: "task-list list-group", "aria-label": "任务队列" }),
       ]);
     const tasks = state.ui.tasks || [];
     const pending = tasks.filter((task) => task.state === TASK_STATE.PENDING).length;
@@ -2078,19 +2078,26 @@
       const key = String(task.id ?? index);
       let row = rows.get(key);
       if (!row) {
-        row = el("li", { class: "task-row", dataset: { taskId: key } }, [
-          el("div", { class: "task-info" }, [
-            el("h3", { class: "task-label" }),
-            el("p", { class: "task-detail" }),
-            el("p", { class: "task-session" }),
-          ]),
-          el("span", { class: "badge task-state" }),
-          el("button", {
-            type: FIELD_INPUT.BUTTON,
-            class: "btn btn-sm btn-danger task-cancel",
-            text: "停止任务",
-          }),
-        ]);
+        row = el(
+          "li",
+          {
+            class: "list-group-item d-flex flex-wrap align-items-center gap-3",
+            dataset: { taskId: key },
+          },
+          [
+            el("div", { class: "flex-grow-1 text-break" }, [
+              el("h3", { class: "task-label h6" }),
+              el("p", { class: "task-detail mb-1" }),
+              el("p", { class: "task-session small fg-2 mb-0" }),
+            ]),
+            el("span", { class: "badge theme-info task-state" }),
+            el("button", {
+              type: FIELD_INPUT.BUTTON,
+              class: "btn-outline theme-danger btn-sm task-cancel",
+              text: "停止任务",
+            }),
+          ],
+        );
         $(".task-cancel", row).addEventListener("click", async (event) => {
           const button = event.currentTarget;
           const cancel = row.task.cancel;
@@ -2147,14 +2154,19 @@
         }),
       );
     }
-    if (type === BLOCK_TYPE.TEXT) return el("pre", { class: "block pre", text: block.text ?? "" });
+    if (type === BLOCK_TYPE.TEXT)
+      return el("pre", {
+        class: "block bg-2 border rounded p-3 overflow-auto",
+        text: block.text ?? "",
+      });
     if (type === BLOCK_TYPE.KEYVALUE) {
       const items = Array.isArray(block.items) ? block.items : Object.entries(block.items || {});
-      const grid = el("div", { class: "kv-grid" });
+      const grid = el("dl", { class: "row g-0 border rounded" });
       for (const [k, v] of items) {
-        grid.appendChild(el("div", { class: "k", text: k }));
+        grid.appendChild(el("dt", { class: "col-4 bg-2 p-2", text: k }));
         grid.appendChild(
-          el("div", {
+          el("dd", {
+            class: "col-8 p-2 mb-0 text-break",
             text: typeof v === "object" ? JSON.stringify(v) : String(v ?? ""),
           }),
         );
@@ -2166,7 +2178,7 @@
     if (type === BLOCK_TYPE.ROWS) return renderRows(block);
     if (type === BLOCK_TYPE.TREE) return el("div", { class: "block" }, [renderTree(block)]);
     if (type === BLOCK_TYPE.LIST) {
-      const list = el("div", { class: "block btn-row" });
+      const list = el("div", { class: "block d-flex flex-wrap gap-2" });
       for (const item of block.items || []) {
         if (typeof item === "string") list.appendChild(el("div", { text: item }));
         else if (item.action)
@@ -2175,7 +2187,7 @@
               item.text || item.label || "执行",
               item.action,
               item.value,
-              item.class || "btn btn-sm",
+              item.class || "btn-subtle theme-secondary",
             ),
           );
         else list.appendChild(el("div", { text: item.text || JSON.stringify(item) }));
@@ -2183,14 +2195,14 @@
       return list;
     }
     if (type === BLOCK_TYPE.BUTTONS) {
-      const row = el("div", { class: "block btn-row" });
+      const row = el("div", { class: "block d-flex flex-wrap gap-2" });
       for (const b of block.buttons || []) {
         row.appendChild(
           actionButton(
             b.label || "执行",
             b.action,
             b.value,
-            b.class || (b.primary ? "btn btn-primary" : "btn"),
+            b.class || (b.primary ? "btn-solid theme-primary" : "btn-subtle theme-secondary"),
             Boolean(b.disabled),
           ),
         );
@@ -2201,11 +2213,11 @@
     if (type === BLOCK_TYPE.LOG) return el("div", { class: "block" }, [renderLog(block)]);
     if (type === BLOCK_TYPE.IMAGE) {
       return el("div", { class: "block" }, [
-        el("img", { class: "image", src: block.src, alt: block.alt || "" }),
+        el("img", { class: "img-fluid rounded", src: block.src, alt: block.alt || "" }),
       ]);
     }
     if (type === BLOCK_TYPE.VIDEO) {
-      const video = el("video", { controls: "controls", src: block.src });
+      const video = el("video", { class: "w-100", controls: "controls", src: block.src });
       return el("div", { class: "block" }, [video]);
     }
     if (type === BLOCK_TYPE.TABS) return el("div", { class: "block" }, [renderTabs(block)]);
@@ -2216,13 +2228,27 @@
       const value = Number(block.value ?? 0);
       const pct = value <= 1 ? value * 100 : value;
       return el("div", { class: "block" }, [
-        el("div", { class: "progress-label" }, [
+        el("div", { class: "d-flex justify-content-between small fg-2 mb-1" }, [
           el("span", { text: block.label || "进度" }),
           el("span", { text: `${Math.round(pct)}%` }),
         ]),
-        el("div", { class: "progress" }, [
-          el("i", { style: `width:${Math.max(0, Math.min(100, pct))}%` }),
-        ]),
+        el(
+          "div",
+          {
+            class: "progress",
+            role: "progressbar",
+            "aria-label": block.label || "进度",
+            "aria-valuenow": pct,
+            "aria-valuemin": 0,
+            "aria-valuemax": 100,
+          },
+          [
+            el("div", {
+              class: "progress-bar",
+              style: `width:${Math.max(0, Math.min(100, pct))}%`,
+            }),
+          ],
+        ),
       ]);
     }
     if (type === BLOCK_TYPE.BADGE)
@@ -2231,7 +2257,7 @@
         text: block.text || "",
       });
     return el("pre", {
-      class: "block pre",
+      class: "block bg-2 border rounded p-3 overflow-auto",
       text: JSON.stringify(block, null, 2),
     });
   }
@@ -2253,13 +2279,8 @@
   }
 
   function closeMenus() {
-    $$(".menu-wrap.open").forEach((wrap) => {
-      wrap.classList.remove("open");
-      const drop = $(".menu-drop", wrap);
-      if (drop) drop.remove();
-      const btn = $(".menu-btn", wrap);
-      if (btn) btn.classList.remove("open");
-    });
+    for (const button of $$("[data-bs-toggle='menu']", $("#menubar")))
+      Menu.getInstance(button)?.hide();
   }
 
   function runCommand(cmd) {
@@ -2273,7 +2294,11 @@
   function renderMenubar() {
     const bar = $("#menubar");
     if (!bar) return;
+    const signature = JSON.stringify(commands());
+    if (bar.dataset.commands === signature) return;
+    for (const button of $$("[data-bs-toggle='menu']", bar)) Menu.getInstance(button)?.dispose();
     bar.replaceChildren();
+    bar.dataset.commands = signature;
     const groups = new Map();
     for (const cmd of commands()) {
       const name = cmd.category || "其他";
@@ -2281,37 +2306,26 @@
       groups.get(name).push(cmd);
     }
     for (const [name, items] of groups) {
-      const wrap = el("div", { class: "menu-wrap" });
-      const btn = el("button", {
-        class: "menu-btn",
+      const button = el("button", {
+        class: "nav-link",
         type: FIELD_INPUT.BUTTON,
         text: name,
+        "data-bs-toggle": "menu",
+        "aria-expanded": "false",
       });
-      btn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const wasOpen = wrap.classList.contains("open");
-        closeMenus();
-        if (wasOpen) return;
-        wrap.classList.add("open");
-        btn.classList.add("open");
-        const drop = el("div", { class: "menu-drop" });
-        for (const cmd of items) {
-          const item = el("button", { class: "menu-item", type: FIELD_INPUT.BUTTON }, [
-            el("span", {
-              text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}`,
-            }),
-            cmd.subtitle ? el("span", { class: "sub", text: cmd.subtitle }) : null,
-          ]);
-          item.addEventListener("click", (event) => {
-            event.stopPropagation();
-            runCommand(cmd);
-          });
-          drop.appendChild(item);
-        }
-        wrap.appendChild(drop);
-      });
-      wrap.appendChild(btn);
-      bar.appendChild(wrap);
+      const menu = el("div", { class: "menu" });
+      for (const cmd of items) {
+        const item = el("button", {
+          class: "menu-item",
+          type: FIELD_INPUT.BUTTON,
+          text: cmd.title,
+        });
+        item.disabled = Boolean(cmd.disabled);
+        item.addEventListener("click", () => runCommand(cmd));
+        menu.appendChild(item);
+      }
+      bar.appendChild(el("li", { class: "nav-item position-relative" }, [button, menu]));
+      new Menu(button);
     }
   }
 
@@ -2322,8 +2336,7 @@
     const items = commands();
     if (!q) return items;
     return items.filter((cmd) => {
-      const hay =
-        `${cmd.title} ${cmd.subtitle || ""} ${cmd.category || ""} ${cmd.keywords || ""}`.toLowerCase();
+      const hay = `${cmd.title} ${cmd.category || ""} ${cmd.keywords || ""}`.toLowerCase();
       return q.split(/\s+/).every((part) => hay.includes(part));
     });
   }
@@ -2336,28 +2349,30 @@
     state.paletteItems = items;
     if (state.paletteIndex >= items.length) state.paletteIndex = 0;
     if (!items.length) {
-      list.appendChild(el("div", { class: "palette-empty", text: "没有匹配的命令" }));
+      list.appendChild(el("p", { class: "fg-2 p-3", text: "没有匹配的命令" }));
       return;
     }
     items.forEach((cmd, index) => {
       const row = el(
         "button",
         {
-          class: `palette-item ${index === state.paletteIndex ? "active" : ""}`,
+          class: `palette-item list-group-item list-group-item-action d-flex flex-wrap align-items-center gap-2 ${index === state.paletteIndex ? "active" : ""}`,
           type: FIELD_INPUT.BUTTON,
+          role: "option",
+          "aria-selected": String(index === state.paletteIndex),
         },
         [
-          cmd.category ? el("span", { class: "cat", text: cmd.category }) : null,
-          el("span", { text: `${cmd.icon ? cmd.icon + " " : ""}${cmd.title}` }),
-          cmd.subtitle ? el("span", { class: "sub", text: cmd.subtitle }) : null,
+          cmd.category ? el("span", { class: "badge theme-secondary", text: cmd.category }) : null,
+          el("span", { text: cmd.title }),
         ],
       );
       row.addEventListener("click", () => runCommand(cmd));
       row.addEventListener("mouseenter", () => {
         state.paletteIndex = index;
-        $$(".palette-item", list).forEach((node, i) =>
-          node.classList.toggle("active", i === index),
-        );
+        $$(".palette-item", list).forEach((node, i) => {
+          node.classList.toggle("active", i === index);
+          node.setAttribute("aria-selected", String(i === index));
+        });
       });
       list.appendChild(row);
     });
@@ -2366,7 +2381,7 @@
   function openPalette() {
     const palette = $("#palette");
     if (!palette) return;
-    palette.hidden = false;
+    Dialog.getOrCreateInstance(palette).show(document.activeElement);
     const input = $("#palette-input");
     input.value = "";
     state.paletteIndex = 0;
@@ -2376,16 +2391,17 @@
 
   function closePalette() {
     const palette = $("#palette");
-    if (palette) palette.hidden = true;
+    if (palette) Dialog.getOrCreateInstance(palette).hide();
     state.paletteIndex = 0;
   }
 
   function paletteOpen() {
     const palette = $("#palette");
-    return palette && !palette.hidden;
+    return Boolean(palette?.open);
   }
 
   document.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
     const key = event.key.toLowerCase();
     if ((event.ctrlKey || event.metaKey) && key === "p") {
       event.preventDefault();
@@ -2395,10 +2411,7 @@
     }
     if (!paletteOpen()) return;
     const items = state.paletteItems || [];
-    if (key === "escape") {
-      event.preventDefault();
-      closePalette();
-    } else if (key === "arrowdown") {
+    if (key === "arrowdown") {
       event.preventDefault();
       state.paletteIndex = Math.min(items.length - 1, state.paletteIndex + 1);
       renderPalette($("#palette-input").value);
@@ -2424,33 +2437,27 @@
     }
   });
 
-  document.addEventListener("click", (event) => {
-    if (!event.target.closest("#menubar")) closeMenus();
-  });
-
   function bindPaletteTrigger() {
-    const btn = $("#palette-btn");
-    if (btn) btn.addEventListener("click", () => openPalette());
-    const palette = $("#palette");
-    if (palette) {
-      palette.addEventListener("click", (event) => {
-        if (event.target === palette) closePalette();
-      });
-    }
+    $("#palette-btn")?.addEventListener("click", openPalette);
+    $("#palette")?.addEventListener("close", () => {
+      state.paletteIndex = 0;
+    });
   }
 
-  const SIDEBAR_MIN = 200;
-  const SIDEBAR_MAX = 560;
+  const desktopLayout = window.matchMedia("(min-width: 1024px)");
 
   function sidebarWidth(side) {
-    const fallback = side === SIDEBAR_SIDE.LEFT ? 280 : 320;
+    const app = $("#app");
+    app.style.removeProperty(`--${side}-col`);
+    const base = getComputedStyle(app).getPropertyValue(`--${side}-col`).trim();
+    const fallback = base.endsWith("vw") ? (parseFloat(base) * innerWidth) / 100 : parseFloat(base);
     const stored = Number(localStorage.getItem(`lecture-agent.sidebar.${side}.w`));
-    return Number.isFinite(stored) && stored > 0 ? clampWidth(stored) : fallback;
+    return clampWidth(Number.isFinite(stored) && stored > 0 ? stored : fallback);
   }
 
   function clampWidth(value) {
-    const hardMax = Math.min(SIDEBAR_MAX, Math.max(280, window.innerWidth * 0.45));
-    return Math.round(Math.min(hardMax, Math.max(SIDEBAR_MIN, value)));
+    const width = $(".workspace").clientWidth;
+    return Math.round(Math.min(width / 3, Math.max(width / 6, value)));
   }
 
   function applySidebarState() {
@@ -2459,7 +2466,9 @@
     for (const side of Object.values(SIDEBAR_SIDE)) {
       const collapsed = localStorage.getItem(`lecture-agent.sidebar.${side}`) === "true";
       app.classList.toggle(`${side}-collapsed`, collapsed);
-      app.style.setProperty(`--${side}-col`, collapsed ? "0px" : `${sidebarWidth(side)}px`);
+      $(`#sidebar-${side}`).inert = desktopLayout.matches && collapsed;
+      if (collapsed) app.style.removeProperty(`--${side}-col`);
+      else app.style.setProperty(`--${side}-col`, `${sidebarWidth(side)}px`);
     }
   }
 
@@ -2467,13 +2476,16 @@
     const app = $("#app");
     if (!app) return;
     app.classList.toggle(`${side}-collapsed`, collapsed);
-    app.style.setProperty(`--${side}-col`, collapsed ? "0px" : `${sidebarWidth(side)}px`);
+    $(`#sidebar-${side}`).inert = desktopLayout.matches && collapsed;
+    if (collapsed) app.style.removeProperty(`--${side}-col`);
+    else app.style.setProperty(`--${side}-col`, `${sidebarWidth(side)}px`);
     localStorage.setItem(`lecture-agent.sidebar.${side}`, String(collapsed));
   }
 
   function bindSidebarControls() {
     for (const btn of $$(".sidebar-close, .sidebar-restore")) {
       btn.addEventListener("click", () => {
+        if (!desktopLayout.matches) return;
         const side = btn.dataset.side;
         const collapsed = $("#app").classList.contains(`${side}-collapsed`);
         setSidebarCollapsed(side, !collapsed);
@@ -2485,14 +2497,13 @@
     for (const handle of $$(".resizer")) {
       const side = handle.dataset.side;
       handle.addEventListener("pointerdown", (event) => {
-        if (event.button !== 0) return;
+        if (event.button !== 0 || !desktopLayout.matches) return;
         event.preventDefault();
         const app = $("#app");
         if (app.classList.contains(`${side}-collapsed`)) return;
         const workspace = $(".workspace");
         const rect = workspace.getBoundingClientRect();
         handle.setPointerCapture(event.pointerId);
-        handle.classList.add("dragging");
         document.body.classList.add("resizing");
         const move = (ev) => {
           const width =
@@ -2501,7 +2512,6 @@
           app.style.setProperty(`--${side}-col`, value);
         };
         const stop = () => {
-          handle.classList.remove("dragging");
           document.body.classList.remove("resizing");
           handle.removeEventListener("pointermove", move);
           handle.removeEventListener("pointerup", stop);
@@ -2522,13 +2532,13 @@
         }
       });
     }
-    window.addEventListener("resize", () => {
-      const app = $("#app");
-      if (!app) return;
+    window.addEventListener("resize", applySidebarState);
+    desktopLayout.addEventListener("change", () => {
       for (const side of Object.values(SIDEBAR_SIDE)) {
-        if (app.classList.contains(`${side}-collapsed`)) continue;
-        app.style.setProperty(`--${side}-col`, `${sidebarWidth(side)}px`);
+        const sidebar = $(`#sidebar-${side}`);
+        if (sidebar.open) Drawer.getInstance(sidebar)?.hide();
       }
+      applySidebarState();
     });
   }
 
@@ -2574,7 +2584,7 @@
     menu.replaceChildren();
     for (const item of ctx.actions) {
       const btn = el("button", {
-        class: "selection-item",
+        class: "menu-item",
         type: FIELD_INPUT.BUTTON,
         text: `${item.icon ? item.icon + " " : ""}${item.label || item.id}`,
       });
@@ -2634,13 +2644,13 @@
     }
     const input = $("#ask-input");
     input.value = "";
-    modal.hidden = false;
+    Dialog.getOrCreateInstance(modal).show(document.activeElement);
     input.focus();
   }
 
   function closeAskDialog() {
     const modal = $("#ask");
-    if (modal) modal.hidden = true;
+    if (modal) Dialog.getOrCreateInstance(modal).hide();
     askContext = null;
   }
 
@@ -2696,21 +2706,16 @@
     const input = $("#ask-input");
     if (input) {
       input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" && !event.shiftKey) {
+        if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
           event.preventDefault();
           sendAsk();
-        } else if (event.key === "Escape") {
-          event.preventDefault();
-          closeAskDialog();
         }
       });
     }
     const modal = $("#ask");
-    if (modal) {
-      modal.addEventListener("click", (event) => {
-        if (event.target === modal) closeAskDialog();
-      });
-    }
+    modal?.addEventListener("close", () => {
+      askContext = null;
+    });
   }
 
   function pickTab(tabs, side) {
@@ -2732,17 +2737,21 @@
     }
     box.hidden = false;
     box.replaceChildren(
-      el("div", { class: "context-title", text: context.title || "" }),
-      el("div", { class: "context-sub" }, [
-        context.state ? el("span", { class: `dot ${context.state}` }) : null,
+      el("div", { class: "fw-semibold text-break", text: context.title || "" }),
+      el("div", { class: "d-flex flex-wrap align-items-center gap-2 fg-2" }, [
         el("span", { text: context.subtitle || "" }),
-        context.recent ? el("span", { class: "context-tag", text: "最近一节" }) : null,
+        context.recent ? el("span", { class: "badge theme-primary", text: "最近一节" }) : null,
       ]),
     );
   }
 
   function renderSidebar(side) {
     const tabs = side === SIDEBAR_SIDE.LEFT ? state.ui.left_tabs : state.ui.right_tabs;
+    if (side === SIDEBAR_SIDE.LEFT) {
+      $("#refresh-courses").hidden = !commands().some(
+        (command) => command.action === "input.refresh_courses",
+      );
+    }
     const tabsEl = $(`#${side}-tabs`);
     const toolboxEl = $(`#${side}-toolbox`);
     const sidebarKey = JSON.stringify([
@@ -2761,9 +2770,9 @@
       tabsEl.replaceChildren();
       tabsEl.hidden = true;
       toolboxEl.replaceChildren(
-        el("div", { class: "sidebar-empty" }, [
+        el("div", { class: "vstack gap-2 fg-2" }, [
           el("b", { text: "还没有选择课程" }),
-          el("span", { text: "从左侧课程树展开课程，点一节课开始。" }),
+          el("span", { text: "从左侧课程树展开课程，点一节课开始．" }),
         ]),
       );
       return;
@@ -2777,11 +2786,11 @@
       const btn = el(
         "button",
         {
-          class: `side-tab ${tab.id === active ? "active" : ""}`,
+          class: `nav-link ${tab.id === active ? "active" : ""}`,
           type: FIELD_INPUT.BUTTON,
         },
         [
-          tab.icon ? el("span", { class: "icon", text: tab.icon }) : null,
+          tab.icon ? el("span", { "aria-hidden": "true", text: tab.icon }) : null,
           el("span", { text: tab.title || tab.id }),
         ],
       );
@@ -2800,32 +2809,30 @@
     toolboxEl.replaceChildren();
     const current = (tabs || []).find((t) => t.id === active);
     if (!current || !(current.toolbox || []).length) {
-      toolboxEl.appendChild(el("div", { class: "empty", text: "这个 tab 还没有工具" }));
+      toolboxEl.appendChild(el("p", { class: "fg-2", text: "这个标签页还没有工具" }));
       return;
     }
     for (const item of current.toolbox) {
-      const panel = el("section", {
-        class: `toolbox-item ${item.title || item.description ? "" : "bare"}`,
-      });
+      if (!(item.blocks || []).length && !item.title && !item.description && !item.page) continue;
+      const panel = el("section", { class: "mb-3" });
       const pageId = item.page || null;
       if (item.title || item.description) {
-        const head = el("div", { class: "toolbox-head" }, [
-          el("div", { class: "toolbox-title", text: item.title || item.id }),
-          item.description ? el("div", { class: "toolbox-desc", text: item.description }) : null,
+        const head = el("div", { class: "d-flex flex-wrap align-items-center gap-2 mb-2" }, [
+          el("h3", { class: "h6 mb-0", text: item.title || item.id }),
+          item.description ? el("small", { class: "fg-2", text: item.description }) : null,
         ]);
         if (pageId) {
           const open = actionButton(
             "打开页面",
             "ui.open_page",
             { page_id: pageId },
-            "btn btn-sm btn-ghost",
+            "btn-text btn-sm ms-auto",
           );
-          open.style.float = "right";
           head.appendChild(open);
         }
         panel.appendChild(head);
       }
-      const body = el("div", { class: "toolbox-body" });
+      const body = el("div");
       if (item.blocks && item.blocks.length) {
         body.appendChild(
           renderBlocks(item.blocks.filter((block) => block.type !== BLOCK_TYPE.AGENT_ACTIVITY)),
@@ -2833,7 +2840,7 @@
       } else {
         body.appendChild(
           el("div", {
-            class: "empty",
+            class: "fg-2",
             text: pageId ? "在页面中查看" : "暂无内容",
           }),
         );
@@ -2853,22 +2860,29 @@
     );
     for (const page of pages) {
       const active = page.id === state.ui.active_page;
-      const tab = el("div", { class: `page-tab ${active ? "active" : ""}` }, [
-        el("span", { text: page.title || page.id }),
-        page.closable
-          ? el("button", {
-              class: "close",
-              type: FIELD_INPUT.BUTTON,
-              text: "×",
-              title: "关闭",
-            })
-          : null,
+      const open = el("button", {
+        type: FIELD_INPUT.BUTTON,
+        text: page.title || page.id,
+        "aria-current": active ? "page" : undefined,
+      });
+      const closeButton = page.closable
+        ? el("button", {
+            type: FIELD_INPUT.BUTTON,
+            text: "×",
+            "aria-label": `关闭 ${page.title || page.id}`,
+            dataset: { closePage: page.id },
+          })
+        : null;
+      const tab = el("div", { class: "page-tab nav-link d-flex align-items-center gap-2" }, [
+        open,
+        closeButton,
       ]);
+      tab.classList.toggle("active", active);
       tab.addEventListener("click", async (event) => {
-        if (event.target.classList.contains("close")) return;
+        if (event.target.closest("[data-close-page]")) return;
         if (page.id !== state.ui.active_page) await openPage(page.id);
       });
-      const close = $(".close", tab);
+      const close = closeButton;
       if (close) {
         close.addEventListener("click", async (event) => {
           event.stopPropagation();
@@ -2940,10 +2954,10 @@
     if (!active || !blocks) {
       if (!samePage || !container.children.length)
         container.replaceChildren(
-          el("div", { class: "welcome" }, [
-            el("div", { class: "welcome-mark", text: "∮" }),
+          el("div", { class: "text-center p-5" }, [
             el("h2", { text: "选择一节课" }),
             el("p", {
+              class: "fg-2",
               text: "左侧课程树里展开课程，选择录播或直播．按 Ctrl+P 打开命令面板．",
             }),
           ]),
@@ -2986,57 +3000,54 @@
     const session = status.session || {};
     const runtime = status.runtime || {};
     const bar = $("#statusbar");
-    bar.replaceChildren();
+    const items = el("ul", { class: "nav flex-nowrap align-items-center text-nowrap" });
+    bar.replaceChildren(items);
 
-    const item = (label, value, cls = "") =>
-      el("span", { class: "status-item" }, [
-        cls ? el("span", { class: `dot ${cls}` }) : null,
-        el("span", { text: label }),
-        el("b", { text: String(value) }),
+    const item = (label, value) =>
+      el("li", { class: "nav-item flex-shrink-0" }, [
+        el("span", { class: "nav-link d-inline-flex align-items-center gap-2 fg-body" }, [
+          el("span", { text: label }),
+          el("b", { text: String(value) }),
+        ]),
       ]);
 
-    bar.appendChild(item("会话", shortId(session.session_id)));
-    bar.appendChild(item("音频", fmtSeconds(session.audio_seconds)));
-    bar.appendChild(item("视频", fmtSeconds(session.video_seconds)));
-    bar.appendChild(
+    const connection = item(
+      "状态",
+      state.connected === null ? "连接中" : state.connected ? "已连接" : "连接断开",
+    );
+    $("b", connection).id = "connection";
+    $("b", connection).setAttribute("role", "status");
+    items.appendChild(connection);
+    items.appendChild(item("会话", shortId(session.session_id)));
+    items.appendChild(item("音频", fmtSeconds(session.audio_seconds)));
+    items.appendChild(item("视频", fmtSeconds(session.video_seconds)));
+    items.appendChild(
       item("转写", `${session.transcript_chars ?? 0} 字 / ${session.transcript_items ?? 0} 段`),
     );
-    bar.appendChild(
+    items.appendChild(
       item("板书", `${session.visual_chars ?? 0} 字 / ${session.visual_items ?? 0} 段`),
     );
-    bar.appendChild(
-      item(
-        "插件",
-        (runtime.plugins_loaded || runtime.plugin_order || []).length || 0,
-        runtime.started ? "ok" : "",
-      ),
+    items.appendChild(
+      item("插件", (runtime.plugins_loaded || runtime.plugin_order || []).length || 0),
     );
     const tasks = state.ui.tasks || [];
-    bar.appendChild(
-      el(
-        "button",
-        {
-          type: FIELD_INPUT.BUTTON,
-          class: "status-item status-task-link",
-          "aria-label": `打开任务队列，共 ${tasks.length} 个任务`,
-          onclick: () => openPage("ui:tasks"),
-        },
-        [
-          tasks.length ? el("span", { class: "dot busy" }) : null,
-          el("span", { text: "任务队列" }),
-          el("b", { text: String(tasks.length) }),
-        ],
-      ),
+    items.appendChild(
+      el("li", { class: "nav-item flex-shrink-0" }, [
+        el(
+          "a",
+          {
+            href: "/?page=ui%3Atasks",
+            class: "nav-link d-inline-flex align-items-center gap-2",
+            "aria-label": `打开任务队列，共 ${tasks.length} 个任务`,
+            onclick: (event) => {
+              event.preventDefault();
+              openPage("ui:tasks");
+            },
+          },
+          [el("span", { text: "任务队列" }), el("b", { text: String(tasks.length) })],
+        ),
+      ]),
     );
-
-    const sessionPill = $("#session-pill");
-    if (session.session_id) {
-      sessionPill.textContent = `会话 ${shortId(session.session_id)}`;
-      sessionPill.className = "pill pill-ok";
-    } else {
-      sessionPill.textContent = "无会话";
-      sessionPill.className = "pill pill-muted";
-    }
   }
 
   async function openPage(pageId) {
@@ -3150,6 +3161,16 @@
     const form = btn.closest("form");
     if (form) values = { ...formValues(form), ...values };
     postAction(action, values, btn.dataset.pageId || null, btn.dataset.itemId || null);
+  });
+
+  document.addEventListener("change", (event) => {
+    const input = event.target.closest("input[data-change-action], select[data-change-action]");
+    if (!input) return;
+    const values =
+      input.type === FIELD_INPUT.CHECKBOX
+        ? { enabled: input.checked }
+        : { [input.name]: input.value };
+    postAction(input.dataset.changeAction, values);
   });
 
   document.addEventListener("submit", (event) => {

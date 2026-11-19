@@ -68,8 +68,7 @@ def test_log_pages_keep_their_session():
         )
     )
     try:
-        controls = plugin._render()[0]["buttons"]
-        result = ui.dispatch_action(controls[1]["action"], {})
+        result = ui.dispatch_action("summarize.logs", {})
         first_page = result.open_page
         ui.open_page(first_page)
         streams.notes_session_id = "second"

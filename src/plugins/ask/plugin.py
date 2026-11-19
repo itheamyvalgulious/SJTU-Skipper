@@ -86,7 +86,6 @@ class AskPlugin(Plugin):
             {
                 "id": SELECTION_ID,
                 "label": "提问",
-                "icon": "💬",
                 "kind": SelectionKind.PROMPT,
                 "action": ACTION,
                 "placeholder": "针对选中的内容提问，Enter 发送",

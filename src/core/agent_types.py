@@ -14,7 +14,6 @@ class AgentRole(StrEnum):
     NOTE_CHUNK = "note_chunk"
     NOTE_WRITER = "note_writer"
     NOTE_REVIEW = "note_review"
-    NOTE_REVISION = "note_revision"
     BOARD_RECOGNITION = "board_recognition"
     COMPACTION = "compaction"
 

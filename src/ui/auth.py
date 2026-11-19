@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 logger = logging.getLogger("lecture_agent.ui.auth")
 
@@ -212,44 +212,33 @@ class AuthStore:
 
 
 _LOGIN_HTML = """<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="fs-sm">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 - SJTU-Skipper</title>
-<style>
-  :root { --blue:#1a73e8; --border:#dadce0; --text:#202124; --muted:#5f6368; }
-  * { box-sizing:border-box; }
-  body { margin:0; min-height:100vh; display:flex; align-items:center;
-         justify-content:center; background:#f8f9fa; color:var(--text);
-         font-family:"Google Sans",Roboto,"Helvetica Neue",Arial,"PingFang SC",
-         "Microsoft YaHei",sans-serif; }
-  .card { width:min(400px,92vw); background:#fff; border:1px solid var(--border);
-          border-radius:8px; padding:40px 40px 32px; }
-  h1 { margin:0 0 8px; font-size:22px; font-weight:500; }
-  p.sub { margin:0 0 28px; color:var(--muted); font-size:14px; }
-  label { display:block; font-size:13px; color:var(--muted); margin:0 0 6px; }
-  input { width:100%; padding:12px 14px; font-size:15px; border:1px solid var(--border);
-          border-radius:4px; outline:none; margin-bottom:20px; }
-  input:focus { border-color:var(--blue); box-shadow:0 0 0 1px var(--blue); }
-  button { width:100%; padding:11px; font-size:15px; font-weight:500; color:#fff;
-           background:var(--blue); border:0; border-radius:4px; cursor:pointer; }
-  button:hover { background:#1765cc; }
-  .error { color:#d93025; font-size:13px; margin:0 0 16px; }
-</style>
+<link rel="stylesheet" href="/login.css">
 </head>
 <body>
+  <main class="container min-vh-100 d-flex align-items-center justify-content-center py-4">
   <form class="card" method="post" action="/login">
+    <div class="card-body">
     <h1>SJTU-Skipper</h1>
-    <p class="sub">请使用本地 auth.json 中配置的账号登录</p>
+    <p class="fg-secondary">请使用本地 auth.json 中配置的账号登录</p>
     {error}
     <input type="hidden" name="next" value="{next}">
-    <label for="username">用户名</label>
-    <input id="username" name="username" autocomplete="username" autofocus required>
-    <label for="password">密码</label>
-    <input id="password" name="password" type="password" autocomplete="current-password" required>
-    <button type="submit">登录</button>
+    <div class="form-field">
+      <label for="username">用户名</label>
+      <input class="form-control" id="username" name="username" autocomplete="username" autofocus required>
+    </div>
+    <div class="form-field">
+      <label for="password">密码</label>
+      <input class="form-control" id="password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button class="btn-solid theme-primary w-100" type="submit">登录</button>
+    </div>
   </form>
+  </main>
 </body>
 </html>
 """
@@ -285,6 +274,13 @@ def install(app: Any, data_dir: Path) -> AuthStore:
 
     store = AuthStore(Path(data_dir) / "auth.json")
 
+    @app.get("/login.css", include_in_schema=False)
+    def login_css() -> FileResponse:
+        return FileResponse(
+            Path(__file__).parent / "static/vendor/bootstrap/bootstrap.min.css",
+            media_type="text/css",
+        )
+
     @app.get("/login")
     def login_page(request: Request) -> Any:
         next_url = _safe_next(request.query_params.get("next"))
@@ -306,11 +302,13 @@ def install(app: Any, data_dir: Path) -> AuthStore:
         password = str(form.get("password") or "")
         next_url = _safe_next(form.get("next"))
         if store.locked(username):
-            error = '<p class="error">尝试次数过多，请五分钟后再试。</p>'
+            error = '<p class="alert theme-danger" role="alert">尝试次数过多，请五分钟后再试。</p>'
             return HTMLResponse(_login_html(next_url, error), status_code=429)
         if not store.verify(username, password, key=username):
             logger.warning("failed login for %r", username)
-            error = '<p class="error">用户名或密码不正确。</p>'
+            error = (
+                '<p class="alert theme-danger" role="alert">用户名或密码不正确。</p>'
+            )
             return HTMLResponse(_login_html(next_url, error), status_code=401)
         token = store.issue(username)
         response = RedirectResponse(next_url, status_code=303)
@@ -332,7 +330,7 @@ def install(app: Any, data_dir: Path) -> AuthStore:
         response.delete_cookie(COOKIE_NAME, path="/")
         return response
 
-    public = {"/login", "/favicon.ico"}
+    public = {"/login", "/login.css", "/favicon.ico"}
 
     @app.middleware("http")
     async def auth_gate(request: Request, call_next: Any) -> Any:

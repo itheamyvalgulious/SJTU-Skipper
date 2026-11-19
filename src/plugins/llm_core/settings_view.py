@@ -71,7 +71,6 @@ ROLE_TITLES: dict[str, str] = {
     "note_chunk": "笔记分段",
     "note_writer": "笔记写作",
     "note_review": "笔记审阅",
-    "note_revision": "笔记修订",
     "board_recognition": "板书识别",
     "compaction": "上下文压缩",
 }
@@ -366,7 +365,7 @@ class SettingsView:
                         "label": "取消授权",
                         "action": "llm.opencode_cancel",
                         "value": {"provider": pid},
-                        "class": "btn btn-danger",
+                        "class": "btn-subtle theme-secondary",
                     },
                 ],
             },
@@ -385,7 +384,7 @@ class SettingsView:
                         "label": "关联套餐",
                         "action": "llm.opencode_login",
                         "value": {"provider": pid},
-                        "class": "btn btn-sm btn-primary",
+                        "class": "btn-solid theme-primary btn-sm",
                     }
                 )
             if configured:
@@ -394,6 +393,7 @@ class SettingsView:
                         "label": "删除凭据",
                         "action": "llm.logout",
                         "value": {"provider": pid},
+                        "class": "btn-outline theme-danger btn-sm",
                     }
                 )
             if len(items) > 1:
@@ -402,7 +402,7 @@ class SettingsView:
                         "label": "删除提供方",
                         "action": "llm.provider.remove",
                         "value": {"provider": pid},
-                        "class": "btn btn-sm btn-danger",
+                        "class": "btn-outline theme-danger btn-sm",
                     }
                 )
             cards.append(
@@ -657,7 +657,7 @@ class SettingsView:
                         "action": "llm.model.add",
                         "keys": ["model"],
                         "value": {"provider": pid},
-                        "class": "btn btn-sm btn-primary",
+                        "class": "btn-subtle theme-secondary btn-sm",
                     }
                 ],
             },
@@ -713,14 +713,14 @@ class SettingsView:
                         "action": "llm.select.model",
                         "keys": ["model"],
                         "value": {"provider": pid},
-                        "class": "btn btn-sm btn-primary",
+                        "class": "btn-subtle theme-secondary btn-sm",
                     },
                     {
                         "label": "删除",
                         "action": "llm.model.remove",
                         "keys": ["model"],
                         "value": {"provider": pid},
-                        "class": "btn btn-sm btn-danger",
+                        "class": "btn-outline theme-danger btn-sm",
                     },
                 ],
             }
@@ -841,7 +841,7 @@ class SettingsView:
                         "label": "编辑",
                         "action": "llm.select.role",
                         "keys": ["role"],
-                        "class": "btn btn-sm btn-primary",
+                        "class": "btn-subtle theme-secondary btn-sm",
                     }
                 ],
             }

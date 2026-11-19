@@ -4,6 +4,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from config import load_config
+from core import note_document as qa
 from core.runtime import build_runtime
 from core.ui import BlockType
 from plugins.reader import ReaderPlugin
@@ -176,10 +177,12 @@ def test_document_footnotes_survive_length_and_qa(tmp_path: Path) -> None:
         assert "footnote-ref" in blocks[0]["html"]
         assert "footnote-item" in blocks[2]["html"]
         assert "qa:begin" not in html and "reader-qa-" not in html
-        links = _FootnoteLinks(
-            html + question["question_html"] + question["answer_html"]
+        assert qa.parse_blocks(Path(path).read_text("utf-8"))[0].question == (
+            "Why does this work?[^normal-counterexample]\n\n"
+            "[^normal-counterexample]: Question context."
         )
-        assert len(links.targets) == 10
+        links = _FootnoteLinks(html + question["answer_html"])
+        assert len(links.targets) == 8
         assert len(links.ids) == len(set(links.ids))
         assert all(target in links.ids for target in links.targets)
 

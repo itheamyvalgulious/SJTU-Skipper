@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="fs-sm">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -8,71 +8,131 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%231a73e8'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-size='19' fill='%23ffffff'%3E%E2%88%91%3C/text%3E%3C/svg%3E"
     >
-    <link rel="stylesheet" href="/static/styles.css?v=10">
-    <link rel="stylesheet" href="/static/vendor/katex/katex.min.css?v=6">
+    <link rel="stylesheet" href="/static/vendor/bootstrap/bootstrap.min.css">
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
   </head>
-  <body>
-    <div id="app">
-      <header class="topbar">
-        <div class="brand">
-          <div class="brand-mark">∑</div>
-          <div>
-            <h1>SJTU-Skipper</h1>
-            <p class="brand-sub">课程、课堂、笔记</p>
+  <body class="overflow-hidden">
+    <div id="app" class="d-flex flex-column vh-100 min-w-0">
+      <nav class="navbar navbar-expand border-bottom bg-body fg-body" aria-label="主导航">
+        <div class="container-fluid flex-wrap gap-2">
+          <span class="navbar-brand mb-0">SJTU-Skipper</span>
+          <button
+            class="btn btn-subtle lg:d-none"
+            type="button"
+            data-bs-toggle="drawer"
+            data-bs-target="#sidebar-left"
+          >
+            课程
+          </button>
+          <button
+            class="btn btn-subtle lg:d-none"
+            type="button"
+            data-bs-toggle="drawer"
+            data-bs-target="#sidebar-right"
+          >
+            详情
+          </button>
+          <ul id="menubar" class="nav navbar-nav flex-row flex-wrap me-auto" aria-label="菜单"></ul>
+          <div class="d-flex flex-wrap align-items-center gap-2">
+            <button id="palette-btn" class="btn btn-subtle" type="button" title="Ctrl+P">
+              命令 <kbd>Ctrl P</kbd>
+            </button>
+            <form method="post" action="/logout" class="m-0">
+              <button class="btn btn-text" type="submit" title="退出登录">退出</button>
+            </form>
           </div>
         </div>
-        <nav id="menubar" class="menubar" aria-label="菜单"></nav>
-        <div class="topbar-right">
-          <button id="palette-btn" class="btn btn-sm btn-ghost" type="button" title="Ctrl+P">
-            命令 <kbd>Ctrl P</kbd>
-          </button>
-          <span id="connection" class="pill pill-muted">连接中</span>
-          <span id="session-pill" class="pill pill-muted">无会话</span>
-          <form method="post" action="/logout" class="logout-form">
-            <button class="btn btn-sm btn-ghost" type="submit" title="退出登录">退出</button>
-          </form>
-        </div>
-      </header>
-
-      <div class="workspace">
-        <aside id="sidebar-left" class="sidebar sidebar-left">
-          <div class="sidebar-head">
-            <span class="sidebar-title">课程</span>
-            <button class="sidebar-close" type="button" data-side="left" title="收起课程面板">
+      </nav>
+      <div class="workspace position-relative flex-grow-1 min-h-0">
+        <dialog
+          id="sidebar-left"
+          class="lg:drawer drawer-start sidebar-left min-w-0 min-h-0 lg:flex-column lg:align-self-stretch overflow-hidden"
+          aria-label="课程"
+        >
+          <div class="drawer-header d-flex align-items-center gap-2">
+            <h2 class="drawer-title h5 mb-0 me-auto">课程</h2>
+            <button
+              id="refresh-courses"
+              class="btn btn-subtle d-inline-flex align-items-center justify-content-center"
+              type="button"
+              data-action="input.refresh_courses"
+              title="刷新课程列表"
+              aria-label="刷新课程列表"
+              hidden
+            >
+              <svg
+                width="1em"
+                height="1em"
+                fill="currentColor"
+                class="bi bi-arrow-clockwise"
+                viewBox="0 0 16 16"
+                aria-hidden="true"
+              >
+                <path
+                  fill-rule="evenodd"
+                  d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"
+                />
+                <path
+                  d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"
+                />
+              </svg>
+            </button>
+            <button
+              class="sidebar-close btn btn-subtle"
+              type="button"
+              data-side="left"
+              data-bs-dismiss="drawer"
+              title="收起课程面板"
+              aria-label="关闭课程面板"
+            >
               ×
             </button>
           </div>
-          <div id="left-tabs" class="side-tabs"></div>
-          <div id="left-toolbox" class="toolbox"></div>
-        </aside>
-        <div class="resizer" data-side="left" title="拖动调整宽度"></div>
-
-        <main class="center">
-          <div id="page-tabs" class="page-tabs"></div>
-          <div id="page-content" class="page-content">
-            <div class="welcome">
-              <div class="welcome-mark">∮</div>
+          <div id="left-tabs" class="nav nav-tabs flex-shrink-0 flex-nowrap overflow-x-auto"></div>
+          <div
+            id="left-toolbox"
+            class="drawer-body lg:d-block lg:flex-grow-1 min-w-0 min-h-0 overflow-auto"
+          ></div>
+        </dialog>
+        <div class="resizer d-none lg:d-block bg-2" data-side="left" title="拖动调整宽度"></div>
+        <main class="center d-flex flex-column min-w-0 min-h-0">
+          <div id="page-tabs" class="nav nav-tabs flex-shrink-0 flex-nowrap overflow-x-auto"></div>
+          <div id="page-content" class="page-content flex-grow-1 min-w-0 min-h-0 overflow-auto p-3">
+            <div class="text-center p-5">
               <h2>选择一节课</h2>
-              <p>左侧课程树里展开课程，选择录播或直播。</p>
+              <p class="fg-2">左侧课程树里展开课程，选择录播或直播．</p>
             </div>
           </div>
         </main>
-
-        <div class="resizer" data-side="right" title="拖动调整宽度"></div>
-        <aside id="sidebar-right" class="sidebar sidebar-right">
-          <div class="sidebar-head">
-            <span class="sidebar-title">详情</span>
-            <button class="sidebar-close" type="button" data-side="right" title="收起详情面板">
+        <div class="resizer d-none lg:d-block bg-2" data-side="right" title="拖动调整宽度"></div>
+        <dialog
+          id="sidebar-right"
+          class="lg:drawer drawer-end sidebar-right min-w-0 min-h-0 lg:flex-column lg:align-self-stretch overflow-hidden"
+          aria-label="详情"
+        >
+          <div class="drawer-header d-flex align-items-center justify-content-between">
+            <h2 class="drawer-title h5 mb-0">详情</h2>
+            <button
+              class="sidebar-close btn btn-subtle"
+              type="button"
+              data-side="right"
+              data-bs-dismiss="drawer"
+              title="收起详情面板"
+              aria-label="关闭详情面板"
+            >
               ×
             </button>
           </div>
-          <div id="right-context" class="sidebar-context" hidden></div>
-          <div id="right-tabs" class="side-tabs"></div>
-          <div id="right-toolbox" class="toolbox"></div>
-        </aside>
-
+          <div id="right-context" class="p-3 border-bottom" hidden></div>
+          <div id="right-tabs" class="nav nav-tabs flex-shrink-0 flex-nowrap overflow-x-auto"></div>
+          <div
+            id="right-toolbox"
+            class="drawer-body lg:d-block lg:flex-grow-1 min-w-0 min-h-0 overflow-auto"
+          ></div>
+        </dialog>
         <button
-          class="sidebar-restore restore-left"
+          class="sidebar-restore restore-left btn-subtle position-absolute top-50 start-0 translate-middle-y z-1"
           type="button"
           data-side="left"
           title="展开课程面板"
@@ -80,7 +140,7 @@
           ›
         </button>
         <button
-          class="sidebar-restore restore-right"
+          class="sidebar-restore restore-right btn-subtle position-absolute top-50 end-0 translate-middle-y z-1"
           type="button"
           data-side="right"
           title="展开详情面板"
@@ -88,59 +148,77 @@
           ‹
         </button>
       </div>
-
-      <footer id="statusbar" class="statusbar">
-        <span class="muted">等待运行时状态…</span>
+      <footer id="statusbar" class="flex-shrink-0 border-top bg-1 fg-body overflow-x-auto">
+        <ul class="nav flex-nowrap align-items-center text-nowrap">
+          <li class="nav-item flex-shrink-0">
+            <span class="nav-link d-inline-flex align-items-center gap-2 fg-body">
+              <span>状态</span><b id="connection" role="status">连接中</b>
+            </span>
+          </li>
+        </ul>
       </footer>
     </div>
-
-    <div id="toast" class="toast" role="status"></div>
-
-    <div id="selection-menu" class="selection-menu" hidden></div>
-
-    <div id="ask" class="ask-modal" hidden>
-      <div class="ask-box">
-        <div class="ask-head">
-          <span class="ask-title">针对选中的内容提问</span>
-          <button id="ask-close" class="ask-close" type="button" title="关闭">×</button>
-        </div>
-        <blockquote id="ask-selection" class="ask-selection"></blockquote>
-        <div class="ask-levels">
-          <label class="ask-level-label" for="ask-intensity">强度</label>
-          <select id="ask-intensity" class="select"></select>
-          <span class="ask-level-hint">快速=直接回答；研究=可先检索再回答</span>
+    <div class="toast-container position-fixed bottom-0 end-0 p-3">
+      <div id="toast" class="toast" role="status" aria-live="polite">
+        <div class="toast-body"></div>
+      </div>
+    </div>
+    <div id="selection-menu" class="menu show position-fixed" hidden></div>
+    <dialog id="ask" class="dialog dialog-instant" aria-label="针对选中的内容提问">
+      <div class="dialog-header">
+        <h2 class="dialog-title">针对选中的内容提问</h2>
+        <button id="ask-close" class="btn btn-subtle" type="button" title="关闭" aria-label="关闭">
+          ×
+        </button>
+      </div>
+      <div class="dialog-body d-flex flex-column gap-3">
+        <blockquote
+          id="ask-selection"
+          class="ask-selection border-start ps-3 fg-2 overflow-auto"
+        ></blockquote>
+        <div class="form-field">
+          <label class="form-label" for="ask-intensity">强度</label>
+          <select id="ask-intensity" class="form-control"></select>
+          <div class="form-text">快速=直接回答；研究=可先检索再回答</div>
         </div>
         <textarea
           id="ask-input"
-          class="ask-input"
+          class="form-control"
           rows="3"
+          aria-label="问题"
           placeholder="输入问题，Enter 发送，Shift+Enter 换行"
         ></textarea>
-        <div class="ask-actions">
-          <span class="ask-hint">回答会写入选中段落下方，可折叠、可删除</span>
-          <button id="ask-cancel" class="btn btn-sm" type="button">取消</button>
-          <button id="ask-send" class="btn btn-sm btn-primary" type="button">发送</button>
-        </div>
       </div>
-    </div>
-
-    <div id="palette" class="palette" hidden>
-      <div class="palette-box">
+      <div class="dialog-footer flex-wrap">
+        <span class="fg-2 me-auto">回答会写入选中段落下方，可折叠、可删除</span>
+        <button id="ask-cancel" class="btn btn-subtle" type="button">取消</button>
+        <button id="ask-send" class="btn btn-solid theme-primary" type="button">发送</button>
+      </div>
+    </dialog>
+    <dialog id="palette" class="dialog dialog-instant" aria-label="命令">
+      <div class="dialog-header"><h2 class="dialog-title">命令</h2></div>
+      <div class="dialog-body">
         <input
           id="palette-input"
-          class="palette-input"
+          class="form-control"
           type="text"
+          aria-label="搜索命令"
           placeholder="输入命令，例如：设置 / Agent / 转写"
           autocomplete="off"
         >
-        <div id="palette-list" class="palette-list" role="listbox"></div>
+        <div
+          id="palette-list"
+          class="palette-list list-group mt-3 overflow-auto"
+          role="listbox"
+        ></div>
       </div>
-    </div>
+      <div class="dialog-footer"><span class="fg-2">Esc 关闭</span></div>
+    </dialog>
 
-    <script src="/static/vendor/hls/hls.min.js?v=6"></script>
-    <script src="/static/vendor/mpegts/mpegts.min.js?v=6"></script>
-    <script src="/static/vendor/katex/katex.min.js?v=6"></script>
-    <script src="/static/vendor/katex/contrib/auto-render.min.js?v=6"></script>
-    <script src="/static/app.js?v=11"></script>
+    <script src="/static/vendor/hls/hls.min.js"></script>
+    <script src="/static/vendor/mpegts/mpegts.min.js"></script>
+    <script src="/static/vendor/katex/katex.min.js"></script>
+    <script src="/static/vendor/katex/contrib/auto-render.min.js"></script>
+    <script type="module" src="/static/app.js"></script>
   </body>
 </html>

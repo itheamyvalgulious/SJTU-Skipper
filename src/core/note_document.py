@@ -26,8 +26,8 @@ class AskIntensity(StrEnum):
     RESEARCH = "research"
 
 
-QUESTION_PREFIX = "❓ 提问"
-ANSWER_PREFIX = "🤖 回答"
+QUESTION_PREFIX = "提问"
+ANSWER_PREFIX = "回答"
 
 _BLOCK_RE = re.compile(
     r"<!--\s*qa:begin\s*(?P<meta>\{.*?\})\s*-->(?P<body>.*?)<!--\s*qa:end\s*-->",
@@ -126,10 +126,6 @@ def parse_blocks(text: str) -> list[QABlock]:
             )
         )
     return blocks
-
-
-def has_blocks(text: str) -> bool:
-    return _BLOCK_RE.search(text) is not None
 
 
 def segments(text: str) -> list[tuple[BlockType, object]]:

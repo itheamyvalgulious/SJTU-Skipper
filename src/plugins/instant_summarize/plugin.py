@@ -32,7 +32,7 @@ class InstantSummarizePlugin(Plugin):
         ctx.ui.add_toolbox_item(
             "note",
             "instant-summarize.notes",
-            "分段笔记",
+            "",
             order=11,
             render=self._render,
             plugin_id=self.id,
@@ -44,26 +44,27 @@ class InstantSummarizePlugin(Plugin):
 
     def _render(self):
         status = self.pipeline.status()
+        enabled = bool(self.settings.get("instant-summarize.enabled", True))
+        errors = len(status["errors"])
+        gaps = f"，缺口 {errors} 项" if errors else ""
         return [
             {
-                "type": BlockType.SWITCH,
-                "label": "分段笔记",
-                "checked": bool(self.settings.get("instant-summarize.enabled", True)),
-                "action": "instant-summarize.toggle",
-            },
-            {
-                "type": BlockType.TEXT,
-                "text": f"已发布至 {status['published_end']:.0f} 秒；缺口 {len(status['errors'])} 项",
-            },
-            {
-                "type": BlockType.BUTTONS,
-                "buttons": [
-                    {
-                        "label": "打开分段笔记",
-                        "action": "instant-summarize.read",
-                    }
-                ],
-            },
+                "type": BlockType.HTML,
+                "html": f'''<section class="px-3 pb-3" aria-label="分段笔记">
+              <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                <h3 class="fs-md fw-semibold mb-0">分段笔记</h3>
+                <div class="d-flex align-items-center gap-2">
+                  <div class="switch">
+                    <input id="instant-notes-enabled" type="checkbox" role="switch" switch
+                      data-change-action="instant-summarize.toggle"{" checked" if enabled else ""}>
+                  </div>
+                  <label for="instant-notes-enabled">启用</label>
+                </div>
+              </div>
+              <p class="fg-2 mb-2" role="status">已发布至 {status["published_end"]:.0f} 秒{gaps}</p>
+              <button type="button" class="btn-outline theme-primary" data-action="instant-summarize.read">打开分段笔记</button>
+            </section>''',
+            }
         ]
 
     def _toggle(self, payload):

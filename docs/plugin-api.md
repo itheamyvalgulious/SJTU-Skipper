@@ -171,7 +171,7 @@ Block：
 # row_actions 为每一行生成按钮；keys 把该行字段并入 action 的 values
 {"type": "table", "columns": [{"key": "id", "label": "模型"}], "rows": [{"id": "flash"}],
  "row_actions": [{"label": "删除", "action": "llm.model.remove", "keys": ["id"],
-                  "value": {"provider": "opencode-go"}, "class": "btn btn-sm btn-danger"}]}
+                  "value": {"provider": "opencode-go"}, "class": "btn-outline theme-danger btn-sm"}]}
 {"type": "cards", "items": [{"title": "...", "subtitle": "...", "actions": [...]}]}
 {"type": "list", "items": [{"text": "...", "action": "x", "value": {...}}]}
 {"type": "buttons", "buttons": [{"label": "刷新", "action": "input.refresh"}]}
@@ -203,8 +203,7 @@ Block：
 # player：两路视频（m3u8 走 hls.js，flv 走 mpegts.js，其余原生播放）
 {"type": "player", "sources": [{"key": "main", "label": "课堂", "src": "https://.../main.m3u8"},
                               {"key": "screen", "label": "屏幕", "src": "...", "muted": True}],
- "live": False, "processing": False, "finished": False, "queued": False,
- "start_action": "input.start_processing", "pause_action": "input.pause_processing"}
+ "live": False, "processing": False, "finished": False, "queued": False}
 ```
 
 Action：
@@ -256,7 +255,7 @@ page_id = reader.show(title="笔记", docs=docs, active="knowledge",
 # 页面级菜单项按页面和 owner 匹配
 reader.register_selection_action(
     page_id,
-    {"id": "my.ask", "label": "提问", "icon": "💬", "kind": "prompt",
+    {"id": "my.ask", "label": "提问", "kind": "prompt",
      "action": "my.ask", "placeholder": "针对选中的内容提问"},
     owner="my-plugin",
 )

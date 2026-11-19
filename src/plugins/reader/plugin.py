@@ -183,7 +183,6 @@ class ReaderPlugin(Plugin):
             PAGE_ID,
             "阅读",
             render=lambda: self._render_page(PAGE_ID),
-            icon="📖",
             order=5,
             plugin_id=self.id,
         )
@@ -264,7 +263,6 @@ class ReaderPlugin(Plugin):
                 page_id,
                 str(title or "阅读"),
                 render=lambda pid=page_id: self._render_page(pid),
-                icon="📖",
                 order=5,
                 plugin_id=self.id,
             )
@@ -697,9 +695,6 @@ def _document_blocks(text: str, path: str) -> list[dict[str, Any]]:
                 "collapsed": block.collapsed,
                 "question": block.question,
                 "answer": block.answer,
-                "question_html": render_markdown(
-                    block.question, document_id=f"{path}:{block.id}:question"
-                ),
                 "answer_html": (
                     render_markdown(
                         block.answer, document_id=f"{path}:{block.id}:answer"

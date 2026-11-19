@@ -581,10 +581,9 @@ class InputPlugin(Plugin):
                 return None
             title = str(meta.get("course_name") or meta.get("course") or "课程")
             label = str(meta.get("class_label") or meta.get("lecture") or "")
-            subtitle = " ".join(part for part in (label, "最近一节课") if part)
             return {
                 "title": title,
-                "subtitle": subtitle,
+                "subtitle": label,
                 "selected": False,
                 "recent": True,
             }
@@ -1015,7 +1014,7 @@ class InputPlugin(Plugin):
         pid = self.id
 
         # Left sidebar: one collapsible course tree, no tab strip.
-        ui.add_tab(Side.LEFT, "courses", "课程", icon="📚", order=0, plugin_id=pid)
+        ui.add_tab(Side.LEFT, "courses", "课程", order=0, plugin_id=pid)
         ui.add_toolbox_item(
             "courses",
             "input.courses",
@@ -1026,11 +1025,11 @@ class InputPlugin(Plugin):
         )
 
         # Right sidebar: functional areas for the selected class.
-        ui.add_tab(Side.RIGHT, "session", "本节课", icon="▶", order=10, plugin_id=pid)
+        ui.add_tab(Side.RIGHT, "session", "课程", order=10, plugin_id=pid)
         ui.add_toolbox_item(
             "session",
             "input.session",
-            "处理控制",
+            "",
             order=0,
             render=self._render_session_item,
             plugin_id=pid,
@@ -1039,7 +1038,7 @@ class InputPlugin(Plugin):
         ui.add_toolbox_item(
             "session",
             "input.queue",
-            "处理队列",
+            "",
             order=1,
             render=self._render_queue_item,
             plugin_id=pid,
@@ -1081,7 +1080,6 @@ class InputPlugin(Plugin):
             "input.refresh",
             "刷新课程列表",
             category="课程",
-            icon="🔄",
             order=0,
             action="input.refresh_courses",
             plugin_id=pid,
@@ -1089,9 +1087,7 @@ class InputPlugin(Plugin):
         ui.register_command(
             "input.manual",
             "手动播放 URL",
-            subtitle="HLS / FLV / mp4 / 本地文件",
             category="调试",
-            icon="🔗",
             order=10,
             page_id="input:manual",
             plugin_id=pid,
@@ -1112,7 +1108,7 @@ class InputPlugin(Plugin):
                             "label": "去设置",
                             "action": "ui.open_page",
                             "value": {"page_id": "settings:main"},
-                            "class": "btn btn-sm btn-primary",
+                            "class": "btn-solid theme-primary btn-sm",
                         }
                     ],
                 },
@@ -1142,22 +1138,10 @@ class InputPlugin(Plugin):
                 {"type": BlockType.TEXT, "text": "课程列表加载超时，点「刷新」重试。"}
             )
         elif error:
-            blocks.append({"type": BlockType.TEXT, "text": f"⚠️ {error}"})
+            blocks.append({"type": BlockType.TEXT, "text": error})
         else:
             blocks.append({"type": BlockType.TEXT, "text": "没有找到课程。"})
 
-        blocks.append(
-            {
-                "type": BlockType.BUTTONS,
-                "buttons": [
-                    {
-                        "label": "刷新",
-                        "action": "input.refresh_courses",
-                        "class": "btn btn-sm btn-ghost",
-                    }
-                ],
-            }
-        )
         return blocks
 
     # ------------------------------------------------------------------
@@ -1362,7 +1346,7 @@ class InputPlugin(Plugin):
         return [
             {
                 "type": BlockType.MARKDOWN,
-                "text": "### 🔗 手动输入 URL\n",
+                "text": "### 手动输入 URL\n",
             },
             {
                 "type": BlockType.FORM,
@@ -1422,14 +1406,8 @@ class InputPlugin(Plugin):
             error = job_error or self._streams_error
 
         if cls is None:
-            return [
-                {
-                    "type": BlockType.TEXT,
-                    "text": "未选择课程。从左侧课程树点一节课，再开始处理。",
-                }
-            ]
+            return []
 
-        parts = len(cls.get("videos") or []) or 1
         if job_state:
             state_label = {
                 JobState.QUEUED: "排队中",
@@ -1449,11 +1427,7 @@ class InputPlugin(Plugin):
         else:
             state_label = "未开始"
 
-        items = [
-            ["课程", str(cls.get("name", "") or "未选择")],
-            ["节次", str(cls.get("label", "") or "未选择")],
-            ["状态", state_label],
-        ]
+        details = []
         if job is not None and not active and job_state == JobState.QUEUED:
             with self._class_lock:
                 position = self._queue.index(job.id) + 1 if job.id in self._queue else 0
@@ -1463,23 +1437,26 @@ class InputPlugin(Plugin):
                     in {JobState.RUNNING, JobState.PREPARING, JobState.PAUSED}
                 )
             if position:
-                items.append(
-                    [
-                        "队列",
-                        f"第 {position} 位" + ("（有课程正在处理）" if running else ""),
-                    ]
+                details.append(
+                    f"排队第 {position} 位" + ("（有课程正在处理）" if running else "")
                 )
         if error:
-            items.append(["错误", error])
+            details.append(error)
 
-        blocks: list[dict[str, Any]] = [{"type": BlockType.KEYVALUE, "items": items}]
         buttons: list[dict[str, Any]] = []
         if job is not None and job_state == JobState.RUNNING:
             buttons.append(
                 {
                     "label": "暂停处理",
                     "action": "input.pause_processing",
-                    "class": "btn btn-sm",
+                    "class": "btn-subtle theme-secondary",
+                }
+            )
+            buttons.append(
+                {
+                    "label": "停止处理",
+                    "action": "input.queue_cancel",
+                    "class": "btn-outline theme-danger",
                 }
             )
         elif job is not None and job_state in {JobState.QUEUED, JobState.PREPARING}:
@@ -1487,14 +1464,14 @@ class InputPlugin(Plugin):
                 {
                     "label": "提前处理",
                     "action": "input.start_processing",
-                    "class": "btn btn-sm",
+                    "class": "btn-solid theme-primary",
                 }
             )
             buttons.append(
                 {
                     "label": "取消排队",
                     "action": "input.pause_processing",
-                    "class": "btn btn-sm btn-danger",
+                    "class": "btn-subtle theme-secondary",
                 }
             )
         elif job is not None and job_state == JobState.PAUSED:
@@ -1502,14 +1479,14 @@ class InputPlugin(Plugin):
                 {
                     "label": "继续处理",
                     "action": "input.start_processing",
-                    "class": "btn btn-sm btn-primary",
+                    "class": "btn-solid theme-primary",
                 }
             )
             buttons.append(
                 {
                     "label": "放弃",
                     "action": "input.stop",
-                    "class": "btn btn-sm btn-danger",
+                    "class": "btn-outline theme-danger",
                 }
             )
         elif finished:
@@ -1517,7 +1494,7 @@ class InputPlugin(Plugin):
                 {
                     "label": "重新转写和识别板书",
                     "action": "input.reprocess",
-                    "class": "btn btn-sm",
+                    "class": "btn-subtle theme-secondary",
                 }
             )
             if self._ctx.ui.has_action("summarize.fill_again"):
@@ -1525,7 +1502,7 @@ class InputPlugin(Plugin):
                     {
                         "label": "补录缺失内容",
                         "action": "summarize.fill_again",
-                        "class": "btn btn-sm",
+                        "class": "btn-subtle theme-secondary",
                     }
                 )
         elif job is not None and job_state == JobState.FAILED:
@@ -1533,7 +1510,7 @@ class InputPlugin(Plugin):
                 {
                     "label": "重试",
                     "action": "input.reprocess",
-                    "class": "btn btn-sm btn-primary",
+                    "class": "btn-solid theme-primary",
                 }
             )
         else:
@@ -1541,17 +1518,37 @@ class InputPlugin(Plugin):
                 {
                     "label": "开始处理",
                     "action": "input.start_processing",
-                    "class": "btn btn-sm btn-primary",
+                    "class": "btn-solid theme-primary",
                 }
             )
-        blocks.append({"type": BlockType.BUTTONS, "buttons": buttons})
-        return blocks
+        controls = "".join(
+            f'<button type="button" class="{button["class"]}" '
+            f'data-action="{button["action"]}" data-id="{escape(str(cls.get("id", "")), quote=True)}">{escape(button["label"])}</button>'
+            for button in buttons
+        )
+        detail_html = "".join(
+            f'<p class="fg-2 mt-2 mb-0">{escape(detail)}</p>' for detail in details
+        )
+        return [
+            {
+                "type": BlockType.HTML,
+                "html": f"""<section class="p-3 border-bottom" aria-label="处理状态">
+          <div class="d-flex align-items-center justify-content-between gap-2">
+            <h3 class="fs-md fw-semibold mb-0">处理状态</h3>
+            <span role="status">{escape(state_label)}</span>
+          </div>
+          {detail_html}
+          {f'<div class="d-flex flex-wrap gap-2 mt-3">{controls}</div>' if controls else ""}
+        </section>""",
+            }
+        ]
 
     def _render_queue_item(self) -> list[dict[str, Any]]:
         """Right sidebar: the whole processing queue, independent of selection."""
 
         with self._class_lock:
             active = self._active_job
+            selected_id = self._current_class_id
             ordered: list[_Job] = []
             if active is not None:
                 ordered.append(active)
@@ -1563,31 +1560,8 @@ class InputPlugin(Plugin):
                     and job.state == JobState.QUEUED
                 ):
                     ordered.append(job)
-            terminal = sorted(
-                (
-                    job
-                    for job in self._jobs.values()
-                    if job.state in _JOB_TERMINAL and job.finished_at
-                ),
-                key=lambda job: job.finished_at,
-                reverse=True,
-            )[:3]
-        if not ordered and not terminal:
-            with self._class_lock:
-                legacy_busy = self._processing and self._active_job is None
-            if legacy_busy:
-                return [
-                    {
-                        "type": BlockType.TEXT,
-                        "text": "正在处理一节课程（补录或手动播放），进度见底部状态栏。",
-                    }
-                ]
-            return [
-                {
-                    "type": BlockType.TEXT,
-                    "text": "队列为空．选中一节课后点「开始处理」．",
-                }
-            ]
+        if not ordered:
+            return []
         rows: list[dict[str, Any]] = []
         for position, job in enumerate(ordered, start=1):
             if job is active:
@@ -1623,65 +1597,40 @@ class InputPlugin(Plugin):
                 {
                     "title": job.title(),
                     "subtitle": detail,
-                    "active": job is active,
                     "action": action,
                     "label": label,
                     "value": {"id": job.id},
-                    "class": "btn btn-sm btn-ghost",
                 }
             )
-        for job in terminal:
-            state = {
-                JobState.DONE: "已完成",
-                JobState.FAILED: "失败",
-                JobState.CANCELED: "已取消",
-            }.get(job.state, job.state)
-            detail = "；".join(
-                part
-                for part in (
-                    "直播" if job.kind == SourceKind.LIVE else "录播",
-                    state,
-                )
-                if part
+        entries = []
+        for row in rows:
+            job_id = escape(row["value"]["id"], quote=True)
+            entries.append(f"""<li class="py-3 border-bottom">
+              <div class="fw-semibold text-break">{escape(row["title"])}</div>
+              <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-1">
+                <span class="fg-2">{escape(row["subtitle"])}</span>
+                {f'<button type="button" class="btn-text" data-action="{row["action"]}" data-id="{job_id}">{escape(row["label"])}</button>' if row["value"]["id"] != selected_id else ""}
+              </div>
+            </li>""")
+        controls = []
+        if active is not None and active.id != selected_id:
+            controls.append(
+                f'<button type="button" class="btn-outline theme-danger" '
+                f'data-action="input.queue_cancel" data-id="{escape(active.id, quote=True)}">停止当前处理</button>'
             )
-            rows.append(
-                {
-                    "title": job.title(),
-                    "subtitle": detail,
-                    "action": "input.queue_retry",
-                    "label": "重新转写和识别板书",
-                    "value": {"id": job.id},
-                    "class": "btn btn-sm",
-                }
-            )
-        summary = f"处理队列 {len(ordered)} 节"
-        if terminal:
-            summary += f"；最近完成 {len(terminal)} 节"
-        blocks: list[dict[str, Any]] = [
-            {"type": BlockType.TEXT, "text": summary},
-            {"type": BlockType.ROWS, "items": rows},
+        return [
+            {
+                "type": BlockType.HTML,
+                "html": f"""<section class="px-3 pb-3" aria-label="处理队列">
+          <div class="d-flex align-items-center justify-content-between gap-2">
+            <h3 class="fs-md fw-semibold mb-0">处理队列</h3>
+            <span class="fg-2">{len(ordered)} 节待处理</span>
+          </div>
+          <ul class="list-unstyled mb-0">{"".join(entries)}</ul>
+          <div class="d-flex flex-wrap gap-2 mt-3">{"".join(controls)}</div>
+        </section>""",
+            }
         ]
-        buttons: list[dict[str, Any]] = []
-        if active is not None:
-            buttons.append(
-                {
-                    "label": "停止当前处理",
-                    "action": "input.queue_cancel",
-                    "value": {"id": active.id},
-                    "class": "btn btn-sm btn-danger",
-                }
-            )
-        if terminal:
-            buttons.append(
-                {
-                    "label": "清理已完成",
-                    "action": "input.queue_clear",
-                    "class": "btn btn-sm btn-ghost",
-                }
-            )
-        if buttons:
-            blocks.append({"type": BlockType.BUTTONS, "buttons": buttons})
-        return blocks
 
     def _render_session(self) -> list[dict[str, Any]]:
         with self._class_lock:
@@ -1757,7 +1706,7 @@ class InputPlugin(Plugin):
         if loading:
             blocks.append({"type": BlockType.TEXT, "text": "正在获取视频地址…"})
         if error:
-            blocks.append({"type": BlockType.TEXT, "text": f"⚠️ {error}"})
+            blocks.append({"type": BlockType.TEXT, "text": error})
 
         if live:
             blocks.extend(
@@ -1852,8 +1801,6 @@ class InputPlugin(Plugin):
                 "queued": queued,
                 "screen_missing": bool(streams.get(StreamView.MAIN))
                 and not streams.get(StreamView.SCREEN),
-                "start_action": "input.start_processing",
-                "pause_action": "input.pause_processing",
             }
         ]
 
@@ -2055,7 +2002,7 @@ class InputPlugin(Plugin):
                 blocks.append(
                     {
                         "type": BlockType.HTML,
-                        "html": f'<pre class="session-errors" aria-label="处理错误">{escape(text)}</pre>',
+                        "html": f'<div class="alert theme-danger" role="alert"><pre class="session-errors overflow-auto mb-0" aria-label="处理错误">{escape(text)}</pre></div>',
                     }
                 )
 
@@ -2066,94 +2013,10 @@ class InputPlugin(Plugin):
             blocks.append(
                 {
                     "type": BlockType.MARKDOWN,
-                    "text": (
-                        f"[打开录像](/api/artifacts/{session_id}/media/{media_name})"
-                        "（本地文件，可在新窗口直接播放或下载）"
-                    ),
+                    "text": f"[打开录像](/api/artifacts/{session_id}/media/{media_name})",
                 }
             )
 
-        if finished:
-            blocks.append(
-                {
-                    "type": BlockType.BUTTONS,
-                    "buttons": [
-                        {
-                            "label": "重新转写和识别板书",
-                            "action": "input.reprocess",
-                            "class": "btn btn-sm",
-                        },
-                        *(
-                            [
-                                {
-                                    "label": "补录缺失内容",
-                                    "action": "summarize.fill_again",
-                                    "value": {"session_id": session_id},
-                                    "class": "btn btn-sm",
-                                }
-                            ]
-                            if self._ctx.ui.has_action("summarize.fill_again")
-                            else []
-                        ),
-                    ],
-                }
-            )
-        elif processing:
-            blocks.append(
-                {
-                    "type": BlockType.BUTTONS,
-                    "buttons": [
-                        {
-                            "label": "暂停处理",
-                            "action": "input.pause_processing",
-                            "class": "btn btn-sm",
-                        }
-                    ],
-                }
-            )
-        elif job is not None and job.state == JobState.PAUSED and active:
-            blocks.append(
-                {
-                    "type": BlockType.BUTTONS,
-                    "buttons": [
-                        {
-                            "label": "继续处理",
-                            "action": "input.start_processing",
-                            "class": "btn btn-sm btn-primary",
-                        }
-                    ],
-                }
-            )
-        elif job is not None and job.state in {JobState.FAILED, JobState.CANCELED}:
-            blocks.append(
-                {
-                    "type": BlockType.BUTTONS,
-                    "buttons": [
-                        {
-                            "label": "重试",
-                            "action": "input.reprocess",
-                            "class": "btn btn-sm btn-primary",
-                        }
-                    ],
-                }
-            )
-        elif not (
-            job is not None
-            and job.state in {JobState.QUEUED, JobState.PREPARING}
-            and not active
-        ):
-            blocks.append(
-                {
-                    "type": BlockType.BUTTONS,
-                    "buttons": [
-                        {
-                            "label": "开始处理",
-                            "action": "input.start_processing",
-                            "class": "btn btn-sm btn-primary",
-                        }
-                    ],
-                }
-            )
         return blocks
 
     def _consumer_cursor(self, kind: MediaKind) -> float:

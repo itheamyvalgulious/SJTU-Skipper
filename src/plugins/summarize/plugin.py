@@ -1,8 +1,9 @@
 import json
 import threading
 from enum import StrEnum
+from html import escape
 from core.plugin import Plugin
-from core.ui import BlockType, FormInputType, Side
+from core.ui import BlockType, Side
 from core.settings_spec import SettingsSpec, SettingType
 from plugins.notes_pipeline.types import GenerationState, NoteKind, NotePublication
 
@@ -116,7 +117,7 @@ class SummarizePlugin(Plugin):
         ctx.ui.add_toolbox_item(
             "note",
             "summarize.notes",
-            "笔记",
+            "",
             order=10,
             render=self._render,
             plugin_id=self.id,
@@ -141,68 +142,52 @@ class SummarizePlugin(Plugin):
             GenerationState.GENERATING: "正在生成",
             GenerationState.FINISHED: "生成结束",
         }[state]
-        blocks = []
-        blocks.extend(
-            [
-                {
-                    "type": BlockType.BUTTONS,
-                    "buttons": [
-                        {
-                            "label": "打开笔记",
-                            "action": "summarize.read",
-                        },
-                        {
-                            "label": "Agent 日志",
-                            "action": "summarize.logs",
-                        },
-                    ],
-                },
-                {"type": BlockType.KEYVALUE, "items": [["笔记状态", state_label]]},
-                {
-                    "type": BlockType.BUTTONS,
-                    "buttons": [
-                        {
-                            "label": "生成笔记",
-                            "action": "summarize.generate",
-                            "disabled": state != GenerationState.NOT_STARTED,
-                        },
-                        {
-                            "label": "停止生成",
-                            "action": "summarize.stop",
-                            "disabled": state != GenerationState.GENERATING,
-                        },
-                        {
-                            "label": "删除笔记",
-                            "action": "summarize.delete",
-                            "disabled": state != GenerationState.FINISHED,
-                        },
-                    ],
-                },
-                {
-                    "type": BlockType.FORM,
-                    "fields": [
-                        {
-                            "name": "mode",
-                            "label": "课后处理",
-                            "type": FormInputType.SELECT,
-                            "options": [
-                                {"value": key, "label": label}
-                                for key, label in self.ON_STOP_LABELS
-                            ],
-                            "value": OnStopAction(
-                                self.settings.get(
-                                    "summarize.on_stop", OnStopAction.DIRECT
-                                )
-                            ),
-                        }
-                    ],
-                    "submit": {"label": "保存", "action": "summarize.set_mode"},
-                },
-            ]
+        generation_action = {
+            GenerationState.NOT_STARTED: (
+                "generate",
+                "生成笔记",
+                "btn-solid theme-primary",
+            ),
+            GenerationState.GENERATING: (
+                "stop",
+                "停止生成",
+                "btn-outline theme-danger",
+            ),
+            GenerationState.FINISHED: ("delete", "删除笔记", "btn-text theme-danger"),
+        }[state]
+        action, label, style = generation_action
+        mode = OnStopAction(self.settings.get("summarize.on_stop", OnStopAction.DIRECT))
+        options = "".join(
+            f'<option value="{key}"{" selected" if key == mode else ""}>{text}</option>'
+            for key, text in self.ON_STOP_LABELS
         )
-        if sid in self.notices:
-            blocks.insert(1, {"type": BlockType.TEXT, "text": self.notices[sid]})
-        return blocks
+        notice = (
+            f'<p class="fg-2 mt-2 mb-0">{escape(self.notices[sid])}</p>'
+            if sid in self.notices
+            else ""
+        )
+        return [
+            {
+                "type": BlockType.HTML,
+                "html": f'''<section class="p-3 border-bottom" aria-label="课后笔记">
+              <div class="d-flex align-items-center justify-content-between gap-2 mb-3">
+                <h3 class="fs-md fw-semibold mb-0">课后笔记</h3>
+                <span class="fg-2" role="status">{state_label}</span>
+              </div>
+              <div class="d-flex flex-wrap align-items-center gap-2">
+                <button type="button" class="btn-outline theme-primary" data-action="summarize.read">打开笔记</button>
+                <button type="button" class="btn-text" data-action="summarize.logs">查看日志</button>
+                <button type="button" class="{style}" data-action="summarize.{action}">{label}</button>
+              </div>
+              {notice}
+              <div class="mt-3 pt-3 border-top">
+                <label class="d-block fw-semibold mb-2" for="notes-on-stop">课程结束后</label>
+                <select id="notes-on-stop" name="mode" class="form-control min-w-0"
+                  data-change-action="summarize.set_mode">{options}</select>
+              </div>
+            </section>''',
+            }
+        ]
 
     def _delete(self, payload):
         deleted = self.pipeline.delete(

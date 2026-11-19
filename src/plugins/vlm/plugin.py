@@ -466,16 +466,13 @@ class VlmPlugin(Plugin):
             "vlm:board",
             "板书识别",
             render=self._render_board_page,
-            icon="🖼",
             order=21,
             plugin_id=self.id,
         )
         ui.register_command(
             "vlm.debug",
             "板书识别（调试）",
-            subtitle="查看融合板书图像与识别文本",
             category="调试",
-            icon="🖼",
             order=21,
             page_id="vlm:board",
             keywords="vlm board blackboard debug 板书",
@@ -513,7 +510,7 @@ class VlmPlugin(Plugin):
                 blocks.append(
                     {
                         "type": BlockType.HTML,
-                        "html": '<pre class="vlm-raw-reply" aria-label="模型原始回复">'
+                        "html": '<pre class="vlm-raw-reply overflow-auto" aria-label="模型原始回复">'
                         + escape(f"模型原始回复：\n{last['text']}")
                         + "</pre>",
                     }

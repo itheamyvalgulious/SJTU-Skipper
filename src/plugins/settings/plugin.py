@@ -65,7 +65,6 @@ class SettingsPlugin(Plugin):
             PAGE_ID,
             "设置",
             render=self._render_page,
-            icon="⚙",
             order=900,
             plugin_id=self.id,
         )
@@ -79,9 +78,7 @@ class SettingsPlugin(Plugin):
         ui.register_command(
             "settings.open",
             "设置",
-            subtitle="Canvas、LLM、转写、板书与笔记",
             category="视图",
-            icon="⚙",
             order=10,
             page_id=PAGE_ID,
             keywords="settings config canvas token api key",

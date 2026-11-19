@@ -123,9 +123,7 @@ class STTPlugin(Plugin):
         ctx.ui.register_command(
             "stt.debug",
             "语音转写（调试）",
-            subtitle="查看临时文字、定稿与处理进度",
             category="调试",
-            icon="🎙",
             order=20,
             page_id=PAGE_ID,
             keywords="stt transcript debug 转写",
@@ -777,6 +775,11 @@ class STTPlugin(Plugin):
         try:
             stream.reset(round(start * 1000))
             state.window = float(stream.metadata.get("max_audio_ms", 0) or 0) / 1000.0
+            session.audio_gate.configure(
+                max(session.audio_gate.limit, self._gate_limit()),
+                released=session.audio_gate.released,
+                fail_closed=True,
+            )
         except BaseException:
             client.close_stream(stream)
             raise
@@ -1213,7 +1216,7 @@ class STTPlugin(Plugin):
             blocks.append(
                 {
                     "type": BlockType.TEXT,
-                    "text": "暂无转写结果．开始音频输入后，定稿会显示在这里．",
+                    "text": "暂无转写结果",
                 }
             )
         blocks.append(
@@ -1224,7 +1227,7 @@ class STTPlugin(Plugin):
                         "label": "打开设置",
                         "action": "ui.open_page",
                         "value": {"page_id": "settings:main"},
-                        "class": "btn btn-sm",
+                        "class": "btn-text btn-sm",
                     }
                 ],
             }
