@@ -114,6 +114,8 @@ ctx.register_service("my.service", my_object)
 - 服务名包括 `settings`、`llm`、`agent`、`input`、`stt`、`vlm`、`notes-pipeline`、`summarize`、`instant-summarize` 和 `reader`．
 - `stt.status()` 返回供应商、服务地址/端点、模型、语言、会话 ID、音频时长、处理游标、覆盖时长、片段数、临时文字和失败区间等状态．
 - `stt.transcribe(start=None, end=None)` 同步处理保留 PCM 中尚未覆盖的区间．`start` 缺省为已调度游标，`end` 缺省为 `start + 120` 秒，并限制在音频终点内；区间按供应商单次请求上限切分（兼容服务 120 秒，Google v2 55 秒）．调用会追加转写、记录覆盖并推进已调度游标，返回 `ok/start/end/segments/chars/items`．
+- `stt.reset(session_id)`、`vlm.reset(session_id)` 清理已停止会话的识别缓存，不启动任务、不删除文件．调用前必须停止来源并等待消费者退出．`StreamHub.clear_results(session_id)` 清理内存转写、板书和处理进度，保留媒体及停止状态．
+- `stt.processing(session_id)`、`vlm.processing(session_id)` 只报告指定会话是否仍有识别工作执行，用于删除前等待退出，不等待其他课程的工作．
 - 服务调用使用公开服务对象，不导入插件实现．共享类型与枚举（`Side`、`BlockType`、`FormInputType`、`TaskState`、`StreamKind`、`MediaKind`、`SettingType`）从 `core` 导入．
 - `requires` 声明必需插件，控制加载顺序和服务访问权限．缺失必需插件时加载失败．`optional_requires` 声明可选插件；调用 `ctx.service(name)` 可取得服务或 `None`．
 
@@ -144,6 +146,27 @@ for frame in ctx.llm.stream(IpcMethod.GENERATE, role="board_recognition", messag
 - `stt` 通过供应商适配器使用独立协议：兼容 HTTP/WebSocket 服务，或 Google Cloud Speech-to-Text v2 REST．
 
 ## 6. UI
+
+### 按钮规范
+
+按钮先区分业务操作与低成本的查看操作，再区分强调程度和风险．层级与危险色参考 [Carbon 按钮指南](https://www.carbondesignsystem.com/building-blocks/core/components/button/guidelines)．项目只使用 Bootstrap v6 的 `solid`、`outline`、`text`，不使用 `subtle`．
+
+| 用途           | 样式                        | 示例                                   |
+| -------------- | --------------------------- | -------------------------------------- |
+| 主要业务操作   | `btn-solid theme-primary`   | 保存、开始处理、生成笔记、发送         |
+| 其他业务操作   | `btn-solid theme-secondary` | 停止、暂停、取消排队、编辑条目         |
+| 删除数据或凭据 | `btn-solid theme-danger`    | 删除板书、删除笔记、删除模型、移除凭据 |
+| 非业务操作     | `btn-outline`               | 打开课程、切换视图、刷新、查看日志     |
+| 低强调辅助控件 | `btn-text theme-secondary`  | 折叠、关闭面板、取消表单               |
+
+- 每个独立操作组最多 1 个主操作，同组按钮使用同一尺寸．表格和重复列表操作使用 `btn-sm`．
+- 外观与颜色分别选择．`outline` 不限定颜色：「打开课程」「打开笔记」是对应页面的主要入口，使用 `btn-outline theme-primary`；普通刷新和辅助入口可用 `theme-secondary`．
+- 颜色不能按按钮文字或 action 名自动推断．声明式控件通过 `class` 或 `button_class` 明确指定例外．
+- 通用业务操作默认使用 `solid secondary`，表单提交默认使用 `solid primary`．不能把同组的全部操作都设为主操作．
+- 停止、暂停、取消排队保留已有结果，使用 `solid secondary`．删除结果、删除凭据使用 `solid danger`．是否保留结果只决定危险色，不决定按钮外观．
+- 不可用操作使用原生 `disabled`，不能只显示灰色．仅图标按钮必须提供 `title` 或 `aria-label`．
+
+### UI 注册与 Block
 
 ```python
 from core.ui import Side

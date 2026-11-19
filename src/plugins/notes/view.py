@@ -142,9 +142,9 @@ class NotesView:
             GenerationState.GENERATING: (
                 "stop",
                 "停止生成",
-                "btn-outline theme-danger",
+                "btn-solid theme-secondary",
             ),
-            GenerationState.FINISHED: ("delete", "删除笔记", "btn-text theme-danger"),
+            GenerationState.FINISHED: ("delete", "删除笔记", "btn-solid theme-danger"),
         }[state]
         action, label, style = generation_action
         mode = OnStopAction(self.settings.get("notes.on_stop", OnStopAction.DIRECT))
@@ -167,7 +167,7 @@ class NotesView:
               </div>
               <div class="d-flex flex-wrap align-items-center gap-2">
                 <button type="button" class="btn-outline theme-primary" data-action="notes.read">打开笔记</button>
-                <button type="button" class="btn-text" data-action="notes.logs">查看日志</button>
+                <button type="button" class="btn-outline theme-secondary" data-action="notes.logs">查看日志</button>
                 <button type="button" class="{style}" data-action="notes.{action}">{label}</button>
               </div>
               {notice}

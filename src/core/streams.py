@@ -773,6 +773,26 @@ class StreamHub:
             self._emit("session.started", **started_payload)
         return new_set
 
+    def clear_results(self, session_id: str) -> None:
+        """Clear recognition results after producers and consumers stop."""
+        with self._lock:
+            session = self.get_session(session_id)
+            if session is None:
+                return
+            session.meta["processing_cancelled"] = True
+            session.transcript = TextStream(
+                session_id, StreamKind.TRANSCRIPT, notify=self._on_append
+            )
+            session.visual = TextStream(
+                session_id, StreamKind.VISUAL, notify=self._on_append
+            )
+            session.transcript_progress = SourceProgress(
+                enabled=session.transcript_progress.enabled
+            )
+            session.visual_progress = SourceProgress(
+                enabled=session.visual_progress.enabled
+            )
+
     def end_session(self, reason: str = "") -> None:
         with self._lock:
             current = self._current

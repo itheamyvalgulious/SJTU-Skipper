@@ -18,7 +18,7 @@
         <div class="container-fluid flex-wrap gap-2">
           <span class="navbar-brand mb-0">SJTU-Skipper</span>
           <button
-            class="btn btn-subtle lg:d-none"
+            class="btn btn-outline theme-secondary lg:d-none"
             type="button"
             data-bs-toggle="drawer"
             data-bs-target="#sidebar-left"
@@ -26,7 +26,7 @@
             课程
           </button>
           <button
-            class="btn btn-subtle lg:d-none"
+            class="btn btn-outline theme-secondary lg:d-none"
             type="button"
             data-bs-toggle="drawer"
             data-bs-target="#sidebar-right"
@@ -35,9 +35,11 @@
           </button>
           <ul id="menubar" class="nav navbar-nav flex-row flex-wrap me-auto" aria-label="菜单"></ul>
           <div class="d-flex flex-wrap align-items-center gap-2">
-            <button id="palette-btn" class="btn btn-text" type="button">命令</button>
+            <button id="palette-btn" class="btn btn-outline theme-secondary" type="button">
+              命令
+            </button>
             <form method="post" action="/logout" class="m-0">
-              <button class="btn btn-text" type="submit">退出</button>
+              <button class="btn btn-outline theme-secondary" type="submit">退出</button>
             </form>
           </div>
         </div>
@@ -52,7 +54,7 @@
             <h2 class="drawer-title h5 mb-0 me-auto">课程</h2>
             <button
               id="refresh-courses"
-              class="btn btn-subtle d-inline-flex align-items-center justify-content-center"
+              class="btn btn-outline theme-secondary d-inline-flex align-items-center justify-content-center"
               type="button"
               data-action="input.refresh_courses"
               title="刷新课程列表"
@@ -77,7 +79,7 @@
               </svg>
             </button>
             <button
-              class="sidebar-close btn btn-subtle"
+              class="sidebar-close btn btn-text theme-secondary"
               type="button"
               data-side="left"
               data-bs-dismiss="drawer"
@@ -111,7 +113,7 @@
           <div class="drawer-header d-flex justify-content-between">
             <h2 class="drawer-title h5 mb-0">详情</h2>
             <button
-              class="sidebar-close btn btn-subtle"
+              class="sidebar-close btn btn-text theme-secondary"
               type="button"
               data-side="right"
               data-bs-dismiss="drawer"
@@ -129,7 +131,7 @@
           ></div>
         </dialog>
         <button
-          class="sidebar-restore restore-left btn-subtle position-absolute top-50 start-0 translate-middle-y z-1"
+          class="sidebar-restore restore-left btn-outline theme-secondary position-absolute top-50 start-0 translate-middle-y z-1"
           type="button"
           data-side="left"
           title="展开课程面板"
@@ -137,7 +139,7 @@
           ›
         </button>
         <button
-          class="sidebar-restore restore-right btn-subtle position-absolute top-50 end-0 translate-middle-y z-1"
+          class="sidebar-restore restore-right btn-outline theme-secondary position-absolute top-50 end-0 translate-middle-y z-1"
           type="button"
           data-side="right"
           title="展开详情面板"
@@ -161,10 +163,12 @@
           <div class="toast-body flex-grow-1 min-w-0"></div>
           <button
             type="button"
-            class="btn-close flex-shrink-0 me-3"
+            class="btn btn-text theme-secondary flex-shrink-0 me-3"
             data-bs-dismiss="toast"
             aria-label="关闭"
-          ></button>
+          >
+            ×
+          </button>
         </div>
       </div>
     </div>
@@ -172,7 +176,13 @@
     <dialog id="ask" class="dialog dialog-instant" aria-label="针对选中的内容提问">
       <div class="dialog-header">
         <h2 class="dialog-title">针对选中的内容提问</h2>
-        <button id="ask-close" class="btn btn-subtle" type="button" title="关闭" aria-label="关闭">
+        <button
+          id="ask-close"
+          class="btn btn-text theme-secondary"
+          type="button"
+          title="关闭"
+          aria-label="关闭"
+        >
           ×
         </button>
       </div>
@@ -196,7 +206,7 @@
       </div>
       <div class="dialog-footer flex-wrap">
         <span class="fg-2 me-auto">回答会写入选中段落下方，可折叠、可删除</span>
-        <button id="ask-cancel" class="btn btn-subtle" type="button">取消</button>
+        <button id="ask-cancel" class="btn btn-outline theme-secondary" type="button">取消</button>
         <button id="ask-send" class="btn btn-solid theme-primary" type="button">发送</button>
       </div>
     </dialog>

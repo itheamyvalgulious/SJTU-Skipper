@@ -354,7 +354,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     label,
     action,
     value = undefined,
-    cls = "btn-subtle theme-secondary btn-sm",
+    cls = "btn-solid theme-secondary btn-sm",
     disabled = false,
   ) {
     const attrs = { class: cls, dataset: { action } };
@@ -426,7 +426,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
               action.label || "执行",
               action.action,
               value,
-              action.class || "btn-subtle theme-secondary btn-sm",
+              action.class || "btn-solid theme-secondary btn-sm",
             ),
           );
         }
@@ -487,7 +487,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     });
     if (canExpand || empty) {
       caret = el("button", {
-        class: "btn-text btn-sm flex-shrink-0",
+        class: "btn-text theme-secondary btn-sm flex-shrink-0",
         type: FIELD_INPUT.BUTTON,
         text: expanded ? "▾" : "▸",
         title: canExpand ? (expanded ? "折叠" : "展开") : "暂无课次",
@@ -606,7 +606,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
             action.label || "执行",
             action.action,
             action.value,
-            action.class || "btn-outline theme-primary btn-sm",
+            action.class || "btn-solid theme-secondary btn-sm",
           ),
         );
       actions.hidden = !actions.childNodes.length;
@@ -647,7 +647,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
           field.button_label || field.label || "执行",
           field.action,
           field.value && typeof field.value === "object" ? field.value : undefined,
-          field.button_class || "btn-outline theme-primary",
+          field.button_class || "btn-solid theme-secondary",
         );
         button.id = id;
         row.appendChild(el("div", {}, [button]));
@@ -736,7 +736,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
               "清除",
               "settings.clear_secret",
               { key: fieldName },
-              "btn-outline theme-danger btn-sm",
+              "btn-solid theme-danger btn-sm",
             ),
           );
         }
@@ -1175,7 +1175,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     });
     const head = el("div", { class: "card-header d-flex flex-wrap align-items-center gap-2" });
     const toggle = el("button", {
-      class: "qa-toggle btn-text btn-sm",
+      class: "qa-toggle btn-text theme-secondary btn-sm",
       type: FIELD_INPUT.BUTTON,
       text: collapsed ? "▸" : "▾",
       title: "折叠 / 展开",
@@ -1209,7 +1209,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         "删除",
         block.delete_action || "reader.qa_delete",
         { path: block.path, id: block.id },
-        "btn-outline theme-danger btn-sm",
+        "btn-solid theme-danger btn-sm",
       ),
     );
 
@@ -2127,7 +2127,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
             el("span", { class: "badge theme-info task-state" }),
             el("button", {
               type: FIELD_INPUT.BUTTON,
-              class: "btn-outline theme-danger btn-sm task-cancel",
+              class: "btn-solid theme-secondary btn-sm task-cancel",
               text: "停止任务",
             }),
           ],
@@ -2221,7 +2221,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
               item.text || item.label || "执行",
               item.action,
               item.value,
-              item.class || "btn-subtle theme-secondary",
+              item.class || "btn-solid theme-secondary",
             ),
           );
         else list.appendChild(el("div", { text: item.text || JSON.stringify(item) }));
@@ -2236,7 +2236,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
             b.label || "执行",
             b.action,
             b.value,
-            b.class || (b.primary ? "btn-solid theme-primary" : "btn-subtle theme-secondary"),
+            b.class || "btn-solid theme-secondary",
             Boolean(b.disabled),
           ),
         );
@@ -2855,7 +2855,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
             "打开页面",
             "ui.open_page",
             { page_id: pageId },
-            "btn-text btn-sm ms-auto",
+            "btn-outline theme-secondary btn-sm ms-auto",
           );
           head.appendChild(open);
         }

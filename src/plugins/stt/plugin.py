@@ -71,6 +71,20 @@ class STTService:
     def flushing(self) -> bool:
         return self._plugin.flushing()
 
+    def processing(self, session_id: str) -> bool:
+        with self._plugin._lock:
+            session = self._plugin._processing_session
+            return session is not None and session.session_id == session_id
+
+    def reset(self, session_id: str) -> None:
+        """Clear cached recognition state after the session stops."""
+        with self._plugin._lock:
+            self._plugin._states.pop(session_id, None)
+            self._plugin._state_sessions.pop(session_id, None)
+            self._plugin._sessions.pop(session_id, None)
+            self._plugin._coverage_cache.pop(session_id, None)
+            self._plugin._disabled_at.pop(session_id, None)
+
     def transcribe(
         self, start: float | None = None, end: float | None = None
     ) -> dict[str, Any]:
@@ -1266,7 +1280,7 @@ class STTPlugin(Plugin):
                         "label": "打开设置",
                         "action": "ui.open_page",
                         "value": {"page_id": "settings:main"},
-                        "class": "btn-text btn-sm",
+                        "class": "btn-outline theme-primary btn-sm",
                     }
                 ],
             }

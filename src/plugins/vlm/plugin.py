@@ -72,7 +72,7 @@ class VLMRecognitionError(RuntimeError):
 
 
 class VLMService:
-    """Narrow public ``vlm`` service facade (6 methods, no leaked state)."""
+    """Public board recognition operations."""
 
     __slots__ = ("_plugin",)
 
@@ -95,6 +95,15 @@ class VLMService:
 
     def cancel(self, session_id: str) -> None:
         self._plugin.cancel(session_id)
+
+    def processing(self, session_id: str) -> bool:
+        with self._plugin._lock:
+            session = self._plugin._processing_session
+            return session is not None and session.session_id == session_id
+
+    def reset(self, session_id: str) -> None:
+        """Clear cached recognition state after the session stops."""
+        self._plugin.reset(session_id)
 
     def process_window(self, start: float, end: float) -> list[dict[str, Any]]:
         """Force-process one window of the current video stream."""
@@ -366,6 +375,30 @@ class VlmPlugin(Plugin):
                 self._llm.cancel(key)
             except Exception:
                 logger.exception("Cannot cancel VLM request %s", key)
+
+    def reset(self, session_id: str) -> None:
+        with self._lock:
+            self._cancelled_sessions.add(session_id)
+            session = self._ctx.streams.get_session(session_id)
+            if session is not None:
+                self._sessions[session_id] = session
+            self._recording_sessions.discard(session_id)
+            self._recording_cursor.pop(session_id, None)
+            self._coverage_cache.pop(session_id, None)
+            self._disabled_at.pop(session_id, None)
+            self._session_history.pop(session_id, None)
+            if self._prepared_key is not None and self._prepared_key[0] == session_id:
+                self._prepared_future.cancel()
+                self._prepared_future = None
+                self._prepared_key = None
+            if self._last_session == session_id:
+                self._cursor = 0.0
+                self._next_center = self._window_seconds() / 2
+                self._history.clear()
+                self._latest_image_path = ""
+                self._last_window = {}
+                self._last_error = ""
+                self._consecutive_errors = 0
 
     def status(self) -> dict[str, Any]:
         with self._lock:

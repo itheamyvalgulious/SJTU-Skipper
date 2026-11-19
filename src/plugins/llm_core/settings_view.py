@@ -360,12 +360,13 @@ class SettingsView:
                         "label": "重新开始授权",
                         "action": "llm.opencode_login",
                         "value": {"provider": pid, "force": True},
+                        "class": "btn-solid theme-primary",
                     },
                     {
                         "label": "取消授权",
                         "action": "llm.opencode_cancel",
                         "value": {"provider": pid},
-                        "class": "btn-subtle theme-secondary",
+                        "class": "btn-solid theme-secondary",
                     },
                 ],
             },
@@ -384,7 +385,7 @@ class SettingsView:
                         "label": "关联套餐",
                         "action": "llm.opencode_login",
                         "value": {"provider": pid},
-                        "class": "btn-solid theme-primary btn-sm",
+                        "class": "btn-solid theme-secondary btn-sm",
                     }
                 )
             if configured:
@@ -393,7 +394,7 @@ class SettingsView:
                         "label": "删除凭据",
                         "action": "llm.logout",
                         "value": {"provider": pid},
-                        "class": "btn-outline theme-danger btn-sm",
+                        "class": "btn-solid theme-danger btn-sm",
                     }
                 )
             if len(items) > 1:
@@ -402,7 +403,7 @@ class SettingsView:
                         "label": "删除提供方",
                         "action": "llm.provider.remove",
                         "value": {"provider": pid},
-                        "class": "btn-outline theme-danger btn-sm",
+                        "class": "btn-solid theme-danger btn-sm",
                     }
                 )
             cards.append(
@@ -564,6 +565,7 @@ class SettingsView:
                         "action": "llm.select.provider",
                         "value": {"provider": item["id"]},
                         "label": "查看",
+                        "class": "btn-outline theme-secondary btn-sm",
                     }
                     for item in items
                 ],
@@ -584,7 +586,7 @@ class SettingsView:
                         "label": "检查端点模型",
                         "action": "llm.check",
                         "value": {"provider": pid},
-                        "primary": True,
+                        "class": "btn-solid theme-secondary",
                     }
                 ],
             }
@@ -657,7 +659,7 @@ class SettingsView:
                         "action": "llm.model.add",
                         "keys": ["model"],
                         "value": {"provider": pid},
-                        "class": "btn-subtle theme-secondary btn-sm",
+                        "class": "btn-solid theme-secondary btn-sm",
                     }
                 ],
             },
@@ -668,6 +670,7 @@ class SettingsView:
                         "label": f"全部添加（{len(missing)}）",
                         "action": "llm.model.add_all",
                         "value": {"provider": pid},
+                        "class": "btn-solid theme-primary",
                     }
                 ],
             },
@@ -713,14 +716,14 @@ class SettingsView:
                         "action": "llm.select.model",
                         "keys": ["model"],
                         "value": {"provider": pid},
-                        "class": "btn-subtle theme-secondary btn-sm",
+                        "class": "btn-outline theme-secondary btn-sm",
                     },
                     {
                         "label": "删除",
                         "action": "llm.model.remove",
                         "keys": ["model"],
                         "value": {"provider": pid},
-                        "class": "btn-outline theme-danger btn-sm",
+                        "class": "btn-solid theme-danger btn-sm",
                     },
                 ],
             }
@@ -841,7 +844,7 @@ class SettingsView:
                         "label": "编辑",
                         "action": "llm.select.role",
                         "keys": ["role"],
-                        "class": "btn-subtle theme-secondary btn-sm",
+                        "class": "btn-outline theme-secondary btn-sm",
                     }
                 ],
             }

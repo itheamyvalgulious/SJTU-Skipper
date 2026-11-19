@@ -51,7 +51,7 @@ _ACTION_IDS = (
     "input.refresh_courses",
     "input.open_class",
     "input.start_processing",
-    "input.reprocess",
+    "input.delete",
     "input.pause_processing",
     "input.queue_pause",
     "input.queue_resume",
@@ -1098,7 +1098,7 @@ class InputPlugin(Plugin):
             ("input.refresh_courses", self._act_refresh_courses),
             ("input.open_class", self._act_open_class),
             ("input.start_processing", self._act_start_processing),
-            ("input.reprocess", self._act_reprocess),
+            ("input.delete", self._act_delete),
             ("input.pause_processing", self._act_pause_processing),
             ("input.queue_pause", self._act_queue_pause),
             ("input.queue_resume", self._act_queue_resume),
@@ -1144,7 +1144,7 @@ class InputPlugin(Plugin):
                             "label": "去设置",
                             "action": "ui.open_page",
                             "value": {"page_id": "settings:main"},
-                            "class": "btn-solid theme-primary btn-sm",
+                            "class": "btn-outline theme-primary btn-sm",
                         }
                     ],
                 },
@@ -1463,12 +1463,12 @@ class InputPlugin(Plugin):
                         "action": "input.pause_processing"
                         if self._processing
                         else "input.resume",
-                        "class": "btn-subtle theme-secondary",
+                        "class": "btn-solid theme-secondary",
                     },
                     {
                         "label": "停止处理",
                         "action": "input.stop",
-                        "class": "btn-outline theme-danger",
+                        "class": "btn-solid theme-secondary",
                     },
                 ]
             )
@@ -1477,14 +1477,14 @@ class InputPlugin(Plugin):
                 {
                     "label": "暂停处理",
                     "action": "input.pause_processing",
-                    "class": "btn-subtle theme-secondary",
+                    "class": "btn-solid theme-secondary",
                 }
             )
             buttons.append(
                 {
                     "label": "停止处理",
                     "action": "input.queue_cancel",
-                    "class": "btn-outline theme-danger",
+                    "class": "btn-solid theme-secondary",
                 }
             )
         elif job is not None and job_state in {JobState.QUEUED, JobState.PREPARING}:
@@ -1499,7 +1499,7 @@ class InputPlugin(Plugin):
                 {
                     "label": "取消排队",
                     "action": "input.pause_processing",
-                    "class": "btn-subtle theme-secondary",
+                    "class": "btn-solid theme-secondary",
                 }
             )
         elif job is not None and job_state == JobState.PAUSED:
@@ -1514,15 +1514,15 @@ class InputPlugin(Plugin):
                 {
                     "label": "放弃",
                     "action": "input.stop",
-                    "class": "btn-outline theme-danger",
+                    "class": "btn-solid theme-secondary",
                 }
             )
         elif finished:
             buttons.append(
                 {
-                    "label": "重新转写和识别板书",
-                    "action": "input.reprocess",
-                    "class": "btn-subtle theme-secondary",
+                    "label": "删除板书",
+                    "action": "input.delete",
+                    "class": "btn-solid theme-danger",
                 }
             )
             if self._ctx.ui.has_action("notes.fill_again"):
@@ -1530,15 +1530,15 @@ class InputPlugin(Plugin):
                     {
                         "label": "补录缺失内容",
                         "action": "notes.fill_again",
-                        "class": "btn-subtle theme-secondary",
+                        "class": "btn-solid theme-secondary",
                     }
                 )
         elif job is not None and job_state == JobState.FAILED:
             buttons.append(
                 {
-                    "label": "重试",
-                    "action": "input.reprocess",
-                    "class": "btn-solid theme-primary",
+                    "label": "删除板书",
+                    "action": "input.delete",
+                    "class": "btn-solid theme-danger",
                 }
             )
         else:
@@ -1640,13 +1640,13 @@ class InputPlugin(Plugin):
               <div class="fw-semibold text-break">{escape(row["title"])}</div>
               <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-1">
                 <span class="fg-2">{escape(row["subtitle"])}</span>
-                <button type="button" class="btn-text" data-action="{row["action"]}" data-id="{job_id}">{escape(row["label"])}</button>
+                <button type="button" class="btn-solid theme-secondary" data-action="{row["action"]}" data-id="{job_id}">{escape(row["label"])}</button>
               </div>
             </li>""")
         controls = []
         if active is not None and active.id != selected_id:
             controls.append(
-                f'<button type="button" class="btn-outline theme-danger" '
+                f'<button type="button" class="btn-solid theme-secondary" '
                 f'data-action="input.queue_cancel" data-id="{escape(active.id, quote=True)}">停止当前处理</button>'
             )
         return [
@@ -2451,7 +2451,7 @@ class InputPlugin(Plugin):
         except KeyError:
             return None
 
-    def _act_reprocess(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _act_delete(self, payload: dict[str, Any]) -> dict[str, Any]:
         cls = self._class_from_payload(payload)
         if cls is None:
             return {"ok": False, "message": "未选择课程"}
@@ -2469,20 +2469,22 @@ class InputPlugin(Plugin):
                 self._jobs.pop(job.id, None)
                 while job.id in self._queue:
                     self._queue.remove(job.id)
-            self._courses[str(cls["id"])] = _Course(cls=dict(cls))
         sid = str(cls["id"])
         session = self._ctx.streams.get_session(sid)
         if session is not None:
             session.meta["processing_cancelled"] = True
         if was_active:
             self._sources.stop()
-            self._end_open_session("reprocess")
+            self._end_open_session("results deleted")
         vlm = self._ctx.service("vlm")
         if vlm is not None:
             vlm.cancel(sid)
-        while (
-            session is self._ctx.streams.current and self._ctx.streams.consumers_busy()
-        ):
+        consumers = [
+            service
+            for name in ("stt", "vlm")
+            if (service := self._ctx.service(name)) is not None
+        ]
+        while any(service.processing(sid) for service in consumers):
             time.sleep(0.05)
         notes = self._ctx.service("notes")
         if notes is not None:
@@ -2490,7 +2492,32 @@ class InputPlugin(Plugin):
         directory = self._ctx.data_dir / "sessions" / sid
         for name in ("transcript.jsonl", "visual.jsonl", "coverage.json"):
             (directory / name).unlink(missing_ok=True)
-        return self._act_start_processing(payload)
+        shutil.rmtree(directory / "vlm", ignore_errors=True)
+        path = self._session_meta_path(sid)
+        if path.exists():
+            try:
+                record = json.loads(path.read_text("utf-8"))
+            except (OSError, ValueError):
+                record = {"session_id": sid, "meta": {}}
+            record["ended_at"] = 0
+            meta = record.get("meta") or {}
+            for key in ("processing_cancelled", "input_failed"):
+                meta.pop(key, None)
+            record["meta"] = meta
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(record, ensure_ascii=False, indent=2), "utf-8"
+            )
+            temporary.replace(path)
+        self._ctx.streams.clear_results(sid)
+        for name in ("stt", "vlm"):
+            service = self._ctx.service(name)
+            if service is not None:
+                service.reset(sid)
+        with self._class_lock:
+            self._courses[sid] = _Course(cls=dict(cls))
+        self._jobs_changed("input.results.deleted")
+        return {"ok": True, "message": "已删除板书"}
 
     def _act_start_processing(self, payload: dict[str, Any]) -> dict[str, Any]:
         resume = False
@@ -2647,7 +2674,7 @@ class InputPlugin(Plugin):
         job = self._job_from_payload(payload)
         if job is None:
             return {"ok": False, "message": "任务记录已清理"}
-        return self._act_reprocess({"id": job.id})
+        return self._act_start_processing({"id": job.id})
 
     def _act_queue_clear(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._class_lock:
