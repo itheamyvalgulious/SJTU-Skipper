@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from starlette.background import BackgroundTask
 
 from config import SHUTDOWN_TIMEOUT
 from core.services import ServiceNotFound
+from core.navigation import Navigation, navigation_scope
 from core.runtime import Runtime
 from ui.auth import COOKIE_NAME as AUTH_COOKIE, install as install_auth
 
@@ -55,17 +57,23 @@ class WebSocketMessageType(StrEnum):
     NOTIFY = "notify"
 
 
+class NavigationRequest(BaseModel):
+    page: str = ""
+    class_id: str = Field(default="", alias="class")
+    doc: str = ""
+    pages: list[str] = Field(default_factory=list)
+
+
 class ActionRequest(BaseModel):
     action: str
     values: dict[str, Any] = Field(default_factory=dict)
     page_id: str | None = None
     item_id: str | None = None
+    navigation: NavigationRequest
 
 
-class NavigationRequest(BaseModel):
-    page: str = ""
-    class_id: str = Field(default="", alias="class")
-    doc: str = ""
+class PageRequest(BaseModel):
+    navigation: NavigationRequest
 
 
 class _Broadcaster:
@@ -222,91 +230,87 @@ def create_app(runtime: Runtime) -> FastAPI:
             "plugin_order": runtime.plugins.order,
         }
 
-    def navigation_state() -> dict[str, Any]:
-        with runtime.hub.class_selection_snapshot():
-            state = runtime.ui.state()
-            page = state.get("active_page") or ""
-            input_service = runtime.services.get("input")
-            navigation = {
-                "page": page,
-                "class": (
-                    input_service.selected_class()
-                    if input_service is not None
-                    else runtime.hub.selected_class_id
-                ),
-            }
-            reader = runtime.services.get("reader")
-            if page.startswith("reader:") and reader is not None:
-                navigation["doc"] = reader.navigation(page)
-            state["navigation"] = navigation
-            return state
-
-    @app.get("/api/ui/state")
-    def ui_state() -> JSONResponse:
-        return JSONResponse(navigation_state())
-
-    @app.post("/api/ui/navigate")
-    def navigate(request: NavigationRequest) -> JSONResponse:
-        page = request.page
-        try:
-            notes = page.startswith("reader:notes:") and page.endswith(
-                (":notes", ":chunk-notes")
-            )
-            logs = page.startswith("notes:logs:")
-            sid = ""
-            if notes:
-                kind = page.rsplit(":", 1)[1]
-                sid = page.removeprefix("reader:notes:").removesuffix(f":{kind}")
-            elif logs:
-                sid = page.removeprefix("notes:logs:")
-            if notes or logs:
-                if not sid or Path(sid).name != sid or sid in {".", ".."}:
-                    raise ValueError("Invalid session ID")
-                if not (runtime.data_dir / "sessions" / sid).is_dir():
-                    raise KeyError("Session not found")
-
-            class_id = (
-                request.class_id if "class_id" in request.model_fields_set else sid
-            )
-            if class_id:
-                runtime.services.require("input").open_class(class_id)
-            elif "class_id" in request.model_fields_set:
-                input_service = runtime.services.get("input")
-                if input_service is not None:
-                    input_service.clear_class()
+    def prepare_page(page: str, doc: str = "") -> str:
+        notes = page.startswith("reader:notes:") and page.endswith(
+            (":notes", ":chunk-notes")
+        )
+        logs = page.startswith("notes:logs:")
+        sid = ""
+        if notes:
+            kind = page.rsplit(":", 1)[1]
+            sid = page.removeprefix("reader:notes:").removesuffix(f":{kind}")
+        elif logs:
+            sid = page.removeprefix("notes:logs:")
+        if notes or logs:
+            if not sid or Path(sid).name != sid or sid in {".", ".."}:
+                raise ValueError("Invalid session ID")
+            if not (runtime.data_dir / "sessions" / sid).is_dir():
+                raise KeyError("Session not found")
+            if not runtime.ui.has_page(page):
+                service = runtime.services.require("notes")
+                if logs:
+                    service.open_logs(sid)
+                elif kind == "chunk-notes":
+                    result = service.open_chunk_notes(sid, doc or "knowledge")
+                    if not result.get("ok"):
+                        raise KeyError(result.get("message", "Cannot open chunk notes"))
                 else:
-                    runtime.hub.select_class("")
+                    service.open_notes(sid, doc or "knowledge")
+        if page and not runtime.ui.has_page(page):
+            raise KeyError("Page not found")
+        return sid
 
-            if not page:
-                runtime.ui.show_home()
-            else:
-                if notes:
-                    if kind == "chunk-notes":
-                        result = runtime.services.require("notes").open_chunk_notes(
-                            sid, request.doc or "knowledge"
-                        )
-                        if not result.get("ok"):
-                            raise KeyError(
-                                result.get("message", "Cannot open chunk notes")
-                            )
-                    else:
-                        runtime.services.require("notes").open_notes(
-                            sid, request.doc or "knowledge"
-                        )
-                elif logs:
-                    runtime.services.require("notes").open_logs(sid)
-                if request.doc:
-                    runtime.services.require("reader").select_document(
-                        page, request.doc
-                    )
-                runtime.ui.open_page(page)
+    def resolve_navigation(request: NavigationRequest) -> Navigation:
+        navigation = Navigation(
+            page=request.page,
+            class_id=request.class_id,
+            doc=request.doc,
+            pages=list(dict.fromkeys(request.pages)),
+        )
+        with navigation_scope(navigation):
+            for page in navigation.pages.copy():
+                if page != request.page:
+                    prepare_page(page)
+            sid = prepare_page(request.page, request.doc)
+            navigation.class_id = sid or request.class_id
+            if navigation.class_id:
+                navigation.class_meta = runtime.services.require("input").resolve_class(
+                    navigation.class_id
+                )
+            navigation.page = request.page
+            navigation.doc = request.doc if request.page.startswith("reader:") else ""
+            if request.page.startswith("reader:"):
+                navigation.doc = runtime.services.require("reader").navigation(
+                    request.page
+                )
+            if navigation.page and navigation.page not in navigation.pages:
+                navigation.pages.append(navigation.page)
+        return navigation
+
+    def request_navigation(request: NavigationRequest) -> Navigation:
+        try:
+            return resolve_navigation(request)
         except (KeyError, ServiceNotFound) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(
-            {"ok": True, "navigation": navigation_state()["navigation"]}
-        )
+
+    @app.get("/api/ui/state")
+    def ui_state(request: Request) -> JSONResponse:
+        params = dict(request.query_params)
+        try:
+            params["pages"] = json.loads(params.get("pages", "[]"))
+            navigation_request = NavigationRequest.model_validate(params)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        navigation = request_navigation(navigation_request)
+        with navigation_scope(navigation):
+            return JSONResponse(runtime.ui.state())
+
+    @app.post("/api/ui/navigate")
+    def navigate(request: NavigationRequest) -> JSONResponse:
+        navigation = request_navigation(request)
+        return JSONResponse({"ok": True, "navigation": navigation.to_dict()})
 
     @app.get("/api/runtime")
     def runtime_status() -> JSONResponse:
@@ -314,35 +318,43 @@ def create_app(runtime: Runtime) -> FastAPI:
 
     @app.post("/api/ui/action")
     def ui_action(request: ActionRequest) -> JSONResponse:
-        result = runtime.ui.dispatch_action(
-            request.action,
-            request.values,
-            page_id=request.page_id,
-            item_id=request.item_id,
-        )
-        return JSONResponse(
-            {
-                "ok": result.ok,
-                "message": result.message,
-                "refresh": result.refresh,
-                "open_page": result.open_page,
-                "open_url": result.open_url,
-                "data": result.data,
-            }
-        )
+        navigation = request_navigation(request.navigation)
+        with navigation_scope(navigation):
+            result = runtime.ui.dispatch_action(
+                request.action,
+                request.values,
+                page_id=request.page_id,
+                item_id=request.item_id,
+            )
+            target = NavigationRequest.model_validate(navigation.to_dict())
+            navigation = request_navigation(target)
+            return JSONResponse(
+                {
+                    "ok": result.ok,
+                    "message": result.message,
+                    "refresh": result.refresh,
+                    "open_page": result.open_page,
+                    "open_url": result.open_url,
+                    "data": result.data,
+                    "navigation": navigation.to_dict(),
+                }
+            )
 
     @app.post("/api/ui/pages/{page_id}/open")
-    def open_page(page_id: str) -> JSONResponse:
-        try:
-            runtime.ui.open_page(page_id)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="page not found")
-        return JSONResponse({"ok": True, "active_page": page_id})
+    def open_page(page_id: str, request: PageRequest) -> JSONResponse:
+        target = request.navigation.model_copy(update={"page": page_id})
+        navigation = request_navigation(target)
+        return JSONResponse({"ok": True, "navigation": navigation.to_dict()})
 
     @app.post("/api/ui/pages/{page_id}/close")
-    def close_page(page_id: str) -> JSONResponse:
-        runtime.ui.close_page(page_id)
-        return JSONResponse({"ok": True})
+    def close_page(page_id: str, request: PageRequest) -> JSONResponse:
+        navigation = request_navigation(request.navigation)
+        with navigation_scope(navigation):
+            runtime.ui.close_page(page_id)
+        navigation = request_navigation(
+            NavigationRequest.model_validate(navigation.to_dict())
+        )
+        return JSONResponse({"ok": True, "navigation": navigation.to_dict()})
 
     @app.get("/api/artifacts/{session_id}/{subpath:path}")
     def artifact(session_id: str, subpath: str, request: Request) -> FileResponse:

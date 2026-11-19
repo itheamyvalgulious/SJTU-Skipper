@@ -27,6 +27,7 @@ from core.plugin import PluginContext
 from core.services import ServiceRegistry
 from core.streams import StreamHub
 from core.ui import UIManager
+from core.navigation import current_navigation
 from plugins.input.ffmpeg import (
     build_audio_cmd,
     build_reconnect_args,
@@ -186,10 +187,19 @@ def _make_context(data_dir: Any = None) -> PluginContext:
     )
 
 
+def _course(plugin):
+    from plugins.input.plugin import _Course
+
+    navigation = current_navigation()
+    return plugin._courses.setdefault(
+        navigation.class_id, _Course(cls=dict(navigation.class_meta))
+    )
+
+
 def _start_recording_job(ctx, plugin, monkeypatch, *, videos=("v1", "v2")):
     """Start a queued recording without external media processes."""
     started = Queue()
-    monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+    monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
     monkeypatch.setattr(plugin, "_probe_job_durations", lambda job: None)
     monkeypatch.setattr(
         plugin._catalog,
@@ -797,7 +807,8 @@ class TestInputPluginUI:
             job = _Job(id="course", cls=cls, state=JobState.RUNNING)
             plugin._active_job = job
             plugin._jobs[job.id] = job
-            plugin._current_class = cls
+            current_navigation().class_id = cls["id"]
+            current_navigation().class_meta = cls
             for video, status, received in [
                 ("v2", DownloadState.PROGRESS, 25),
                 ("v1", DownloadState.DONE, 100),
@@ -1337,7 +1348,7 @@ class TestClassPlayer:
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
-        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
 
         result = self._open_class(ctx, plugin)
         assert result.ok
@@ -1380,7 +1391,7 @@ class TestClassPlayer:
         resolve = mock.Mock()
         monkeypatch.setattr(plugin, "_resolve_class_streams", resolve)
         try:
-            assert ctx.streams.selected_class_id == ""
+            assert current_navigation().class_id == ""
             assert ctx.ui.state()["context"] is None
             result = ctx.ui.dispatch_action(
                 "input.open_class",
@@ -1393,15 +1404,23 @@ class TestClassPlayer:
                 },
             )
             assert result.ok
-            assert plugin._class_finished
-            assert plugin._class_session_id == ctx.streams.selected_class_id == class_id
+            assert _course(plugin).finished
+            assert _course(plugin).session_id == current_navigation().class_id == class_id
             ctx.streams.start_session("other-class", meta={"course_name": "后台课程"})
-            assert ctx.streams.selected_class_id == class_id
-            assert ctx.service("input").selected_class() == class_id
+            assert current_navigation().class_id == class_id
+            assert ctx.service("input").resolve_class(class_id)["name"] == "高等数学"
             assert ctx.ui.state()["context"]["title"] == "高等数学"
             assert plugin._render_session()[0]["text"].startswith("### 高等数学")
-            assert plugin._class_session_meta == meta
+            assert _course(plugin).session_meta == meta
             resolve.assert_not_called()
+            from core.navigation import Navigation, navigation_scope
+
+            with navigation_scope(Navigation(class_id="other-browser")) as other:
+                resolved = ctx.service("input").resolve_class(class_id)
+                assert resolved["id"] == class_id
+                assert other.class_id == "other-browser"
+                assert other.class_meta == {}
+            assert current_navigation().class_id == class_id
         finally:
             plugin.teardown()
 
@@ -1411,7 +1430,7 @@ class TestClassPlayer:
         ctx = _make_context(tmp_path)
         plugin = InputPlugin()
         plugin.setup(ctx)
-        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
 
         directory = tmp_path / "sessions" / "1-20261105-0800"
         directory.mkdir(parents=True, exist_ok=True)
@@ -1421,17 +1440,15 @@ class TestClassPlayer:
         ctx.services.register("notes", SimpleNamespace(reset=reset))
         self._open_class(ctx, plugin, videos=("v1", "v2"))
         monkeypatch.setattr(plugin, "_resolve_job_streams", lambda job: None)
-        plugin._class_index = 1
-        plugin._class_streams = {StreamView.MAIN: "https://example.com/v2.mp4"}
-        plugin._streams_loading = False
-        plugin._class_finished = True
+        _course(plugin).streams = {StreamView.MAIN: "https://example.com/v2.mp4"}
+        _course(plugin).streams_loading = False
+        _course(plugin).finished = True
 
         result = ctx.ui.dispatch_action("input.reprocess", {})
         assert result.ok
-        assert plugin._class_index == 0
-        assert plugin._class_streams == {}, "stale streams would re-download part 2"
-        assert plugin._streams_loading is True, "part 1 streams must be re-resolved"
-        assert plugin._class_finished is False
+        assert plugin._jobs["1-20261105-0800"].input_part_index == 0
+        assert plugin._jobs["1-20261105-0800"].streams == {}
+        assert plugin._jobs["1-20261105-0800"].streams_loading is True
         reset.assert_called_once_with("1-20261105-0800")
         assert not any(
             (directory / name).exists()
@@ -1444,13 +1461,13 @@ class TestClassPlayer:
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
-        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
         self._open_class(ctx, plugin, kind=SourceKind.LIVE)
-        plugin._class_streams = {
+        _course(plugin).streams = {
             StreamView.MAIN: "https://example.com/main.m3u8",
             StreamView.SCREEN: "https://example.com/screen.m3u8",
         }
-        plugin._streams_loading = False
+        _course(plugin).streams_loading = False
 
         ctx.ui.open_page("input:session")
         blocks = ctx.ui.state()["page_content"]["input:session"]
@@ -1464,12 +1481,15 @@ class TestClassPlayer:
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
-        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
         self._open_class(ctx, plugin, kind=SourceKind.RECORDING)
-        plugin._class_streams = {StreamView.MAIN: "https://example.com/main.mp4"}
-        plugin._streams_loading = False
+        _course(plugin).streams = {StreamView.MAIN: "https://example.com/main.mp4"}
+        _course(plugin).streams_loading = False
         plugin._processing = True
-        plugin._total_seconds = 3600.0
+        _course(plugin).session_meta["total_media_seconds"] = 3600.0
+        _course(plugin).session_id = current_navigation().class_id
+        session = ctx.streams.start_session(current_navigation().class_id)
+        session.meta["total_media_seconds"] = 3600.0
 
         ctx.ui.open_page("input:session")
         blocks = ctx.ui.state()["page_content"]["input:session"]
@@ -1497,13 +1517,13 @@ class TestClassPlayer:
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
-        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
         self._open_class(ctx, plugin, kind=kind)
         ctx.streams.register_consumer(
             "vlm", MediaKind.VIDEO, gate_limit_fn=lambda: 75.0
         )
-        plugin._class_streams = {StreamView.MAIN: "https://example.com/main.m3u8"}
-        plugin._streams_loading = False
+        _course(plugin).streams = {StreamView.MAIN: "https://example.com/main.m3u8"}
+        _course(plugin).streams_loading = False
         started: list[SourceSpec] = []
         monkeypatch.setattr(plugin, "_start_source", lambda spec: started.append(spec))
 
@@ -1525,10 +1545,15 @@ class TestClassPlayer:
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
-        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
         self._open_class(ctx, plugin)
-        plugin._class_streams = {StreamView.MAIN: "u"}
+        _course(plugin).streams = {StreamView.MAIN: "u"}
         plugin._processing = True
+        from plugins.input.plugin import _Job
+
+        job = _Job(current_navigation().class_id, dict(current_navigation().class_meta), state=JobState.RUNNING)
+        plugin._jobs[job.id] = job
+        plugin._active_job = job
         calls: list[str] = []
         monkeypatch.setattr(plugin._sources, "pause", lambda: calls.append("pause"))
         monkeypatch.setattr(plugin._sources, "stop", lambda: calls.append("stop"))
@@ -1544,10 +1569,15 @@ class TestClassPlayer:
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
-        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
         self._open_class(ctx, plugin, kind=SourceKind.LIVE)
-        plugin._class_streams = {StreamView.MAIN: "u"}
+        _course(plugin).streams = {StreamView.MAIN: "u"}
         plugin._processing = True
+        from plugins.input.plugin import _Job
+
+        job = _Job(current_navigation().class_id, dict(current_navigation().class_meta), state=JobState.RUNNING)
+        plugin._jobs[job.id] = job
+        plugin._active_job = job
         calls: list[str] = []
         monkeypatch.setattr(plugin._sources, "pause", lambda: calls.append("pause"))
         monkeypatch.setattr(plugin._sources, "stop", lambda: calls.append("stop"))
@@ -1571,9 +1601,8 @@ class TestClassPlayer:
 
             plugin._on_class_ended()
             second = started.get(timeout=5.0)
-            assert plugin._class_index == 1
-            assert plugin._want_processing is True
             assert job.input_part_index == 1
+            assert job.state is JobState.RUNNING
             assert plugin._active_job is job
             assert second.course["video_id"] == "v2"
             assert second.continue_session is True
@@ -1600,7 +1629,7 @@ class TestClassPlayer:
             monkeypatch.setattr(plugin, "_wait_for_consumers", wait)
 
             plugin._on_class_ended()
-            assert plugin._class_finished is True
+            assert _course(plugin).finished is True
             assert plugin._processing is False
             assert session.ended_at is not None
             assert session.end_reason == "playback finished"
@@ -1641,27 +1670,32 @@ class TestClassPlayer:
         plugin.setup(ctx)
         self._open_class(ctx, plugin)
         plugin._processing = True
+        from plugins.input.plugin import _Job
+
+        job = _Job(current_navigation().class_id, dict(current_navigation().class_meta), state=JobState.RUNNING)
+        plugin._jobs[job.id] = job
+        plugin._active_job = job
         monkeypatch.setattr(plugin._sources, "stop", lambda: None)
 
         result = ctx.ui.dispatch_action("input.stop", {})
         assert result.ok
         assert plugin._processing is False
-        assert plugin._class_finished is True
+        assert job.state is JobState.CANCELED
 
         plugin.teardown()
 
-    def test_reselecting_finished_class_allows_replay(self, monkeypatch):
+    def test_reselecting_finished_class_preserves_record(self, monkeypatch):
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
-        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
         self._open_class(ctx, plugin)
-        plugin._class_finished = True
+        _course(plugin).finished = True
 
         result = self._open_class(ctx, plugin)
         assert result.ok
-        assert plugin._class_finished is False
-        assert plugin._class_index == 0
+        assert _course(plugin).finished is True
+        assert plugin._active_job is None
 
         plugin.teardown()
 
@@ -1676,7 +1710,7 @@ class TestClassPlayer:
         )
 
         plugin._on_class_ended()
-        assert plugin._class_index == 0
+        assert plugin._active_job is None
         assert advanced == []
 
         plugin.teardown()
@@ -1802,7 +1836,7 @@ class TestProcessingQueue:
         ctx = _make_context()
         plugin = InputPlugin()
         plugin.setup(ctx)
-        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda: None)
+        monkeypatch.setattr(plugin, "_resolve_class_streams", lambda class_id: None)
         started: list[SourceSpec] = []
         monkeypatch.setattr(plugin, "_start_source", lambda spec: started.append(spec))
         return ctx, plugin, started
@@ -1824,8 +1858,8 @@ class TestProcessingQueue:
     def test_switching_class_keeps_the_running_job(self, monkeypatch):
         ctx, plugin, started = self._setup(monkeypatch)
         self._open(ctx, plugin, "class:a", "高等数学")
-        plugin._class_streams = {StreamView.MAIN: "https://example.com/a.mp4"}
-        plugin._streams_loading = False
+        _course(plugin).streams = {StreamView.MAIN: "https://example.com/a.mp4"}
+        _course(plugin).streams_loading = False
         ctx.ui.dispatch_action("input.start_processing", {})
         assert plugin._active_job is not None
         assert plugin._active_job.id == "class:a"
@@ -1841,13 +1875,13 @@ class TestProcessingQueue:
     def test_second_class_waits_in_queue_then_starts(self, monkeypatch):
         ctx, plugin, started = self._setup(monkeypatch)
         self._open(ctx, plugin, "class:a", "高等数学")
-        plugin._class_streams = {StreamView.MAIN: "https://example.com/a.mp4"}
-        plugin._streams_loading = False
+        _course(plugin).streams = {StreamView.MAIN: "https://example.com/a.mp4"}
+        _course(plugin).streams_loading = False
         ctx.ui.dispatch_action("input.start_processing", {})
 
         self._open(ctx, plugin, "class:b", "线性代数")
-        plugin._class_streams = {StreamView.MAIN: "https://example.com/b.mp4"}
-        plugin._streams_loading = False
+        _course(plugin).streams = {StreamView.MAIN: "https://example.com/b.mp4"}
+        _course(plugin).streams_loading = False
         result = ctx.ui.dispatch_action("input.start_processing", {})
         assert result.ok
         assert plugin._queue == ["class:b"]
@@ -1882,7 +1916,8 @@ class TestProcessingQueue:
             plugin._processing = True
             plugin._enqueue_job_locked(last)
             plugin._enqueue_job_locked(first)
-            plugin._current_class = dict(plugin._jobs[selected].cls, id=selected)
+            current_navigation().class_id = selected
+            current_navigation().class_meta = dict(plugin._jobs[selected].cls, id=selected)
 
             html = plugin._render_queue_item()[0]["html"]
             rows = BeautifulSoup(html, "html.parser").select("li")
@@ -1937,8 +1972,8 @@ class TestProcessingQueue:
             }
         ]
         self._open(ctx, plugin, "class:a", "高等数学")
-        plugin._class_streams = {StreamView.MAIN: "https://example.com/a.mp4"}
-        plugin._streams_loading = False
+        _course(plugin).streams = {StreamView.MAIN: "https://example.com/a.mp4"}
+        _course(plugin).streams_loading = False
         ctx.ui.dispatch_action("input.start_processing", {})
         plugin._apply_tree_state()
         child = plugin._tree["nodes"][0]["children"][0]
@@ -1961,8 +1996,8 @@ class TestProcessingQueue:
             )
             assert first.next_source.url == "https://example.com/v2.mp4"
             self._open(ctx, plugin, "class:b", "线性代数")
-            plugin._class_streams = {StreamView.MAIN: "https://example.com/b.mp4"}
-            plugin._streams_loading = False
+            _course(plugin).streams = {StreamView.MAIN: "https://example.com/b.mp4"}
+            _course(plugin).streams_loading = False
             assert ctx.ui.dispatch_action("input.start_processing", {}).ok
             selected = plugin._jobs["class:b"]
             assert selected.state is JobState.QUEUED
@@ -1978,8 +2013,7 @@ class TestProcessingQueue:
             assert job.part_durations == {"v1": 3039.0, "v2": 3287.0}
             assert job.total_seconds == 6326.0
             assert selected.part_durations == {}
-            assert selected.total_seconds == plugin._total_seconds == 0.0
-            assert plugin._part_durations == {}
+            assert selected.total_seconds == 0.0
 
             wait = mock.Mock(side_effect=AssertionError("drained between parts"))
             monkeypatch.setattr(plugin, "_wait_for_consumers", wait)
@@ -1992,9 +2026,9 @@ class TestProcessingQueue:
             assert plugin._active_job is job
             assert plugin._queue == [selected.id]
             assert plugin._current_class["id"] == selected.id
-            assert plugin._class_index == selected.input_part_index == 0
+            assert selected.input_part_index == 0
             assert (
-                plugin._class_streams
+                _course(plugin).streams
                 == selected.streams
                 == {
                     StreamView.MAIN: "https://example.com/b.mp4",
@@ -2264,7 +2298,6 @@ def test_multipart_progress_uses_full_duration(tmp_path, monkeypatch) -> None:
         )
         assert ctx.events.flush()
         assert job.part_durations == {"v1": 3039.0}
-        assert plugin._total_seconds == 0.0
         assert job.total_seconds == 0.0
         blocks = plugin._render_session()
         progress = next(b for b in blocks if b["type"] == BlockType.PROGRESS)
@@ -2278,7 +2311,6 @@ def test_multipart_progress_uses_full_duration(tmp_path, monkeypatch) -> None:
             session_id=session.session_id,
         )
         assert ctx.events.flush()
-        assert plugin._total_seconds == 6326.0
         assert job.total_seconds == 6326.0
         ctx.events.emit(
             "input.download",
@@ -2334,7 +2366,8 @@ def test_early_duration_and_completed_progress(tmp_path, monkeypatch):
     )
     plugin._active_job = job
     plugin._jobs[job.id] = job
-    plugin._current_class = cls
+    current_navigation().class_id = cls["id"]
+    current_navigation().class_meta = cls
     for name in ("stt", "vlm"):
         ctx.services.register(name, SimpleNamespace(enabled=lambda: True))
     try:
@@ -2380,8 +2413,7 @@ def test_part_transition_does_not_drain_consumers(tmp_path, monkeypatch) -> None
 
         plugin._on_class_ended()
         second = started.get(timeout=5.0)
-        assert plugin._class_index == 1
-        assert plugin._class_streams == {StreamView.MAIN: "https://example.com/v2.mp4"}
+        assert job.streams == {StreamView.MAIN: "https://example.com/v2.mp4"}
         assert job.input_part_index == 1
         assert plugin._active_job is job
         assert second.url == first.next_source.url

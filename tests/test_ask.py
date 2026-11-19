@@ -414,7 +414,8 @@ def test_live_qa_messages_keep_one_owning_run(tmp_path):
         runtime.stop()
 
 
-def test_course_context_uses_only_selection():
+def test_course_context_uses_only_request_navigation(navigation):
+    from core.navigation import Navigation, navigation_scope
     from core.streams import StreamHub
 
     hub = StreamHub()
@@ -422,7 +423,18 @@ def test_course_context_uses_only_selection():
     plugin = AskPlugin()
     plugin.ctx = SimpleNamespace(streams=hub)
     assert plugin._course_name() == "未知课程"
-    hub.select_class("selected", {"course_name": "Selected course"})
+    navigation.class_id = "selected"
+    navigation.class_meta = {"course_name": "Selected course"}
     assert plugin._course_name() == "Selected course"
-    hub.select_class("unprocessed")
-    assert plugin._course_name() == "未知课程"
+    with navigation_scope(Navigation(class_id="unprocessed")):
+        assert plugin._course_name() == "未知课程"
+    assert plugin._course_name() == "Selected course"
+
+
+def test_selection_character_limit():
+    from plugins.ask.plugin import _truncate_chars
+
+    text = "English 中文𠀀 $x^2$!"
+    assert _truncate_chars(text, len(text)) == text
+    assert _truncate_chars(text, 11) == text[:11] + "\n……（选中内容过长，已截断）"
+    assert _truncate_chars(text, 0) == ""

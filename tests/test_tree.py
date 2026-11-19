@@ -88,6 +88,7 @@ def test_build_tree_course_and_class_nodes() -> None:
     maths = nodes[0]
     assert len(maths["children"]) == 1
     child = maths["children"][0]
+    assert not child.get("badge")
     value = child["action"]["value"]
     assert value["kind"] is SourceKind.RECORDING
     assert value["videos"] == ["a", "b"]
@@ -116,6 +117,8 @@ def test_build_tree_live_session_is_marked() -> None:
     expanded = build_tree(COURSES, recordings, lives, now=now, expanded={"1"})
     assert expanded[0]["expanded"] is True
     live_child = next(child for child in maths["children"] if child.get("live"))
+    assert live_child["badge"] == LiveState.LIVE
+    assert LiveState.LIVE not in live_child["subtitle"]
     assert live_child["action"]["value"]["kind"] is SourceKind.LIVE
     assert live_child["action"]["value"]["live_id"] == "L1"
 

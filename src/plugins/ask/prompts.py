@@ -33,15 +33,15 @@ ASK_PROMPT_TEMPLATE = """## 课程
 
 ## 选中位置前后的笔记内容
 
-【前文（约 {before_words} 词）】
+【前文（最多 {before_chars} 个字符）】
 
 {before}
 
-【后文（约 {after_words} 词）】
+【后文（最多 {after_chars} 个字符）】
 
 {after}
 
-## 此前的问答记录（同一份笔记，约 {history_words} 词上限）
+## 此前的问答记录（同一份笔记，问答正文共最多 {history_chars} 个字符）
 
 {history}
 

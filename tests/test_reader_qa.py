@@ -174,7 +174,7 @@ def test_qa_context_budgets_are_independent(tmp_path: Path) -> None:
             str(path), question="第二个问题", selection="第三段内容"
         )
         context = reader.qa_context(
-            str(path), second["id"], before_words=100, after_words=20, history_words=100
+            str(path), second["id"], before_chars=100, after_chars=20, history_chars=100
         )
         assert context["question"] == "第二个问题"
         assert "第一段内容" in context["before"]
@@ -184,16 +184,17 @@ def test_qa_context_budgets_are_independent(tmp_path: Path) -> None:
         ]
 
         limited = reader.qa_context(
-            str(path), second["id"], before_words=3, after_words=3, history_words=1
+            str(path), second["id"], before_chars=3, after_chars=3, history_chars=1
         )
-        assert qa.word_count(limited["before"]) <= 3
-        assert limited["after"] == ""
+        assert len(limited["before"]) <= 3
+        assert len(limited["after"]) <= 3
+        assert limited["history"] == [{"question": "第", "answer": ""}]
 
         third = reader.qa_begin(
             str(path), question="第三个问题", selection="第三段内容"
         )
         context = reader.qa_context(
-            str(path), third["id"], history_words=1000, before_words=10, after_words=10
+            str(path), third["id"], history_chars=1000, before_chars=10, after_chars=10
         )
         assert [entry["question"] for entry in context["history"]] == [
             "第一个问题",
@@ -245,7 +246,7 @@ def test_qa_block_persists_intensity_and_fold(tmp_path: Path) -> None:
             {"path": str(path), "id": created["id"], "collapsed": False},
         )
         assert result.ok
-        assert result.refresh is False
+        assert result.refresh is True
         assert '"collapsed": false' in path.read_text("utf-8")
         block = next(
             b for b in _tabs(runtime, page_id)[0]["blocks"] if b["type"] == BlockType.QA
@@ -286,3 +287,29 @@ def test_parse_and_remove_roundtrip() -> None:
     assert blocks[0].answer == "回答"
     assert qa.remove_block(text, "qa-3").strip() == "# t\n\npara"
     assert qa.remove_block(text, "nope") is None
+
+
+def test_unicode_context_limits(tmp_path):
+    runtime = _make_runtime(tmp_path)
+    try:
+        path = tmp_path / "note.md"
+        before = "LongEnglishWord 中文，𠀀 $x^2$\n"
+        after = "\nTailEnglishWord 空格 𠀀!"
+        first = qa.build_block("first", "", question="问题𠀀", answer="Answer $x$，好")
+        current = qa.build_block("current", "", question="Next?")
+        path.write_text(first + before + current + after, encoding="utf-8")
+        _open(runtime, path)
+        reader = runtime.services.require("reader")
+        context = reader.qa_context(
+            path, "current", before_chars=9, after_chars=6, history_chars=7
+        )
+        assert context["before"] == before[-9:]
+        assert context["after"] == ("\n" + after)[:6]
+        assert context["history"] == [{"question": "问题𠀀", "answer": "Answ"}]
+        empty = reader.qa_context(
+            path, "current", before_chars=0, after_chars=0, history_chars=0
+        )
+        assert empty["before"] == empty["after"] == ""
+        assert empty["history"] == []
+    finally:
+        runtime.stop()

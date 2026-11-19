@@ -20,6 +20,7 @@ from typing import Any, Mapping
 from core.plugin import Plugin, PluginContext
 from core.file_access import path_lock, publication_lock
 from contextlib import ExitStack
+from core.navigation import current_navigation
 from core.ui import BlockType, render_markdown
 
 from core import note_document as qa
@@ -33,7 +34,7 @@ COLLAPSE_QA_ACTION = "reader.qa_collapse"
 
 
 class ReaderService:
-    """Narrow public ``reader`` service (8 methods).
+    """Public reader operations for documents and request navigation.
 
     Notes plugins and the Q&A plugin talk to the reader only through this
     object, never through the plugin instance.
@@ -130,29 +131,28 @@ class ReaderService:
         path: str | Path,
         qa_id: str,
         *,
-        before_words: int = 2000,
-        after_words: int = 2000,
-        history_words: int = 1000,
+        before_chars: int = 2000,
+        after_chars: int = 2000,
+        history_chars: int = 1000,
     ) -> dict[str, Any]:
         return self._plugin.qa_context(
             path,
             qa_id,
-            before_words=before_words,
-            after_words=after_words,
-            history_words=history_words,
+            before_chars=before_chars,
+            after_chars=after_chars,
+            history_chars=history_chars,
         )
 
-    def navigation(self, page_id):
+    def navigation(self, page_id: str) -> str:
+        navigation = current_navigation()
         with self._plugin._lock:
-            return str(self._plugin._states.get(page_id, {}).get("active", ""))
-
-    def select_document(self, page_id, key):
-        with self._plugin._lock:
-            state = self._plugin._states[page_id]
-            if key not in {doc["key"] for doc in state["docs"]}:
-                raise KeyError("Unknown note document")
-            state["active"] = key
-            state["sequence"] = int(state.get("sequence", 0)) + 1
+            docs = self._plugin._states.get(page_id, {}).get("docs", [])
+            keys = [doc["key"] for doc in docs]
+        requested = navigation.doc if navigation.page == page_id else ""
+        active = requested if requested in keys else keys[0] if keys else ""
+        if navigation.page == page_id:
+            navigation.doc = active
+        return active
 
 
 class ReaderPlugin(Plugin):
@@ -244,12 +244,6 @@ class ReaderPlugin(Plugin):
             state["title"] = str(title or "")
             state["docs"] = cleaned
             state["owner"] = str(owner or "")
-            state["active"] = str(active or "") or (
-                cleaned[0]["key"] if cleaned else ""
-            )
-            # New sequence → new client tab key, so the requested document is
-            # selected on open while later user tab clicks survive refreshes.
-            state["sequence"] = int(state.get("sequence", 0)) + 1
 
         if not self.ctx.ui.has_page(page_id):
             self.ctx.ui.add_page(
@@ -264,6 +258,14 @@ class ReaderPlugin(Plugin):
 
         self.ctx.ui.refresh("reader.show")
         if open_page:
+            navigation = current_navigation()
+            keys = {doc["key"] for doc in cleaned}
+            requested = str(active or "")
+            if not requested and navigation.page == page_id:
+                requested = navigation.doc
+            navigation.doc = (
+                requested if requested in keys else cleaned[0]["key"] if cleaned else ""
+            )
             self.ctx.ui.open_page(page_id)
         return page_id
 
@@ -475,9 +477,9 @@ class ReaderPlugin(Plugin):
         path: str | Path,
         qa_id: str,
         *,
-        before_words: int = 500,
-        after_words: int = 500,
-        history_words: int = 1000,
+        before_chars: int = 500,
+        after_chars: int = 500,
+        history_chars: int = 1000,
     ) -> dict[str, Any]:
 
         resolved = self._known_path(path)
@@ -490,20 +492,22 @@ class ReaderPlugin(Plugin):
         if current is None:
             raise ValueError("未找到这条问答")
 
-        before = qa.tail_words(qa.strip_blocks(text[: current.start]), before_words)
-        after = qa.head_words(qa.strip_blocks(text[current.end :]), after_words)
+        before_text = qa.strip_blocks(text[: current.start])
+        before = before_text[-before_chars:] if before_chars > 0 else ""
+        after = qa.strip_blocks(text[current.end :])[: max(0, after_chars)]
 
         history: list[dict[str, str]] = []
-        used = 0
+        remaining = max(0, history_chars)
         for block in reversed(blocks):
+            if remaining == 0:
+                break
             if block.id == qa_id or block.start >= current.start:
                 continue
-            entry = {"question": block.question, "answer": block.answer}
-            size = qa.word_count(entry["question"]) + qa.word_count(entry["answer"])
-            if history and used + size > history_words:
-                break
-            history.append(entry)
-            used += size
+            question = block.question[:remaining]
+            remaining -= len(question)
+            answer = block.answer[:remaining]
+            remaining -= len(answer)
+            history.append({"question": question, "answer": answer})
         history.reverse()
 
         return {
@@ -568,8 +572,7 @@ class ReaderPlugin(Plugin):
         if not path or not qa_id:
             return {"ok": False, "message": "缺少要折叠的问答"}
         self.qa_set_collapsed(path, qa_id, collapsed)
-        # The browser already toggled the block; never re-render for this.
-        return {"ok": True, "refresh": False}
+        return {"ok": True}
 
     def _known_path(self, path: str | Path) -> Path | None:
         """Only documents the reader is actually displaying may be edited."""
@@ -596,8 +599,10 @@ class ReaderPlugin(Plugin):
         if not docs:
             return [{"type": BlockType.TEXT, "text": "没有可显示的文稿"}]
 
-        active = str(state.get("active") or "")
-        sequence = int(state.get("sequence") or 0)
+        navigation = current_navigation()
+        active = navigation.doc if navigation.page == page_id else ""
+        if active not in {doc["key"] for doc in docs}:
+            active = docs[0]["key"]
 
         tabs: list[dict[str, Any]] = []
         with ExitStack() as stack:
@@ -640,7 +645,7 @@ class ReaderPlugin(Plugin):
         return [
             {
                 "type": BlockType.TABS,
-                "id": f"{page_id}:{sequence}",
+                "id": page_id,
                 "tabs": tabs,
             },
         ]

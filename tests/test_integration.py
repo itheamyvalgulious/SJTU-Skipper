@@ -142,7 +142,10 @@ def test_whole_lecture_notes_rewrites_outline(tmp_path: Path) -> None:
         session = runtime.hub.start_session(
             "whole-lecture", meta={"course": "集成测试"}
         )
-        runtime.hub.select_class(session.session_id, session.meta)
+        from core.navigation import current_navigation
+
+        current_navigation().class_id = session.session_id
+        current_navigation().class_meta = session.meta
         session.transcript.append(
             "留数定理：设 f 在 D 内除有限个孤立奇点外解析……" * 30,
             start=0.0,
@@ -208,7 +211,10 @@ def test_selection_question_runs_a_read_only_agent_and_inserts_the_answer(
         session = runtime.hub.start_session(
             "instant-asking", meta={"course": "集成测试"}
         )
-        runtime.hub.select_class(session.session_id, session.meta)
+        from core.navigation import current_navigation
+
+        current_navigation().class_id = session.session_id
+        current_navigation().class_meta = session.meta
         assert runtime.bus.flush(1.0)
         sid = session.session_id
         knowledge = tmp_path / "sessions" / sid / "notes" / "note_knowledge.md"

@@ -16,6 +16,8 @@ from html import escape as html_escape
 from markdown_it import MarkdownIt
 from mdit_py_plugins.footnote import footnote_plugin
 
+from .navigation import current_navigation
+
 logger = logging.getLogger("lecture_agent.ui")
 
 # Menu bar category order (unknown categories fall between 视图 and 调试).
@@ -315,8 +317,6 @@ class UIManager:
         self._pages: dict[str, _Page] = {}
         self._actions: dict[str, _Action] = {}
         self._commands: dict[str, _Command] = {}
-        self._open_pages: list[str] = []
-        self._active_page: str | None = None
         self._version = 0
         self._last_refresh = 0.0
         self.register_action(
@@ -450,10 +450,11 @@ class UIManager:
     def remove_page(self, id: str) -> None:
         with self._lock:
             self._pages.pop(id, None)
-            if id in self._open_pages:
-                self._open_pages.remove(id)
-            if self._active_page == id:
-                self._active_page = self._open_pages[-1] if self._open_pages else None
+            navigation = current_navigation()
+            if id in navigation.pages:
+                navigation.pages.remove(id)
+            if navigation.page == id:
+                navigation.page = navigation.pages[-1] if navigation.pages else ""
         self.refresh(f"page-removed:{id}")
 
     def has_tab(self, id: str) -> bool:
@@ -490,23 +491,21 @@ class UIManager:
         with self._lock:
             if id not in self._pages:
                 raise KeyError(f"unknown UI page {id!r}")
-            if id not in self._open_pages:
-                self._open_pages.append(id)
-            self._active_page = id
-        self.refresh(f"page-opened:{id}")
+            navigation = current_navigation()
+            if id not in navigation.pages:
+                navigation.pages.append(id)
+            navigation.page = id
 
     def show_home(self) -> None:
-        with self._lock:
-            self._active_page = None
-        self.refresh("page-home")
+        current_navigation().page = ""
 
     def close_page(self, id: str) -> None:
         with self._lock:
-            if id in self._open_pages:
-                self._open_pages.remove(id)
-            if self._active_page == id:
-                self._active_page = self._open_pages[-1] if self._open_pages else None
-        self.refresh(f"page-closed:{id}")
+            navigation = current_navigation()
+            if id in navigation.pages:
+                navigation.pages.remove(id)
+            if navigation.page == id:
+                navigation.page = navigation.pages[-1] if navigation.pages else ""
 
     def register_action(
         self, action_id: str, handler: ActionHandler, *, plugin_id: str = ""
@@ -730,12 +729,6 @@ class UIManager:
                 page.id for page in self._pages.values() if page.plugin_id == plugin_id
             ]:
                 self._pages.pop(page_id, None)
-                if page_id in self._open_pages:
-                    self._open_pages.remove(page_id)
-                if self._active_page == page_id:
-                    self._active_page = (
-                        self._open_pages[-1] if self._open_pages else None
-                    )
             for item_id in [
                 item.id for item in self._items.values() if item.plugin_id == plugin_id
             ]:
@@ -840,8 +833,9 @@ class UIManager:
             tabs = sorted(self._tabs.values(), key=lambda t: (t.order, t.id))
             items = sorted(self._items.values(), key=lambda i: (i.order, i.id))
             pages = sorted(self._pages.values(), key=lambda p: (p.order, p.id))
-            open_pages = list(self._open_pages)
-            active = self._active_page
+            navigation = current_navigation()
+            open_pages = [page for page in navigation.pages if page in self._pages]
+            active = navigation.page if navigation.page in self._pages else ""
             version = self._version
 
         def tab_payload(side: Side) -> list[dict[str, Any]]:
@@ -932,8 +926,8 @@ class UIManager:
                 "pages": {p.id: p.title for p in self._pages.values()},
                 "actions": sorted(self._actions),
                 "commands": sorted(self._commands),
-                "open_pages": list(self._open_pages),
-                "active_page": self._active_page,
+                "open_pages": list(current_navigation().pages),
+                "active_page": current_navigation().page,
             }
 
 

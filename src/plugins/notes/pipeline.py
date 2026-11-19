@@ -24,6 +24,7 @@ from core.agent_types import (
 )
 from core.file_access import publication_lock
 from core.events import Event
+from core.navigation import current_navigation
 from core.streams import StreamKind
 from core.ui import TaskState
 from core.settings_spec import SettingsSpec, SettingType
@@ -122,7 +123,7 @@ class NotesPipeline:
         return self.settings.get(key, default)
 
     def _sid(self, sid=None):
-        sid = self.ctx.streams.selected_class_id if sid is None else sid
+        sid = current_navigation().class_id if sid is None else sid
         return "" if not sid or sid == "boot" else str(sid)
 
     def _directory(self, sid):

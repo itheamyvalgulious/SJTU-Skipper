@@ -18,8 +18,6 @@ import re
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
@@ -687,10 +685,6 @@ class StreamHub:
         self._lock = threading.RLock()
         self._sessions: list[StreamSet] = []
         self._last_emit: dict[tuple[str, StreamKind], float] = {}
-        self._selected_class: dict[str, Any] = {}
-        self._selection_snapshot: ContextVar[dict[str, Any] | None] = ContextVar(
-            "class_selection_snapshot", default=None
-        )
         # (plugin_id, kind) -> callbacks describing one media consumer.
         # Producers ask the hub about cursors/backpressure instead of reaching
         # into the consumer plugins directly (no ``input -> stt/vlm`` imports).
@@ -733,32 +727,6 @@ class StreamHub:
     def current(self) -> StreamSet:
         with self._lock:
             return self._current
-
-    @property
-    def selected_class_id(self) -> str:
-        return str(self.selected_class_meta.get("id") or "")
-
-    @property
-    def selected_class_meta(self) -> dict[str, Any]:
-        snapshot = self._selection_snapshot.get()
-        if snapshot is not None:
-            return dict(snapshot)
-        with self._lock:
-            return dict(self._selected_class)
-
-    @contextmanager
-    def class_selection_snapshot(self):
-        token = self._selection_snapshot.set(self.selected_class_meta)
-        try:
-            yield
-        finally:
-            self._selection_snapshot.reset(token)
-
-    def select_class(
-        self, class_id: str, meta: Mapping[str, Any] | None = None
-    ) -> None:
-        with self._lock:
-            self._selected_class = {**(meta or {}), "id": class_id} if class_id else {}
 
     def start_session(
         self, session_id: str, *, meta: Mapping[str, Any] | None = None

@@ -813,7 +813,9 @@ def test_final_tasks_keep_session_sources_when_selection_changes(tmp_path):
             "lecture-3", meta={"title": "Unrelated selected lecture"}
         )
         third.transcript.append("Do not copy this third lecture", start=0, end=1)
-        env.hub.select_class(third.session_id)
+        from core.navigation import current_navigation
+
+        current_navigation().class_id = third.session_id
         release_writers.set()
         env.wait_until(
             lambda: all(
@@ -1566,7 +1568,7 @@ def test_empty_selection_does_not_create_note_state(tmp_path):
         assert not (tmp_path / "sessions" / "boot").exists()
 
 
-def test_selected_status_does_not_follow_processing(tmp_path):
+def test_selected_status_does_not_follow_processing(tmp_path, navigation):
     writer_started = threading.Event()
     release_writer = threading.Event()
 
@@ -1587,7 +1589,7 @@ def test_selected_status_does_not_follow_processing(tmp_path):
         env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 10, final=True)
         assert env.pipeline.start(session.session_id)
         assert writer_started.wait(8)
-        env.hub.select_class("unprocessed")
+        navigation.class_id = "unprocessed"
         status = env.pipeline.status()
         assert status["session_id"] == "unprocessed"
         assert status["generation_state"] == GenerationState.NOT_STARTED
@@ -1600,7 +1602,7 @@ def test_selected_status_does_not_follow_processing(tmp_path):
             assert not env.pipeline.finalize(target)
             assert not env.pipeline.stop(target)
             assert env.pipeline.status(target)["session_id"] == ""
-        env.hub.select_class("")
+        navigation.class_id = ""
         assert env.pipeline.status()["session_id"] == ""
         assert env.pipeline.source_path() is None
         release_writer.set()
@@ -1611,7 +1613,7 @@ def test_selected_status_does_not_follow_processing(tmp_path):
         )
         source = env.pipeline.source_path(session.session_id).read_text()
         assert "Background source" in source
-        assert env.hub.selected_class_id == ""
+        assert navigation.class_id == ""
 
 
 def test_startup_loads_class_state_without_boot(tmp_path):

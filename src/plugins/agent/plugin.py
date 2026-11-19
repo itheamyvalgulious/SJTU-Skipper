@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 from contextlib import AbstractContextManager
 
 from core.file_access import publication_lock
@@ -23,9 +23,6 @@ from core.agent_types import (
     AgentToolName,
 )
 from core.plugin import Plugin, PluginContext
-from core.settings_spec import SettingsSpec, SettingType
-
-from .prompts import DEFAULT_SYSTEM_PROMPT
 from .session import AgentSession
 from core.workspace import FileWorkspace
 
@@ -35,24 +32,12 @@ _FILE_TOOLS = tuple(AgentToolName)
 class AgentService:
     """Keep UI metadata while the SDK owns conversations and tools."""
 
-    def __init__(
-        self,
-        ctx: PluginContext,
-        default_system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        settings_getter: Callable[[str, Any], Any] | None = None,
-    ) -> None:
+    def __init__(self, ctx: PluginContext) -> None:
         self._ctx = ctx
         self._runtime = ctx.require("llm")
-        self._default_system_prompt = default_system_prompt
-        self._settings_getter = settings_getter
         self._sessions: dict[str, AgentSession] = {}
         self._agents: dict[str, AgentProfile] = {}
         self._lock = threading.RLock()
-
-    def _setting(self, key: str, fallback: Any) -> Any:
-        return (
-            self._settings_getter(key, fallback) if self._settings_getter else fallback
-        )
 
     def register_agent(self, profile: AgentProfile) -> None:
         if not profile.name:
@@ -100,11 +85,7 @@ class AgentService:
         prompt = (
             system_prompt
             if system_prompt is not None
-            else (
-                profile.system_prompt
-                if profile
-                else self._setting("agent.system_prompt", self._default_system_prompt)
-            )
+            else (profile.system_prompt if profile else "")
         )
         session = AgentSession(
             name=name,
@@ -406,12 +387,9 @@ class AgentService:
             )
 
 
-_AGENT_SETTINGS_GROUP = "Agent"
-
-
 class AgentPlugin(Plugin):
     id = "agent"
-    requires = ("settings", "llm")
+    requires = ("llm",)
     provides = ("agent",)
 
     def __init__(self) -> None:
@@ -420,33 +398,7 @@ class AgentPlugin(Plugin):
 
     def setup(self, ctx: PluginContext) -> None:
         self.ctx = ctx
-        settings = ctx.require("settings")
-
-        agent_specs = [
-            SettingsSpec(
-                key="agent.system_prompt",
-                label="系统提示词",
-                type=SettingType.TEXT,
-                default=DEFAULT_SYSTEM_PROMPT,
-                group=_AGENT_SETTINGS_GROUP,
-                description="新建 Agent 会话的默认系统提示词．",
-            ),
-        ]
-        for spec in agent_specs:
-            try:
-                settings.register(spec, plugin_id=self.id)
-            except Exception:
-                ctx.logger.warning("settings register failed for %s", spec.key)
-
-        default_system_prompt = str(
-            settings.get("agent.system_prompt", DEFAULT_SYSTEM_PROMPT)
-        )
-
-        self.service = AgentService(
-            ctx=ctx,
-            default_system_prompt=default_system_prompt,
-            settings_getter=settings.get,
-        )
+        self.service = AgentService(ctx)
         ctx.register_service("agent", self.service)
         ctx.ui.register_action("agent.message", self._message, plugin_id=self.id)
 

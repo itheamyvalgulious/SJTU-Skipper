@@ -2,6 +2,7 @@ import json
 import threading
 from enum import StrEnum
 from html import escape
+from core.navigation import current_navigation
 from core.ui import BlockType, Side
 from core.settings_spec import SettingsSpec, SettingType
 from .types import GenerationState, NoteKind, NotePublication
@@ -123,7 +124,7 @@ class NotesView:
         ctx.events.on("session.stopped", self._stopped, plugin_id=self.id)
 
     def _render(self):
-        sid = self.ctx.streams.selected_class_id
+        sid = current_navigation().class_id
         if not sid or sid == "boot":
             return []
         state = self.pipeline.status(sid)["generation_state"]
@@ -180,7 +181,7 @@ class NotesView:
         ]
 
     def _action_sid(self, payload):
-        sid = str(payload.get("session_id", self.ctx.streams.selected_class_id) or "")
+        sid = str(payload.get("session_id", current_navigation().class_id) or "")
         return "" if sid == "boot" else sid
 
     def _delete(self, payload):
@@ -231,7 +232,9 @@ class NotesView:
         page = self.ctx.require("reader").show(
             title="笔记",
             docs=docs,
-            active=NoteKind(payload.get("doc", NoteKind.KNOWLEDGE)),
+            active=str(
+                payload.get("doc") or current_navigation().doc or NoteKind.KNOWLEDGE
+            ),
             page_key=f"{sid}:notes",
             owner=self.id,
         )
@@ -366,7 +369,7 @@ class NotesView:
             self.ctx.ui.remove_page(page)
 
     def _render_chunks(self):
-        sid = self.ctx.streams.selected_class_id
+        sid = current_navigation().class_id
         if not sid or sid == "boot":
             return []
         status = self.pipeline.status(sid)
@@ -402,8 +405,8 @@ class NotesView:
         return {"ok": True, "refresh": True}
 
     def _chunk_read(self, payload):
-        sid = str(payload.get("session_id", self.ctx.streams.selected_class_id) or "")
-        if not sid or sid == "boot":
+        sid = self._action_sid(payload)
+        if not sid:
             return {"ok": False, "message": "请先选择课程"}
         docs = [
             {
@@ -418,7 +421,9 @@ class NotesView:
         page = self.ctx.require("reader").show(
             title="分段笔记",
             docs=docs,
-            active=NoteKind(payload.get("doc", NoteKind.KNOWLEDGE)),
+            active=str(
+                payload.get("doc") or current_navigation().doc or NoteKind.KNOWLEDGE
+            ),
             page_key=f"{sid}:chunk-notes",
             owner=self.id,
         )

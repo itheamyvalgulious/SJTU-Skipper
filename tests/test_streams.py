@@ -11,32 +11,31 @@ from core.media import MediaKind
 from core.streams import StreamHub, StreamKind, TextSource, TextStream
 
 
-def test_selection_is_independent_of_processing():
+def test_request_navigation_is_independent_of_processing(navigation):
     hub = StreamHub()
-    assert hub.selected_class_id == ""
-    hub.start_session("processing")
-    assert hub.selected_class_meta == {}
-    hub.select_class("viewed", {"name": "Selected lecture"})
+    navigation.class_id = "viewed"
+    navigation.class_meta = {"name": "Selected lecture"}
     hub.start_session("background")
-    assert hub.selected_class_id == "viewed"
-    assert hub.selected_class_meta["name"] == "Selected lecture"
-    hub.select_class("")
-    assert hub.selected_class_id == ""
+    assert navigation.class_id == "viewed"
+    assert navigation.class_meta["name"] == "Selected lecture"
 
 
-def test_selection_snapshot_stays_consistent():
-    hub = StreamHub()
-    hub.select_class("first", {"name": "First"})
-    with hub.class_selection_snapshot():
-        worker = threading.Thread(
-            target=lambda: hub.select_class("second", {"name": "Second"})
-        )
-        worker.start()
-        worker.join(timeout=1)
-        assert not worker.is_alive()
-        assert hub.selected_class_id == "first"
-        assert hub.selected_class_meta["name"] == "First"
-    assert hub.selected_class_id == "second"
+def test_navigation_scopes_are_isolated(navigation):
+    from core.navigation import Navigation, current_navigation, navigation_scope
+
+    navigation.class_id = "first"
+    navigation.pages.append("first-page")
+    with navigation_scope(Navigation(class_id="second")) as other:
+        other.pages.append("second-page")
+        assert current_navigation().class_id == "second"
+    assert current_navigation() is navigation
+    assert navigation.pages == ["first-page"]
+    observed = []
+    worker = threading.Thread(target=lambda: observed.append(current_navigation().class_id))
+    worker.start()
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert observed == [""]
 
 
 def test_audio_append_read_and_len() -> None:
@@ -204,7 +203,6 @@ def test_same_id_restart_replaces_stream(with_content) -> None:
     assert not first.video_gate.wait(0)
     assert second is hub.current is hub.get_session("lecture")
     assert second is not first and second.audio.duration == 0
-    assert hub.selected_class_id == "" and hub.selected_class_meta == {}
     assert [s.session_id for s in hub.list_sessions()].count("lecture") == 1
     assert not hub.text_progress("lecture", StreamKind.TRANSCRIPT).final
     events.clear()

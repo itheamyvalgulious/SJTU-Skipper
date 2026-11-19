@@ -119,6 +119,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     connected: null,
     activeTab: { left: null, right: null },
     blockTabs: {},
+    expandedTrees: new Map(),
     pageKey: null,
     playerCache: {},
     paletteItems: [],
@@ -130,7 +131,6 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     lastLoad: 0,
     ws: null,
     wsRetry: 0,
-    wsOpened: false,
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -211,11 +211,17 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
 
   function navigationFromUrl() {
     const params = new URL(window.location.href).searchParams;
-    const navigation = { page: params.get("page") || "" };
-    for (const key of ["class", "doc"]) {
-      if (params.has(key)) navigation[key] = params.get(key);
-    }
-    return navigation;
+    let pages = [];
+    try {
+      const value = JSON.parse(params.get("pages") || "[]");
+      if (Array.isArray(value)) pages = value.filter((page) => typeof page === "string");
+    } catch (_) {}
+    return {
+      page: params.get("page") || "",
+      class: params.get("class") || "",
+      doc: params.get("doc") || "",
+      pages,
+    };
   }
 
   function syncNavigation(navigation, historyMode) {
@@ -226,16 +232,13 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       if (value) url.searchParams.set(key, value);
       else url.searchParams.delete(key);
     }
+    url.searchParams.set("pages", JSON.stringify(navigation.pages || []));
     if (url.href !== window.location.href) {
       window.history[`${historyMode}State`](window.history.state, "", url);
     }
   }
 
-  async function loadState({
-    quiet = false,
-    historyMode = HISTORY_MODE.REPLACE,
-    navigationVersion = null,
-  } = {}) {
+  async function loadState({ quiet = false, navigationVersion = null } = {}) {
     if (navigationVersion === null && state.navigationPending) return;
     if (state.loading) {
       await state.loading;
@@ -243,24 +246,21 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     }
     const version = navigationVersion ?? state.navigationVersion;
     if (version !== state.navigationVersion) return;
+    const navigation = navigationFromUrl();
+    const query = new URLSearchParams({
+      ...navigation,
+      pages: JSON.stringify(navigation.pages),
+    });
     state.loading = (async () => {
       try {
-        const ui = await api("/api/ui/state");
+        const ui = await api(`/api/ui/state?${query}`);
         if (version !== state.navigationVersion) return;
+        if (JSON.stringify(navigationFromUrl()) !== JSON.stringify(navigation)) return;
         if (navigationVersion === null && state.navigationPending) return;
-        const navigation = navigationFromUrl();
-        if (
-          navigationVersion === null &&
-          ["page", "class", "doc"].some(
-            (key) => (ui.navigation?.[key] || "") !== (navigation[key] || ""),
-          )
-        ) {
-          return true;
-        }
-        const previousPage = state.ui?.navigation?.page;
+        const previousPage = state.ui?.active_page;
         state.ui = ui;
         state.lastLoad = Date.now();
-        if (previousPage !== ui.navigation?.page) {
+        if (previousPage !== ui.active_page) {
           for (const side of Object.values(SIDEBAR_SIDE)) {
             const tab = (ui[`${side}_tabs`] || []).find((item) =>
               (item.toolbox || []).some((tool) => tool.page === ui.active_page),
@@ -269,7 +269,6 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
           }
         }
         renderAll();
-        syncNavigation(ui.navigation, historyMode);
         setConnection(true);
       } catch (err) {
         setConnection(false);
@@ -278,10 +277,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         state.loading = null;
       }
     })();
-    const restore = await state.loading;
-    if (restore && version === state.navigationVersion && !state.navigationPending) {
-      await restoreNavigation();
-    }
+    await state.loading;
   }
 
   function changeNavigation(callback, historyMode = HISTORY_MODE.PUSH) {
@@ -289,13 +285,12 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     state.navigationPending += 1;
     const task = state.navigationQueue.then(async () => {
       try {
+        if (version !== state.navigationVersion) return;
         const result = await callback();
-        if (result?.refresh !== false || result?.open_page) {
-          await loadState({
-            quiet: true,
-            historyMode,
-            navigationVersion: version,
-          });
+        if (version !== state.navigationVersion) return result;
+        syncNavigation(result?.navigation, historyMode);
+        if (result?.refresh !== false || result?.navigation) {
+          await loadState({ quiet: true, navigationVersion: version });
         }
         return result;
       } finally {
@@ -309,13 +304,6 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   async function restoreNavigation() {
     state.navigationVersion += 1;
     const navigation = navigationFromUrl();
-    if (
-      !("class" in navigation) &&
-      !navigation.page.startsWith("reader:notes:") &&
-      !navigation.page.startsWith("notes:logs:")
-    ) {
-      navigation.class = "";
-    }
     try {
       await changeNavigation(
         () =>
@@ -378,7 +366,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   }
 
   function renderLog(block) {
-    const pre = el("pre", { class: "log bg-2 border rounded p-3 overflow-auto" });
+    const pre = el("pre", { class: "log bg-2 border p-3 overflow-auto" });
     const lines = Array.isArray(block.lines) ? block.lines : [];
     for (const line of lines) {
       if (typeof line === "string") {
@@ -471,22 +459,42 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   function renderTreeNode(node) {
     const box = el("div", { class: "user-select-none" });
     const children = Array.isArray(node.children) ? node.children : [];
-    const hasChildren = children.length > 0;
-    const canExpand = hasChildren || !!node.toggle;
+    const canExpand = children.length > 0;
+    const hasActive = (item) => item.active || (item.children || []).some(hasActive);
+    let expanded = state.expandedTrees.get(node.id) ?? children.some(hasActive);
+    let caret;
+    let kids;
+    const toggle = () => {
+      expanded = !expanded;
+      state.expandedTrees.set(node.id, expanded);
+      updateExpansion();
+    };
+    const updateExpansion = () => {
+      if (!canExpand) return;
+      caret.textContent = expanded ? "▾" : "▸";
+      caret.title = expanded ? "折叠" : "展开";
+      caret.setAttribute("aria-expanded", String(expanded));
+      if (expanded && !kids) {
+        kids = el("div", { class: "ms-2 border-start ps-1" });
+        for (const child of children) kids.appendChild(renderTreeNode(child));
+        box.appendChild(kids);
+      }
+      if (kids) kids.hidden = !expanded;
+    };
     const row = el("div", {
-      class: `d-flex flex-nowrap align-items-center gap-1 rounded p-1 ${node.active ? "bg-subtle-primary" : ""}`,
+      class: `d-flex flex-nowrap align-items-center gap-1 p-1 ${node.active ? "bg-subtle-primary" : ""}`,
     });
     if (canExpand) {
-      const caret = el("button", {
+      caret = el("button", {
         class: "btn-text btn-sm flex-shrink-0",
         type: FIELD_INPUT.BUTTON,
-        text: node.expanded ? "▾" : "▸",
-        title: node.expanded ? "折叠" : "展开",
-        "aria-expanded": String(Boolean(node.expanded)),
+        text: expanded ? "▾" : "▸",
+        title: expanded ? "折叠" : "展开",
+        "aria-expanded": String(expanded),
       });
       caret.addEventListener("click", (event) => {
         event.stopPropagation();
-        runNodeAction(node.toggle);
+        toggle();
       });
       row.appendChild(caret);
     }
@@ -516,14 +524,10 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     }
     row.addEventListener("click", () => {
       if (node.action) runNodeAction(node.action);
-      else if (canExpand) runNodeAction(node.toggle);
+      else if (canExpand) toggle();
     });
     box.appendChild(row);
-    if (hasChildren && node.expanded) {
-      const kids = el("div", { class: "ms-2 border-start ps-1" });
-      for (const child of children) kids.appendChild(renderTreeNode(child));
-      box.appendChild(kids);
-    }
+    updateExpansion();
     return box;
   }
 
@@ -785,21 +789,31 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     const key =
       block.id || block.key || `tabs:${tabs.map((tab) => tab.title || "").join("\u0001")}`;
     const tabKey = (tab, index) => tab.id || tab.key || tab.title || `tab:${index}`;
-    const navigation = state.ui?.navigation;
+    const navigation = navigationFromUrl();
+    const documentTabs = tabs.some((tab) => tab.meta?.doc_key && tab.meta?.page_id);
     const requested = tabs.find(
       (tab) =>
-        navigation?.doc &&
+        navigation.doc &&
         tab.meta?.doc_key === navigation.doc &&
         tab.meta?.page_id === navigation.page,
     );
-    const remembered = tabs.find((tab) => tab.title === state.blockTabs[key]);
-    const selected = requested || remembered || tabs.find((tab) => tab.active) || tabs[0];
+    const remembered = !documentTabs && tabs.find((tab) => tab.title === state.blockTabs[key]);
+    const selected = documentTabs
+      ? requested || tabs[0]
+      : remembered || tabs.find((tab) => tab.active) || tabs[0];
     let active = selected ? tabKey(selected, tabs.indexOf(selected)) : null;
     const focusedView = Array.from(agentViews.values()).find(
       (view) => wrap.contains(view.root) && agentDraft(view).composing,
     );
     if (focusedView && data.active !== active) active = data.active;
     const show = (target, remember = true) => {
+      if (documentTabs) {
+        const navigation = navigationFromUrl();
+        const selected = tabs.find(
+          (tab) => tab.meta?.doc_key === navigation.doc && tab.meta?.page_id === navigation.page,
+        ) || tabs[0];
+        target = selected ? tabKey(selected, tabs.indexOf(selected)) : null;
+      }
       const index = tabs.findIndex((tab, index) => tabKey(tab, index) === target);
       if (index < 0) return;
       if (
@@ -815,7 +829,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         }
       const changed = data.active !== target;
       data.active = target;
-      if (remember) state.blockTabs[key] = tabs[index].title || "";
+      if (remember && !documentTabs) state.blockTabs[key] = tabs[index].title || "";
       for (const [id, panel] of data.panels) panel.hidden = id !== target;
       for (const [id, button] of data.buttons) {
         button.classList.toggle("active", id === target);
@@ -864,14 +878,20 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
           }
         });
         button.addEventListener("click", async () => {
-          data.show(id);
           const meta = button._tab.meta || {};
-          if (!meta.doc_key || !meta.page_id) return;
+          if (!meta.doc_key || !meta.page_id) {
+            data.show(id);
+            return;
+          }
           try {
             await changeNavigation(() =>
               api("/api/ui/navigate", {
                 method: "POST",
-                body: JSON.stringify({ page: meta.page_id, doc: meta.doc_key }),
+                body: JSON.stringify({
+                  ...navigationFromUrl(),
+                  page: meta.page_id,
+                  doc: meta.doc_key,
+                }),
               }),
             );
           } catch (err) {
@@ -1156,15 +1176,17 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       text: collapsed ? "▸" : "▾",
       title: "折叠 / 展开",
     });
-    toggle.addEventListener("click", () => {
-      const next = !wrap.classList.contains("collapsed");
-      wrap.classList.toggle("collapsed", next);
-      toggle.textContent = next ? "▸" : "▾";
-      postAction(block.collapse_action || "reader.qa_collapse", {
-        path: block.path,
-        id: block.id,
-        collapsed: next,
-      });
+    toggle.addEventListener("click", async () => {
+      toggle.disabled = true;
+      try {
+        await postAction(block.collapse_action || "reader.qa_collapse", {
+          path: block.path,
+          id: block.id,
+          collapsed: !wrap.classList.contains("collapsed"),
+        });
+      } finally {
+        toggle.disabled = false;
+      }
     });
     head.appendChild(toggle);
     head.appendChild(el("span", { class: "badge theme-primary", text: "问" }));
@@ -1256,15 +1278,10 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     }
     const pending = node.querySelector(".qa-pending");
     if (pending) pending.remove();
-    if (retained) {
-      node.classList.remove("collapsed");
-      const toggle = node.querySelector(".qa-toggle");
-      if (toggle) toggle.textContent = "▾";
-    } else if (payload.collapsed !== false) {
-      node.classList.add("collapsed");
-      const toggle = node.querySelector(".qa-toggle");
-      if (toggle) toggle.textContent = "▸";
-    }
+    const collapsed = !retained && payload.collapsed !== false;
+    node.classList.toggle("collapsed", collapsed);
+    const toggle = node.querySelector(".qa-toggle");
+    if (toggle) toggle.textContent = collapsed ? "▸" : "▾";
   }
 
   function applyQaLive(payload) {
@@ -1786,7 +1803,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         "aria-label": "Execution metrics",
       });
       const log = el("div", {
-        class: "execution-log border rounded p-2 flex-grow-1 min-h-0 overflow-auto",
+        class: "execution-log border p-2 flex-grow-1 min-h-0 overflow-auto",
         tabindex: "0",
         "aria-label": "Execution blocks",
       });
@@ -2169,12 +2186,12 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     }
     if (type === BLOCK_TYPE.TEXT)
       return el("pre", {
-        class: "block bg-2 border rounded p-3 overflow-auto",
+        class: "block bg-2 border p-3 overflow-auto",
         text: block.text ?? "",
       });
     if (type === BLOCK_TYPE.KEYVALUE) {
       const items = Array.isArray(block.items) ? block.items : Object.entries(block.items || {});
-      const grid = el("dl", { class: "row g-0 border rounded" });
+      const grid = el("dl", { class: "row g-0 border" });
       for (const [k, v] of items) {
         grid.appendChild(el("dt", { class: "col-4 bg-2 p-2", text: k }));
         grid.appendChild(
@@ -2226,7 +2243,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     if (type === BLOCK_TYPE.LOG) return el("div", { class: "block" }, [renderLog(block)]);
     if (type === BLOCK_TYPE.IMAGE) {
       return el("div", { class: "block" }, [
-        el("img", { class: "img-fluid rounded", src: block.src, alt: block.alt || "" }),
+        el("img", { class: "img-fluid", src: block.src, alt: block.alt || "" }),
       ]);
     }
     if (type === BLOCK_TYPE.VIDEO) {
@@ -2270,7 +2287,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         text: block.text || "",
       });
     return el("pre", {
-      class: "block bg-2 border rounded p-3 overflow-auto",
+      class: "block bg-2 border p-3 overflow-auto",
       text: JSON.stringify(block, null, 2),
     });
   }
@@ -2900,6 +2917,8 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     const blocks = active ? state.ui.page_content?.[active] : null;
     const previousPage = container.dataset.pageId;
     const samePage = previousPage === active;
+    const doc = navigationFromUrl().doc;
+    const sameDocument = container.dataset.doc === doc;
     if (active === "ui:tasks" && samePage) {
       const queue = $(".task-queue", container);
       if (queue) {
@@ -2908,7 +2927,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       }
     }
     const key = active
-      ? `${active}\u0000${JSON.stringify(blocks || [], (k, v) => (k === "collapsed" ? undefined : v))}`
+      ? `${active}\u0000${doc}\u0000${JSON.stringify(blocks || [])}`
       : "__welcome__";
     if (samePage && state.pageKey === key) return false;
     if (!samePage && composingWithin(container)) return false;
@@ -2917,6 +2936,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       blocks?.some(hasActivityBlock) || container.querySelector(".agent-workflow");
     if (
       samePage &&
+      sameDocument &&
       !activityPage &&
       container.contains(focused) &&
       ["INPUT", "TEXTAREA", "SELECT"].includes(focused?.tagName)
@@ -2976,6 +2996,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       if (before?.above) adjust += node.offsetHeight - before.height;
     }
     if (adjust) container.scrollTop += adjust;
+    if (complete) container.dataset.doc = doc;
     return true;
   }
 
@@ -3050,6 +3071,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       await changeNavigation(() =>
         api(`/api/ui/pages/${encodeURIComponent(pageId)}/open`, {
           method: "POST",
+          body: JSON.stringify({ navigation: navigationFromUrl() }),
         }),
       );
     } catch (err) {
@@ -3062,6 +3084,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       await changeNavigation(() =>
         api(`/api/ui/pages/${encodeURIComponent(pageId)}/close`, {
           method: "POST",
+          body: JSON.stringify({ navigation: navigationFromUrl() }),
         }),
       );
     } catch (err) {
@@ -3106,13 +3129,15 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
   ) {
     try {
       const request = async () => {
+        const navigation = navigationFromUrl();
         const result = await api("/api/ui/action", {
           method: "POST",
           body: JSON.stringify({
             action,
             values,
-            page_id: pageId || state.ui?.active_page || null,
+            page_id: pageId || navigation.page || null,
             item_id: itemId || null,
+            navigation,
           }),
         });
         if (result.message) toast(result.message, result.ok ? TOAST_KIND.DEFAULT : TOAST_KIND.ERR);
@@ -3120,17 +3145,19 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
           const opened = window.open(result.open_url, "_blank", "noopener");
           if (opened) opened.opener = null;
         }
-        if (result.open_page) {
-          await api(`/api/ui/pages/${encodeURIComponent(result.open_page)}/open`, {
-            method: "POST",
-          });
-        }
         return result;
       };
       if (!independent) return await changeNavigation(request);
+      const navigation = JSON.stringify(navigationFromUrl());
+      const version = state.navigationVersion;
       const result = await request();
-      if (result?.refresh !== false || result?.open_page) {
-        await loadState({ quiet: true, navigationVersion: state.navigationVersion });
+      if (
+        version === state.navigationVersion &&
+        !state.navigationPending &&
+        navigation === JSON.stringify(navigationFromUrl())
+      ) {
+        syncNavigation(result?.navigation, HISTORY_MODE.PUSH);
+        if (result?.refresh !== false || result?.navigation) await loadState({ quiet: true });
       }
       return result;
     } catch (err) {
@@ -3192,8 +3219,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       state.wsRetry = 0;
       setConnection(true);
       ws.send("hello");
-      if (state.wsOpened || !state.ui) restoreNavigation();
-      state.wsOpened = true;
+      loadState({ quiet: true });
     });
     ws.addEventListener("message", (event) => {
       try {

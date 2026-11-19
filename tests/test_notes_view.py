@@ -49,12 +49,13 @@ def test_skip_preserves_preview():
     assert calls == []
 
 
-def test_log_pages_keep_their_session():
+def test_log_pages_keep_their_session(navigation):
     from core.ui import UIManager
     from tests.support import FakeSettings
 
     ui = UIManager()
-    streams = SimpleNamespace(selected_class_id="first")
+    streams = SimpleNamespace()
+    navigation.class_id = "first"
     states = {
         sid: {
             "session_id": sid,
@@ -86,7 +87,7 @@ def test_log_pages_keep_their_session():
         result = ui.dispatch_action("notes.logs", {})
         first_page = result.open_page
         ui.open_page(first_page)
-        streams.selected_class_id = "second"
+        navigation.class_id = "second"
         second_page = ui.dispatch_action("notes.logs", {}).open_page
         ui.open_page(second_page)
         assert second_page != first_page
@@ -106,11 +107,11 @@ def test_log_pages_keep_their_session():
 
 
 @pytest.mark.parametrize("selected", ["", "boot"])
-def test_empty_selection_hides_notes(selected):
+def test_empty_selection_hides_notes(selected, navigation):
     plugin = NotesView()
+    navigation.class_id = selected
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
-            selected_class_id=selected,
             current=SimpleNamespace(session_id="processing"),
         )
     )
@@ -120,37 +121,38 @@ def test_empty_selection_hides_notes(selected):
 
 
 @pytest.mark.parametrize("target", ["", "boot"])
-def test_invalid_action_target_does_not_use_selection(target):
+def test_invalid_action_target_does_not_use_selection(target, navigation):
     plugin = NotesView()
-    plugin.ctx = SimpleNamespace(streams=SimpleNamespace(selected_class_id="selected"))
+    navigation.class_id = "selected"
+    plugin.ctx = SimpleNamespace()
     for action in ("_generate", "_stop", "_delete", "_read", "_logs", "_fill_again"):
         assert not getattr(plugin, action)({"session_id": target})["ok"]
 
 
-def test_generation_uses_selected_or_explicit_class():
+def test_generation_uses_selected_or_explicit_class(navigation):
     calls = []
     plugin = NotesView()
+    navigation.class_id = "selected"
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
-            selected_class_id="selected",
             current=SimpleNamespace(session_id="processing"),
         )
     )
     plugin.pipeline = SimpleNamespace(start=lambda sid: calls.append(sid) or True)
     assert plugin._generate({})["ok"]
-    plugin.ctx.streams.selected_class_id = ""
+    navigation.class_id = ""
     assert plugin._generate({"session_id": "task-page"})["ok"]
     assert calls == ["selected", "task-page"]
 
 
-def test_sidebar_status_uses_selected_class():
+def test_sidebar_status_uses_selected_class(navigation):
     from tests.support import FakeSettings
 
     calls = []
     plugin = NotesView()
+    navigation.class_id = "selected"
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
-            selected_class_id="selected",
             current=SimpleNamespace(session_id="processing"),
         )
     )

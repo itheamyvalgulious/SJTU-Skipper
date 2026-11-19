@@ -47,11 +47,11 @@ def test_toggle_retains_source_records():
 
 
 @pytest.mark.parametrize("selected", ["", "boot"])
-def test_empty_selection_hides_notes(selected):
+def test_empty_selection_hides_notes(selected, navigation):
     plugin = NotesView()
+    navigation.class_id = selected
     plugin.ctx = SimpleNamespace(
         streams=SimpleNamespace(
-            selected_class_id=selected,
             current=SimpleNamespace(session_id="processing"),
         )
     )
@@ -60,21 +60,22 @@ def test_empty_selection_hides_notes(selected):
 
 
 @pytest.mark.parametrize("target", ["", "boot"])
-def test_invalid_read_target_does_not_use_selection(target):
+def test_invalid_read_target_does_not_use_selection(target, navigation):
     plugin = NotesView()
-    plugin.ctx = SimpleNamespace(streams=SimpleNamespace(selected_class_id="selected"))
+    navigation.class_id = "selected"
+    plugin.ctx = SimpleNamespace()
     assert not plugin._chunk_read({"session_id": target})["ok"]
 
 
-def test_notes_use_selected_or_explicit_class(tmp_path):
+def test_notes_use_selected_or_explicit_class(tmp_path, navigation):
     reads = []
     statuses = []
     reader = SimpleNamespace(show=lambda **kwargs: reads.append(kwargs) or "note-page")
     plugin = NotesView()
+    navigation.class_id = "selected"
     plugin.ctx = SimpleNamespace(
         data_dir=tmp_path,
         streams=SimpleNamespace(
-            selected_class_id="selected",
             current=SimpleNamespace(session_id="processing"),
         ),
         require=lambda name: reader,
@@ -87,7 +88,7 @@ def test_notes_use_selected_or_explicit_class(tmp_path):
     assert plugin._render_chunks()
     assert statuses == ["selected"]
     assert plugin._chunk_read({})["ok"]
-    plugin.ctx.streams.selected_class_id = ""
+    navigation.class_id = ""
     assert plugin._chunk_read({"session_id": "task-page"})["ok"]
     assert [read["page_key"] for read in reads] == [
         "selected:chunk-notes",

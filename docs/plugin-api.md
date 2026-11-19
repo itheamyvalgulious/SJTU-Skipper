@@ -223,6 +223,10 @@ def device_login(payload: dict):
 
 返回 `refresh=True` 会让前端重新拉取 state．长任务需在后台执行，action 立即返回．`open_page` 打开应用内页面，`open_url` 打开外部链接（仅 `http`/`https`），两者可同时使用．
 
+浏览器是导航的唯一来源．`GET /api/ui/state` 接收 `page`、`class`、`doc` 和 JSON 数组 `pages` 查询参数．`POST /api/ui/action` 的请求体必须包含同名字段组成的 `navigation` 对象．页面打开、关闭接口也接收 `{navigation: {...}}`．命令响应返回目标 `navigation`，浏览器负责更新 URL．服务端不保存导航，UI 状态响应不能覆盖浏览器导航．
+
+插件在 UI 请求内通过 `core.navigation.current_navigation()` 读取临时导航．`ctx.ui.open_page()`、`close_page()` 和 `show_home()` 只修改该请求的导航．这些方法不能为后台任务保存选择．后台工作必须使用显式课程 ID、文稿路径和任务 ID．`StreamHub` 只管理媒体与处理会话，不提供所选课程接口．
+
 Action 归属：
 
 - action id 必须以插件 `id` 开头，后接 `.`．插件不能以其他插件的 id 注册 action，也不能重复注册同一个 action id．
@@ -282,7 +286,7 @@ reader.qa_set_collapsed(path, created["id"], False)
 - `docs` 中每项包含 `key`、`label` 和 `path`．`path` 指向文稿文件，`owner` 可按文稿覆盖．
 - `kind="prompt"` 先显示输入框．配置 `intensities` 时显示强度选择．提交的 values 包含 `{doc_key, path, selection, question, intensity, page_id}`．
 - `qa_begin` 在选中段落下方插入 `pending` 块．未找到选中内容时，问答块追加到文末．`qa_finish` 更新同一块的回答、`status` 和 `collapsed`．
-- `reader.qa_collapse` 接收 `{path, id, collapsed}`，返回 `refresh=false`．`reader.qa_delete` 接收 `{path, id}`．
+- `reader.qa_collapse` 接收 `{path, id, collapsed}`，保存后刷新展示．`reader.qa_delete` 接收 `{path, id}`．
 - 页面级项按文档 owner 过滤．全局项不按 owner 过滤，action 需检查文档是否可用．
 - 流式展示使用 `ctx.ui.notify("qa.live", payload)`．payload 包含 `path`、`id` 和流式增量，结束时包含 `status`、`answer_html` 和 `collapsed`．前端直接更新问答块．
 

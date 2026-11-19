@@ -59,6 +59,30 @@ def test_show_opens_reader_page(tmp_path: Path) -> None:
         runtime.stop()
 
 
+def test_document_selection_is_request_scoped(tmp_path: Path, navigation) -> None:
+    from core.navigation import Navigation, navigation_scope
+
+    runtime = _make_runtime(tmp_path)
+    try:
+        reader = runtime.services.require("reader")
+        page = reader.show(
+            title="Notes",
+            docs=[
+                {"key": "first", "label": "First", "path": _write(tmp_path, "first.md", "First")},
+                {"key": "second", "label": "Second", "path": _write(tmp_path, "second.md", "Second")},
+            ],
+            active="first",
+        )
+        assert navigation.doc == "first"
+        with navigation_scope(Navigation(page=page, doc="second", pages=[page])):
+            tabs = runtime.ui.state()["page_content"][page][0]["tabs"]
+            assert [tab["active"] for tab in tabs] == [False, True]
+        tabs = runtime.ui.state()["page_content"][page][0]["tabs"]
+        assert [tab["active"] for tab in tabs] == [True, False]
+    finally:
+        runtime.stop()
+
+
 def test_reader_action_rejects_empty_docs(tmp_path: Path) -> None:
     runtime = _make_runtime(tmp_path)
     try:

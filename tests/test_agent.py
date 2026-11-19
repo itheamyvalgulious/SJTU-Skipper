@@ -94,6 +94,17 @@ def _make_agent_runtime(tmp_path, script=None, settings=None):
     return runtime, runtime.services.require("agent"), llm, settings
 
 
+def test_session_has_no_generic_prompt(tmp_path):
+    runtime, agent, sdk, _ = _make_agent_runtime(tmp_path)
+    try:
+        session = agent.create_session("plain")
+        assert sdk.sessions[session.id]["prompt"] == ""
+        explicit = agent.create_session("explicit", system_prompt="Task instructions")
+        assert sdk.sessions[explicit.id]["prompt"] == "Task instructions"
+    finally:
+        runtime.stop()
+
+
 def test_ordered_followups_and_review_approval(tmp_path):
     def script(sdk, params):
         yield {

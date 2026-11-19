@@ -12,7 +12,7 @@ from enum import StrEnum
 
 from core.media import SourceKind
 
-from typing import Any, Iterable
+from typing import Any
 from core.lecture import lecture_id, source_id
 
 
@@ -24,7 +24,6 @@ class LiveState(StrEnum):
 
 
 class TreeBadge(StrEnum):
-    DONE = "done"
     LIVE = "live"
     UPCOMING = "upcoming"
 
@@ -198,8 +197,6 @@ def _recording_child(
         "id": class_id,
         "label": label,
         "subtitle": subtitle,
-        "badge": "录播",
-        "badge_class": TreeBadge.DONE,
         "action": {
             "action": "input.open_class",
             "value": {
@@ -296,7 +293,6 @@ def _live_group_child(
     subtitle = ", ".join(
         part
         for part in (
-            state,
             next((c for c in classrooms if c), ""),
             f"{len(parts)} 节" if len(parts) > 1 else "",
         )
@@ -336,14 +332,11 @@ def build_tree(
     lives: list[dict[str, Any]] | None = None,
     *,
     now: datetime | None = None,
-    expanded: Iterable[str] = (),
-    current_class_id: str = "",
     max_gap_minutes: int = DEFAULT_MAX_GAP_MINUTES,
     max_parts: int = DEFAULT_MAX_PARTS,
 ) -> list[dict[str, Any]]:
 
     now = now or datetime.now()
-    expanded_ids = {str(item) for item in expanded}
     lives = list(lives or [])
 
     groups_by_course: dict[str, list[dict[str, Any]]] = {}
@@ -409,9 +402,6 @@ def build_tree(
         children.sort(key=lambda item: item[0], reverse=True)
         child_nodes = [node for _begin, node in children]
         is_live = any(node.get("live") for node in child_nodes)
-        if current_class_id:
-            for node in child_nodes:
-                node["active"] = node.get("id") == current_class_id
 
         nodes.append(
             {
@@ -425,13 +415,8 @@ def build_tree(
                     )
                     if part
                 ),
-                "expanded": cid in expanded_ids,
                 "live": is_live,
                 "children": child_nodes,
-                "toggle": {
-                    "action": "input.toggle_course",
-                    "value": {"course": cid},
-                },
             }
         )
 
@@ -448,8 +433,6 @@ def build_tree(
                     "other", str(items[0].get("name") or "其他直播"), group, now=now
                 )
                 if child is not None:
-                    if current_class_id:
-                        child["active"] = child.get("id") == current_class_id
                     children.append(child)
         if children:
             nodes.append(
@@ -457,13 +440,8 @@ def build_tree(
                     "id": "course:other",
                     "label": "其他直播",
                     "subtitle": "未匹配到 Canvas 课程",
-                    "expanded": "other" in expanded_ids,
                     "live": any(c.get("live") for c in children),
                     "children": children,
-                    "toggle": {
-                        "action": "input.toggle_course",
-                        "value": {"course": "other"},
-                    },
                 }
             )
 

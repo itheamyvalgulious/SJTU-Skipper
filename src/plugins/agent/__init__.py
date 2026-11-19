@@ -8,7 +8,6 @@ from .plugin import (
     AgentService,
     AgentTool,
 )
-from .prompts import DEFAULT_SYSTEM_PROMPT
 from .session import AgentSession
 
 __all__ = [
@@ -19,5 +18,4 @@ __all__ = [
     "AgentService",
     "AgentSession",
     "AgentTool",
-    "DEFAULT_SYSTEM_PROMPT",
 ]
