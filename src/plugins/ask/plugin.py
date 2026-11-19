@@ -383,8 +383,10 @@ class AskPlugin(Plugin):
         navigation = current_navigation()
         meta = navigation.class_meta
         try:
-            relative = Path(path).resolve().relative_to(
-                (self.ctx.data_dir / "sessions").resolve()
+            relative = (
+                Path(path)
+                .resolve()
+                .relative_to((self.ctx.data_dir / "sessions").resolve())
             )
         except ValueError:
             pass

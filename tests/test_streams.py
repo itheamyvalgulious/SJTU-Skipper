@@ -31,7 +31,9 @@ def test_navigation_scopes_are_isolated(navigation):
     assert current_navigation() is navigation
     assert navigation.pages == ["first-page"]
     observed = []
-    worker = threading.Thread(target=lambda: observed.append(current_navigation().class_id))
+    worker = threading.Thread(
+        target=lambda: observed.append(current_navigation().class_id)
+    )
     worker.start()
     worker.join(timeout=1)
     assert not worker.is_alive()

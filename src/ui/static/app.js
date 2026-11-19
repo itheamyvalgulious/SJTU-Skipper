@@ -460,6 +460,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     const box = el("div", { class: "user-select-none" });
     const children = Array.isArray(node.children) ? node.children : [];
     const canExpand = children.length > 0;
+    const empty = !canExpand && !node.action;
     const hasActive = (item) => item.active || (item.children || []).some(hasActive);
     let expanded = state.expandedTrees.get(node.id) ?? children.some(hasActive);
     let caret;
@@ -482,20 +483,22 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       if (kids) kids.hidden = !expanded;
     };
     const row = el("div", {
-      class: `d-flex flex-nowrap align-items-center gap-1 p-1 ${node.active ? "bg-subtle-primary" : ""}`,
+      class: `d-flex flex-nowrap align-items-center gap-1 p-1 ${node.active ? "bg-subtle-primary" : ""} ${empty ? "fg-2" : ""}`,
     });
-    if (canExpand) {
+    if (canExpand || empty) {
       caret = el("button", {
         class: "btn-text btn-sm flex-shrink-0",
         type: FIELD_INPUT.BUTTON,
         text: expanded ? "▾" : "▸",
-        title: expanded ? "折叠" : "展开",
-        "aria-expanded": String(expanded),
+        title: canExpand ? (expanded ? "折叠" : "展开") : "暂无课次",
+        disabled: empty,
+        "aria-expanded": canExpand ? String(expanded) : undefined,
       });
-      caret.addEventListener("click", (event) => {
-        event.stopPropagation();
-        toggle();
-      });
+      if (canExpand)
+        caret.addEventListener("click", (event) => {
+          event.stopPropagation();
+          toggle();
+        });
       row.appendChild(caret);
     }
     if (node.icon) row.appendChild(el("span", { text: node.icon, "aria-hidden": "true" }));
@@ -809,9 +812,10 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
     const show = (target, remember = true) => {
       if (documentTabs) {
         const navigation = navigationFromUrl();
-        const selected = tabs.find(
-          (tab) => tab.meta?.doc_key === navigation.doc && tab.meta?.page_id === navigation.page,
-        ) || tabs[0];
+        const selected =
+          tabs.find(
+            (tab) => tab.meta?.doc_key === navigation.doc && tab.meta?.page_id === navigation.page,
+          ) || tabs[0];
         target = selected ? tabKey(selected, tabs.indexOf(selected)) : null;
       }
       const index = tabs.findIndex((tab, index) => tabKey(tab, index) === target);

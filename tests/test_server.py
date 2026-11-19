@@ -59,7 +59,9 @@ def client(tmp_path: Path):
 def test_state_and_action(client) -> None:
     test_client, _cfg = client
     route = {"page": "test.page", "class": "", "doc": "", "pages": ["test.page"]}
-    response = test_client.get("/api/ui/state", params={**route, "pages": json.dumps(route["pages"])})
+    response = test_client.get(
+        "/api/ui/state", params={**route, "pages": json.dumps(route["pages"])}
+    )
     assert response.status_code == 200
     state = response.json()
     assert state["left_tabs"][0]["id"] == "test"
@@ -67,7 +69,8 @@ def test_state_and_action(client) -> None:
     assert "<h1>" in state["page_content"]["test.page"][0]["html"]
 
     response = test_client.post(
-        "/api/ui/action", json={"action": "test.ping", "values": {"x": 1}, "navigation": route}
+        "/api/ui/action",
+        json={"action": "test.ping", "values": {"x": 1}, "navigation": route},
     )
     assert response.status_code == 200
     payload = response.json()
@@ -136,7 +139,12 @@ def test_navigation_restores_dynamic_pages(navigation_client):
         ("test.page", ""),
         ("", ""),
     ]:
-        route = {"page": page, "class": sid, "doc": doc, "pages": [page] if page else []}
+        route = {
+            "page": page,
+            "class": sid,
+            "doc": doc,
+            "pages": [page] if page else [],
+        }
         response = test_client.post("/api/ui/navigate", json=route)
         assert response.status_code == 200
         assert response.json()["navigation"] == route
@@ -144,17 +152,31 @@ def test_navigation_restores_dynamic_pages(navigation_client):
         assert "navigation" not in state
         assert state["active_page"] == page
         assert state["open_pages"] == route["pages"]
-    assert test_client.post("/api/ui/navigate", json={"page": "missing"}).status_code == 404
-    assert test_client.post(
-        "/api/ui/navigate", json={"page": "notes:logs:../secret"}
-    ).status_code == 400
+    assert (
+        test_client.post("/api/ui/navigate", json={"page": "missing"}).status_code
+        == 404
+    )
+    assert (
+        test_client.post(
+            "/api/ui/navigate", json={"page": "notes:logs:../secret"}
+        ).status_code
+        == 400
+    )
 
 
-@pytest.mark.parametrize("page", ["reader:notes:{sid}:notes", "reader:notes:{sid}:chunk-notes", "notes:logs:{sid}"])
+@pytest.mark.parametrize(
+    "page",
+    ["reader:notes:{sid}:notes", "reader:notes:{sid}:chunk-notes", "notes:logs:{sid}"],
+)
 def test_notes_navigation_resolves_class(navigation_client, page):
     test_client, sid, _opened = navigation_client
     page = page.format(sid=sid)
-    route = {"page": page, "class": "other-class", "doc": "notice" if page.startswith("reader:") else "", "pages": []}
+    route = {
+        "page": page,
+        "class": "other-class",
+        "doc": "notice" if page.startswith("reader:") else "",
+        "pages": [],
+    }
     response = test_client.post("/api/ui/navigate", json=route)
     assert response.status_code == 200
     assert response.json()["navigation"] == {**route, "class": sid, "pages": [page]}
@@ -162,7 +184,12 @@ def test_notes_navigation_resolves_class(navigation_client, page):
 
 def test_navigation_does_not_retain_request_state(navigation_client):
     test_client, sid, _opened = navigation_client
-    route = {"page": "input:session", "class": sid, "doc": "", "pages": ["input:session"]}
+    route = {
+        "page": "input:session",
+        "class": sid,
+        "doc": "",
+        "pages": ["input:session"],
+    }
     assert test_client.post("/api/ui/navigate", json=route).status_code == 200
     home = {"page": "", "class": "", "doc": "", "pages": []}
     assert test_client.post("/api/ui/navigate", json=home).json()["navigation"] == home
@@ -176,7 +203,10 @@ def test_navigation_registers_notes_only_once(navigation_client):
     page = f"reader:notes:{sid}:notes"
     route = {"page": page, "class": sid, "doc": "notice", "pages": [page]}
     for _ in range(2):
-        assert test_client.post("/api/ui/navigate", json=route).json()["navigation"] == route
+        assert (
+            test_client.post("/api/ui/navigate", json=route).json()["navigation"]
+            == route
+        )
         assert state_for(test_client, route).json()["active_page"] == page
     assert opened == [(page, "notice")]
 
@@ -184,13 +214,17 @@ def test_navigation_registers_notes_only_once(navigation_client):
 def test_open_close_page(client) -> None:
     test_client, _cfg = client
     route = {"page": "test.page", "class": "", "doc": "", "pages": ["test.page"]}
-    response = test_client.post("/api/ui/pages/test.page/close", json={"navigation": route})
+    response = test_client.post(
+        "/api/ui/pages/test.page/close", json={"navigation": route}
+    )
     assert response.status_code == 200
     closed = response.json()["navigation"]
     assert closed == {"page": "", "class": "", "doc": "", "pages": []}
     assert state_for(test_client, closed).json()["active_page"] == ""
     assert state_for(test_client, route).json()["active_page"] == "test.page"
-    response = test_client.post("/api/ui/pages/test.page/open", json={"navigation": closed})
+    response = test_client.post(
+        "/api/ui/pages/test.page/open", json={"navigation": closed}
+    )
     assert response.status_code == 200
     assert response.json()["navigation"] == route
     assert state_for(test_client, closed).json()["open_pages"] == []

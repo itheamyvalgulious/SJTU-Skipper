@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 
 from core.media import SourceKind
+from collections.abc import Iterable
 
 from typing import Any
 from core.lecture import lecture_id, source_id

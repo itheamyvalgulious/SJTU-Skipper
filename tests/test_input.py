@@ -1405,7 +1405,9 @@ class TestClassPlayer:
             )
             assert result.ok
             assert _course(plugin).finished
-            assert _course(plugin).session_id == current_navigation().class_id == class_id
+            assert (
+                _course(plugin).session_id == current_navigation().class_id == class_id
+            )
             ctx.streams.start_session("other-class", meta={"course_name": "后台课程"})
             assert current_navigation().class_id == class_id
             assert ctx.service("input").resolve_class(class_id)["name"] == "高等数学"
@@ -1551,7 +1553,11 @@ class TestClassPlayer:
         plugin._processing = True
         from plugins.input.plugin import _Job
 
-        job = _Job(current_navigation().class_id, dict(current_navigation().class_meta), state=JobState.RUNNING)
+        job = _Job(
+            current_navigation().class_id,
+            dict(current_navigation().class_meta),
+            state=JobState.RUNNING,
+        )
         plugin._jobs[job.id] = job
         plugin._active_job = job
         calls: list[str] = []
@@ -1575,7 +1581,11 @@ class TestClassPlayer:
         plugin._processing = True
         from plugins.input.plugin import _Job
 
-        job = _Job(current_navigation().class_id, dict(current_navigation().class_meta), state=JobState.RUNNING)
+        job = _Job(
+            current_navigation().class_id,
+            dict(current_navigation().class_meta),
+            state=JobState.RUNNING,
+        )
         plugin._jobs[job.id] = job
         plugin._active_job = job
         calls: list[str] = []
@@ -1672,7 +1682,11 @@ class TestClassPlayer:
         plugin._processing = True
         from plugins.input.plugin import _Job
 
-        job = _Job(current_navigation().class_id, dict(current_navigation().class_meta), state=JobState.RUNNING)
+        job = _Job(
+            current_navigation().class_id,
+            dict(current_navigation().class_meta),
+            state=JobState.RUNNING,
+        )
         plugin._jobs[job.id] = job
         plugin._active_job = job
         monkeypatch.setattr(plugin._sources, "stop", lambda: None)
@@ -1917,7 +1931,9 @@ class TestProcessingQueue:
             plugin._enqueue_job_locked(last)
             plugin._enqueue_job_locked(first)
             current_navigation().class_id = selected
-            current_navigation().class_meta = dict(plugin._jobs[selected].cls, id=selected)
+            current_navigation().class_meta = dict(
+                plugin._jobs[selected].cls, id=selected
+            )
 
             html = plugin._render_queue_item()[0]["html"]
             rows = BeautifulSoup(html, "html.parser").select("li")

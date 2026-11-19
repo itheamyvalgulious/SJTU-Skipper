@@ -23,7 +23,9 @@ class Navigation:
         }
 
 
-_navigation: ContextVar[Navigation | None] = ContextVar("request_navigation", default=None)
+_navigation: ContextVar[Navigation | None] = ContextVar(
+    "request_navigation", default=None
+)
 
 
 def current_navigation() -> Navigation:

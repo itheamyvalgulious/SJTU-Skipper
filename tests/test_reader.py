@@ -68,8 +68,16 @@ def test_document_selection_is_request_scoped(tmp_path: Path, navigation) -> Non
         page = reader.show(
             title="Notes",
             docs=[
-                {"key": "first", "label": "First", "path": _write(tmp_path, "first.md", "First")},
-                {"key": "second", "label": "Second", "path": _write(tmp_path, "second.md", "Second")},
+                {
+                    "key": "first",
+                    "label": "First",
+                    "path": _write(tmp_path, "first.md", "First"),
+                },
+                {
+                    "key": "second",
+                    "label": "Second",
+                    "path": _write(tmp_path, "second.md", "Second"),
+                },
             ],
             active="first",
         )

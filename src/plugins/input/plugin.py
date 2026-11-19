@@ -444,7 +444,9 @@ class InputPlugin(Plugin):
                     if session is not None:
                         session.meta["download_progress"] = self._download_progress(job)
                 else:
-                    course = self._courses.get(self._fill_target or self._playback_class_id)
+                    course = self._courses.get(
+                        self._fill_target or self._playback_class_id
+                    )
                     if course is not None:
                         course.download = progress
             self._ctx.ui.refresh("input.download")
@@ -455,7 +457,9 @@ class InputPlugin(Plugin):
             with self._class_lock:
                 job = self._active_job
                 if job is None:
-                    course = self._courses.get(self._fill_target or self._playback_class_id)
+                    course = self._courses.get(
+                        self._fill_target or self._playback_class_id
+                    )
                     if course is not None:
                         course.error = self._last_error
             if job is not None:
@@ -565,7 +569,8 @@ class InputPlugin(Plugin):
             job = self._job_for_locked(self._current_class_id) if cls else None
             job_state = job.state if job is not None else None
             if cls and self._current_class_id in {
-                self._fill_target, self._playback_class_id
+                self._fill_target,
+                self._playback_class_id,
             }:
                 job_state = JobState.RUNNING if self._processing else JobState.PAUSED
 
@@ -707,10 +712,12 @@ class InputPlugin(Plugin):
                         str(part["video_id"])
                         for part in meta.get("media_parts") or []
                         if part.get("video_id")
-                    ] or ([str(meta["video_id"])] if meta.get("video_id") else []),
+                    ]
+                    or ([str(meta["video_id"])] if meta.get("video_id") else []),
                     "live_id": str(meta.get("live_id") or ""),
                 }
             else:
+
                 def find(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
                     for node in nodes:
                         if node.get("id") == class_id:
@@ -1416,7 +1423,8 @@ class InputPlugin(Plugin):
             )
             error = job_error or (course.error if course is not None else "")
             standalone = self._current_class_id in {
-                self._fill_target, self._playback_class_id
+                self._fill_target,
+                self._playback_class_id,
             }
             if standalone:
                 finished = False
@@ -1448,18 +1456,22 @@ class InputPlugin(Plugin):
 
         buttons: list[dict[str, Any]] = []
         if standalone:
-            buttons.extend([
-                {
-                    "label": "暂停处理" if self._processing else "继续处理",
-                    "action": "input.pause_processing" if self._processing else "input.resume",
-                    "class": "btn-subtle theme-secondary",
-                },
-                {
-                    "label": "停止处理",
-                    "action": "input.stop",
-                    "class": "btn-outline theme-danger",
-                },
-            ])
+            buttons.extend(
+                [
+                    {
+                        "label": "暂停处理" if self._processing else "继续处理",
+                        "action": "input.pause_processing"
+                        if self._processing
+                        else "input.resume",
+                        "class": "btn-subtle theme-secondary",
+                    },
+                    {
+                        "label": "停止处理",
+                        "action": "input.stop",
+                        "class": "btn-outline theme-danger",
+                    },
+                ]
+            )
         elif job is not None and job_state == JobState.RUNNING:
             buttons.append(
                 {
@@ -1663,9 +1675,12 @@ class InputPlugin(Plugin):
             error = job.error if job is not None else course.error
             job_state = job.state if job is not None else None
             session_id = job.session_id if job is not None else course.session_id
-            session_meta = dict(job.session_meta if job is not None else course.session_meta)
+            session_meta = dict(
+                job.session_meta if job is not None else course.session_meta
+            )
             standalone = self._current_class_id in {
-                self._fill_target, self._playback_class_id
+                self._fill_target,
+                self._playback_class_id,
             }
             if standalone:
                 active = True
@@ -1683,7 +1698,13 @@ class InputPlugin(Plugin):
             paused = (standalone and not self._processing) or (
                 active and job_state == JobState.PAUSED
             )
-            finished = False if standalone else job.state == JobState.DONE if job is not None else course.finished
+            finished = (
+                False
+                if standalone
+                else job.state == JobState.DONE
+                if job is not None
+                else course.finished
+            )
             download = (
                 self._download_progress(job)
                 if job is not None
@@ -2191,7 +2212,12 @@ class InputPlugin(Plugin):
         """Start the next queued class when the engine is free."""
 
         with self._class_lock:
-            if self._active_job is not None or self._processing or self._playback_class_id or self._fill_target:
+            if (
+                self._active_job is not None
+                or self._processing
+                or self._playback_class_id
+                or self._fill_target
+            ):
                 return
             job: _Job | None = None
             while self._queue:
@@ -2480,11 +2506,13 @@ class InputPlugin(Plugin):
                     return {"ok": True, "message": "正在处理"}
                 return self._act_resume({"id": class_id})
             if class_id.startswith("manual_"):
-                return self._act_play_url({
-                    "url": cls.get("url", ""),
-                    "title": cls.get("name", ""),
-                    "kind": cls.get("kind", SourceKind.URL),
-                })
+                return self._act_play_url(
+                    {
+                        "url": cls.get("url", ""),
+                        "title": cls.get("name", ""),
+                        "kind": cls.get("kind", SourceKind.URL),
+                    }
+                )
             job = self._jobs.get(str(cls.get("id", "")))
             if job is not None and job.state in {JobState.PREPARING, JobState.RUNNING}:
                 if self._active_job is job:
@@ -2735,7 +2763,8 @@ class InputPlugin(Plugin):
             else:
                 class_id = str(payload.get("id") or current_navigation().class_id)
                 if not class_id or class_id not in {
-                    self._fill_target, self._playback_class_id
+                    self._fill_target,
+                    self._playback_class_id,
                 }:
                     return {"ok": True, "message": "当前没有处理任务"}
                 kind = self._ctx.streams.current.meta.get("kind")
@@ -2913,12 +2942,23 @@ class InputPlugin(Plugin):
             meta={"url": url},
         )
         with self._class_lock:
-            if self._active_job is not None or self._processing or self._playback_class_id or self._fill_target:
+            if (
+                self._active_job is not None
+                or self._processing
+                or self._playback_class_id
+                or self._fill_target
+            ):
                 return {"ok": False, "message": "输入源正在使用中"}
             self._processing = True
             self._processing_started = time.time()
             self._playback_class_id = class_id
-            cls = {"id": class_id, "name": title, "kind": kind, "videos": [], "url": url}
+            cls = {
+                "id": class_id,
+                "name": title,
+                "kind": kind,
+                "videos": [],
+                "url": url,
+            }
             course = _Course(cls=cls, streams={StreamView.MAIN: url})
             self._courses[class_id] = course
         navigation = current_navigation()
@@ -2959,7 +2999,8 @@ class InputPlugin(Plugin):
         class_id = str(payload.get("id") or current_navigation().class_id)
         with self._class_lock:
             if not class_id or class_id not in {
-                self._fill_target, self._playback_class_id
+                self._fill_target,
+                self._playback_class_id,
             }:
                 return {"ok": False, "message": "当前没有处理任务"}
             self._processing = False
@@ -2990,7 +3031,8 @@ class InputPlugin(Plugin):
         class_id = str(payload.get("id") or current_navigation().class_id)
         with self._class_lock:
             if not class_id or class_id not in {
-                self._fill_target, self._playback_class_id
+                self._fill_target,
+                self._playback_class_id,
             }:
                 return {"ok": False, "message": "当前没有处理任务"}
             self._processing = True
