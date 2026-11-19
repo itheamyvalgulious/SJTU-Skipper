@@ -1731,7 +1731,7 @@ class InputPlugin(Plugin):
         title = str(cls.get("label", "") or cls.get("name", "") or "课堂")
         name = str(cls.get("name", "") or "")
         heading = f"### {name} {title}" if name else f"### {title}"
-        heading += "  `直播`" if live else "  `录播`"
+        heading += "  直播" if live else "  录播"
         blocks: list[dict[str, Any]] = [{"type": BlockType.MARKDOWN, "text": heading}]
 
         if job is not None and job_state == JobState.QUEUED and not active:

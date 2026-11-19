@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 logger = logging.getLogger("lecture_agent.ui.auth")
 
@@ -217,14 +217,17 @@ _LOGIN_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 - SJTU-Skipper</title>
-<link rel="stylesheet" href="/login.css">
+<link rel="stylesheet" href="/static/vendor/bootstrap/bootstrap.min.css">
+<link rel="stylesheet" href="/static/carbon.css">
 </head>
 <body>
   <main class="container min-vh-100 d-flex align-items-center justify-content-center py-4">
+  <div class="row justify-content-center w-100">
+  <div class="col-12 md:col-8 lg:col-5">
   <form class="card" method="post" action="/login">
     <div class="card-body">
-    <h1>SJTU-Skipper</h1>
-    <p class="fg-secondary">请使用本地 auth.json 中配置的账号登录</p>
+    <h1 class="h3">SJTU-Skipper</h1>
+    <p class="fg-2">请使用本地 auth.json 中配置的账号登录</p>
     {error}
     <input type="hidden" name="next" value="{next}">
     <div class="form-field">
@@ -238,6 +241,8 @@ _LOGIN_HTML = """<!doctype html>
     <button class="btn-solid theme-primary w-100" type="submit">登录</button>
     </div>
   </form>
+  </div>
+  </div>
   </main>
 </body>
 </html>
@@ -273,13 +278,6 @@ def _cookie_secure(request: Request) -> bool:
 def install(app: Any, data_dir: Path) -> AuthStore:
 
     store = AuthStore(Path(data_dir) / "auth.json")
-
-    @app.get("/login.css", include_in_schema=False)
-    def login_css() -> FileResponse:
-        return FileResponse(
-            Path(__file__).parent / "static/vendor/bootstrap/bootstrap.min.css",
-            media_type="text/css",
-        )
 
     @app.get("/login")
     def login_page(request: Request) -> Any:
@@ -330,7 +328,12 @@ def install(app: Any, data_dir: Path) -> AuthStore:
         response.delete_cookie(COOKIE_NAME, path="/")
         return response
 
-    public = {"/login", "/login.css", "/favicon.ico"}
+    public = {
+        "/login",
+        "/favicon.ico",
+        "/static/vendor/bootstrap/bootstrap.min.css",
+        "/static/carbon.css",
+    }
 
     @app.middleware("http")
     async def auth_gate(request: Request, call_next: Any) -> Any:

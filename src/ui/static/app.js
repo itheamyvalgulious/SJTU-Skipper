@@ -476,7 +476,7 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       caret.title = expanded ? "折叠" : "展开";
       caret.setAttribute("aria-expanded", String(expanded));
       if (expanded && !kids) {
-        kids = el("div", { class: "ms-2 border-start ps-1" });
+        kids = el("div", { class: "ms-8 border-start ps-5" });
         for (const child of children) kids.appendChild(renderTreeNode(child));
         box.appendChild(kids);
       }
@@ -906,6 +906,9 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
       button._tab = tab;
       button.textContent = tab.title || `Tab ${index + 1}`;
       const meta = tab.meta || {};
+      panel.classList.toggle("prose", Boolean(meta.doc_key));
+      panel.classList.toggle("w-100", Boolean(meta.doc_key));
+      panel.classList.toggle("min-w-0", Boolean(meta.doc_key));
       Object.assign(panel.dataset, {
         docKey: meta.doc_key || "",
         docPath: meta.path || "",
@@ -914,6 +917,12 @@ import { Dialog, Drawer, Menu, Toast } from "/static/vendor/bootstrap/bootstrap.
         selectionActions: JSON.stringify(meta.selection_actions || []),
       });
       updateBlocks(panel, tab.blocks || []);
+      for (const content of panel.querySelectorAll(":scope > .markdown")) {
+        content.classList.toggle("prose", Boolean(meta.doc_key));
+        content.classList.toggle("w-100", Boolean(meta.doc_key));
+        content.classList.toggle("min-w-0", Boolean(meta.doc_key));
+        content.classList.toggle("flex-shrink-0", Boolean(meta.doc_key));
+      }
     });
     for (const [id, panel] of data.panels)
       if (!wanted.has(id) && !composingWithin(panel)) {

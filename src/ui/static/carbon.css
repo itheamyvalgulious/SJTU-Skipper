@@ -1,0 +1,128 @@
+:root {
+  color-scheme: light dark;
+  --bs-bg-body: light-dark(#ffffff, #161616);
+  --bs-bg-1: light-dark(#f4f4f4, #262626);
+  --bs-bg-2: light-dark(#e0e0e0, #393939);
+  --bs-bg-3: light-dark(#c6c6c6, #525252);
+  --bs-bg-4: light-dark(#a8a8a8, #6f6f6f);
+  --bs-fg-body: light-dark(#161616, #f4f4f4);
+  --bs-fg-1: var(--bs-fg-body);
+  --bs-fg-2: light-dark(#525252, #c6c6c6);
+  --bs-fg-3: var(--bs-fg-2);
+  --bs-fg-4: var(--bs-fg-2);
+  --bs-border-color: #8d8d8d;
+  --bs-border-color-translucent: var(--bs-border-color);
+  --bs-border-body: var(--bs-border-color);
+  --bs-border-emphasized: var(--bs-border-color);
+  --bs-border-muted: light-dark(#c6c6c6, #525252);
+  --bs-border-subtle: light-dark(#e0e0e0, #393939);
+  --bs-link-color: light-dark(#0f62fe, #78a9ff);
+  --bs-link-hover-color: light-dark(#0043ce, #a6c8ff);
+  --bs-code-color: inherit;
+  --bs-gradient: none;
+  --bs-box-shadow-inset: none;
+  --bs-focus-ring-width: 2px;
+  --bs-focus-ring-offset: 2px;
+  --bs-focus-ring-color: light-dark(#0f62fe, #ffffff);
+  --bs-control-checked-bg: #0f62fe;
+  --bs-control-checked-border-color: var(--bs-control-checked-bg);
+  --bs-control-active-bg: #0043ce;
+  --bs-control-disabled-bg: var(--bs-bg-1);
+  --bs-control-disabled-opacity: 0.5;
+  --bs-control-transition-timing: ease;
+  --bs-btn-input-bg: var(--bs-bg-1);
+  --bs-btn-input-min-height: 2.5rem;
+  --bs-btn-input-padding-x: 1rem;
+  --bs-btn-input-lg-min-height: 3rem;
+
+  --bs-radius-0: 0;
+  --bs-radius-1: 0;
+  --bs-radius-2: 0;
+  --bs-radius-3: 0;
+  --bs-radius-4: 0;
+  --bs-radius-5: 0;
+  --bs-radius-6: 0;
+  --bs-radius-7: 0;
+  --bs-radius-8: 0;
+  --bs-radius-9: 0;
+
+  /* Each family separates solid contrast from text on subtle surfaces. */
+  --bs-primary-base: #0f62fe;
+  --bs-primary-bg: #0f62fe;
+  --bs-primary-contrast: #ffffff;
+  --bs-primary-fg: light-dark(#0f62fe, #78a9ff);
+  --bs-primary-fg-emphasis: light-dark(#0043ce, #a6c8ff);
+  --bs-primary-bg-subtle: light-dark(#edf5ff, #001d6c);
+  --bs-primary-bg-muted: light-dark(#d0e2ff, #002d9c);
+  --bs-primary-border: light-dark(#0f62fe, #78a9ff);
+  --bs-primary-focus-ring: var(--bs-focus-ring-color);
+  --bs-secondary-base: #393939;
+  --bs-secondary-bg: #393939;
+  --bs-secondary-contrast: #ffffff;
+  --bs-secondary-fg: var(--bs-fg-2);
+  --bs-secondary-fg-emphasis: var(--bs-fg-body);
+  --bs-secondary-bg-subtle: var(--bs-bg-1);
+  --bs-secondary-bg-muted: light-dark(#e0e0e0, #393939);
+  --bs-secondary-border: #8d8d8d;
+  --bs-secondary-focus-ring: var(--bs-focus-ring-color);
+  --bs-danger-base: #da1e28;
+  --bs-danger-bg: #da1e28;
+  --bs-danger-contrast: #ffffff;
+  --bs-danger-fg: light-dark(#a2191f, #ffb3b8);
+  --bs-danger-fg-emphasis: light-dark(#750e13, #ffd7d9);
+  --bs-danger-bg-subtle: light-dark(#fff1f1, #520408);
+  --bs-danger-bg-muted: light-dark(#ffd7d9, #750e13);
+  --bs-danger-border: light-dark(#da1e28, #ff8389);
+  --bs-danger-focus-ring: var(--bs-focus-ring-color);
+
+  --bs-success-base: #198038;
+  --bs-success-bg: #198038;
+  --bs-success-contrast: #ffffff;
+  --bs-success-fg: light-dark(#0e6027, #a7f0ba);
+  --bs-success-fg-emphasis: light-dark(#044317, #defbe6);
+  --bs-success-bg-subtle: light-dark(#defbe6, #022d0d);
+  --bs-success-bg-muted: light-dark(#a7f0ba, #044317);
+  --bs-success-border: light-dark(#198038, #42be65);
+  --bs-success-focus-ring: var(--bs-focus-ring-color);
+
+  --bs-warning-base: #f1c21b;
+  --bs-warning-bg: #f1c21b;
+  --bs-warning-contrast: #161616;
+  --bs-warning-fg: light-dark(#684e00, #f1c21b);
+  --bs-warning-fg-emphasis: light-dark(#483700, #fddc69);
+  --bs-warning-bg-subtle: light-dark(#fcf4d6, #302400);
+  --bs-warning-bg-muted: light-dark(#fddc69, #483700);
+  --bs-warning-border: light-dark(#8e6a00, #f1c21b);
+  --bs-warning-focus-ring: var(--bs-focus-ring-color);
+
+  --bs-info-base: #0072c3;
+  --bs-info-bg: #0072c3;
+  --bs-info-contrast: #ffffff;
+  --bs-info-fg: light-dark(#00539a, #82cfff);
+  --bs-info-fg-emphasis: light-dark(#003a6d, #bae6ff);
+  --bs-info-bg-subtle: light-dark(#e5f6ff, #012749);
+  --bs-info-bg-muted: light-dark(#bae6ff, #003a6d);
+  --bs-info-border: light-dark(#0072c3, #33b1ff);
+  --bs-info-focus-ring: var(--bs-focus-ring-color);
+
+  --bs-accent-base: #8a3ffc;
+  --bs-accent-bg: #8a3ffc;
+  --bs-accent-contrast: #ffffff;
+  --bs-accent-fg: light-dark(#6929c4, #d4bbff);
+  --bs-accent-fg-emphasis: light-dark(#491d8b, #e8daff);
+  --bs-accent-bg-subtle: light-dark(#f6f2ff, #31135e);
+  --bs-accent-bg-muted: light-dark(#e8daff, #491d8b);
+  --bs-accent-border: light-dark(#8a3ffc, #be95ff);
+  --bs-accent-focus-ring: var(--bs-focus-ring-color);
+
+  /* Bootstrap v6 uses inverse, not separate light and dark families. */
+  --bs-inverse-base: light-dark(#161616, #f4f4f4);
+  --bs-inverse-bg: light-dark(#161616, #f4f4f4);
+  --bs-inverse-contrast: light-dark(#ffffff, #161616);
+  --bs-inverse-fg: var(--bs-fg-body);
+  --bs-inverse-fg-emphasis: var(--bs-fg-body);
+  --bs-inverse-bg-subtle: var(--bs-bg-1);
+  --bs-inverse-bg-muted: light-dark(#e0e0e0, #393939);
+  --bs-inverse-border: #8d8d8d;
+  --bs-inverse-focus-ring: var(--bs-focus-ring-color);
+}

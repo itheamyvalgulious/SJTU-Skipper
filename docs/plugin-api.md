@@ -147,6 +147,14 @@ for frame in ctx.llm.stream(IpcMethod.GENERATE, role="board_recognition", messag
 
 ## 6. UI
 
+### Carbon 风格主题
+
+应用和登录页在 Bootstrap 后加载 `src/ui/static/carbon.css`．
+
+- 配色参考 [Carbon 色彩与分层](https://carbondesignsystem.com/guidelines/color/overview/) 和 [设计变量](https://carbondesignsystem.com/guidelines/color/tokens/)．浅色采用 White 分层，深色采用 Gray 100 分层，随系统明暗偏好切换．
+- 主题通过 Bootstrap v6 的 `--bs-*` 变量配置配色、尺寸、圆角和焦点．
+- 组件扩展使用对应的语义变量，按钮按下节规范选择外观与颜色．
+
 ### 按钮规范
 
 按钮先区分业务操作与低成本的查看操作，再区分强调程度和风险．层级与危险色参考 [Carbon 按钮指南](https://www.carbondesignsystem.com/building-blocks/core/components/button/guidelines)．项目只使用 Bootstrap v6 的 `solid`、`outline`、`text`，不使用 `subtle`．

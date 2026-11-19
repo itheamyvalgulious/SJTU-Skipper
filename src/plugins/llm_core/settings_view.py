@@ -341,7 +341,7 @@ class SettingsView:
             "### 等待 OpenCode 授权",
             "",
             f"1. 在浏览器打开：[打开授权页面]({uri})（新标签页）",
-            f"2. 确认页面显示的验证码：`{code}`",
+            f"2. 确认页面显示的验证码：{code}",
             "",
             (
                 f"链接与验证码 {minutes} 分钟内有效，授权完成后本页自动刷新；"
@@ -575,7 +575,12 @@ class SettingsView:
         blocks.append(
             {
                 "type": BlockType.MARKDOWN,
-                "text": f"#### `{pid}`\n\n`{provider.get('baseUrl') or '未填写端点地址'}`",
+                "text": f"#### `{pid}`\n\n"
+                + (
+                    f"`{provider['baseUrl']}`"
+                    if provider.get("baseUrl")
+                    else "未填写端点地址"
+                ),
             }
         )
         blocks.append(

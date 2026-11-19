@@ -105,6 +105,8 @@ body.resizing {
 .katex-display {
   max-width: 100%;
   overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.5em;
 }
 .qa.collapsed .qa-body {
   display: none;
