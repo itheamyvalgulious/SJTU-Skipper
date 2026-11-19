@@ -80,9 +80,7 @@ def test_log_pages_keep_their_session():
         ui.open_page(first_page)
         first = ui.state()["page_content"][first_page]
         assert first[0]["agents"][0]["label"] == "updated first"
-        assert "generation failed" in first[1]["text"]
-        assert "source failed" in first[2]["text"]
-        assert len(first) == 3
+        assert all(block["type"] == "agent_activity" for block in first)
         ui.open_page(second_page)
         assert (
             ui.state()["page_content"][second_page][0]["agents"][0]["label"] == "second"

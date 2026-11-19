@@ -1082,6 +1082,19 @@ summary.execution-header:hover {
   margin-bottom: 5px;
 }
 
+.session-errors {
+  max-height: 12rem;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  padding: 12px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--panel-2);
+}
+
 .badge {
   display: inline-flex;
   align-items: center;

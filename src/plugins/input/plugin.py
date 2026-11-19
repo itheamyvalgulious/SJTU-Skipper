@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -1039,7 +1040,6 @@ class InputPlugin(Plugin):
             "session",
             "input.queue",
             "处理队列",
-            description="后台继续处理，切换课程不会中断",
             order=1,
             render=self._render_queue_item,
             plugin_id=pid,
@@ -1585,7 +1585,7 @@ class InputPlugin(Plugin):
             return [
                 {
                     "type": BlockType.TEXT,
-                    "text": "队列为空。选中一节课后点「开始处理」，处理会在后台继续，切换课程不会中断。",
+                    "text": "队列为空．选中一节课后点「开始处理」．",
                 }
             ]
         rows: list[dict[str, Any]] = []
@@ -1895,6 +1895,7 @@ class InputPlugin(Plugin):
             session_id = session.session_id
         meta = dict(session.meta if session is not None else session_meta or {})
         total_seconds = float(total or meta.get("total_media_seconds") or 0.0)
+        live = progress_only and total_seconds <= 0
         estimated = False
         if total_seconds <= 0 and job is not None:
             durations = []
@@ -1921,6 +1922,15 @@ class InputPlugin(Plugin):
                 ranges = coverage.coverage(kind).intervals
                 cursor = max(cursor, max((end for _, end in ranges), default=0.0))
             cursors[kind] = cursor
+        if live and session is not None:
+            stt = self._ctx.service("stt")
+            status = stt.status() if stt is not None else {}
+            partial = status.get("partial")
+            if status.get("session_id") == session_id and partial is not None:
+                cursors[MediaKind.AUDIO] = max(
+                    cursors[MediaKind.AUDIO],
+                    min(session.audio.duration, float(partial["end_ms"]) / 1000),
+                )
         pipeline = self._ctx.service("notes-pipeline")
         notes = (
             pipeline.status(session_id) if pipeline is not None and session_id else None
@@ -1930,60 +1940,78 @@ class InputPlugin(Plugin):
         for kind, service_id in ((MediaKind.AUDIO, "stt"), (MediaKind.VIDEO, "vlm")):
             service = self._ctx.service(service_id)
             enabled_by_kind[kind] = bool(service is not None and service.enabled())
-        ratios = []
-        enabled = []
-        for kind in MediaKind:
-            if enabled_by_kind[kind]:
-                enabled.append(kind)
-                ratios.append(
-                    min(1.0, cursors[kind] / total_seconds) if total_seconds else 0.0
-                )
+        enabled = [kind for kind in MediaKind if enabled_by_kind[kind]]
         completed = notes["completed_chunks"] if notes else 0
         expected = notes.get("expected_chunks") if notes else None
-        if note_enabled:
-            note_ratio = (
-                min(1.0, completed / expected)
-                if expected
-                else min(1.0, float(notes.get("published_end", 0)) / total_seconds)
-                if total_seconds
-                else 0.0
+        if live:
+            end_time = (
+                (session.input_done_at or session.ended_at or time.time())
+                if session is not None
+                else time.time()
             )
-            ratios.append(note_ratio)
+            total_seconds = (
+                max(0.0, end_time - session.started_at) if session is not None else 0.0
+            )
         consumed = min((cursors[kind] for kind in enabled), default=0.0)
         denominator = (
             f"{'约 ' if estimated else ''}{_fmt_clock(total_seconds)}"
-            if total_seconds
+            if total_seconds or live
             else "待获取时长"
         )
+        ratios = [
+            min(1.0, cursors[kind] / total_seconds) if total_seconds else 0.0
+            for kind in enabled
+        ]
+        note_ratio = (
+            min(1.0, float(notes.get("published_end", 0)) / total_seconds)
+            if live and note_enabled and total_seconds
+            else min(1.0, completed / expected)
+            if expected and note_enabled
+            else min(1.0, float(notes.get("published_end", 0)) / total_seconds)
+            if total_seconds and note_enabled
+            else 0.0
+        )
+        if note_enabled and not live:
+            ratios.append(note_ratio)
         blocks.append(
             {
                 "type": BlockType.PROGRESS,
-                "label": f"总进度 {_fmt_clock(consumed)} / {denominator}",
+                "label": f"总进度 落后 {_fmt_clock(max(0.0, total_seconds - consumed))}"
+                if live
+                else f"总进度 {_fmt_clock(consumed)} / {denominator}",
                 "value": min(ratios) if ratios else (1.0 if finished else 0.0),
             }
         )
-        received, size = int(download.get("received", 0)), int(download.get("total", 0))
-        download_done = download.get("status") == DownloadState.DONE or (
-            finished and not download
-        )
-        blocks.append(
-            {
-                "type": BlockType.PROGRESS,
-                "label": "下载进度 完成"
-                if download_done
-                else f"下载进度 {_fmt_size(received)} / {_fmt_size(size) if size else '待获取大小'}",
-                "value": 1.0
-                if download_done
-                else min(1.0, received / size)
-                if size
-                else 0.0,
-            }
-        )
+        if not live:
+            received, size = (
+                int(download.get("received", 0)),
+                int(download.get("total", 0)),
+            )
+            download_done = download.get("status") == DownloadState.DONE or (
+                finished and not download
+            )
+            blocks.append(
+                {
+                    "type": BlockType.PROGRESS,
+                    "label": "下载进度 完成"
+                    if download_done
+                    else f"下载进度 {_fmt_size(received)} / {_fmt_size(size) if size else '待获取大小'}",
+                    "value": 1.0
+                    if download_done
+                    else min(1.0, received / size)
+                    if size
+                    else 0.0,
+                }
+            )
         for kind, name in ((MediaKind.AUDIO, "STT"), (MediaKind.VIDEO, "VLM")):
             blocks.append(
                 {
                     "type": BlockType.PROGRESS,
-                    "label": f"{name} 进度 {_fmt_clock(cursors[kind])} / {denominator}"
+                    "label": (
+                        f"{name} 进度 落后 {_fmt_clock(max(0.0, total_seconds - cursors[kind]))}"
+                        if live
+                        else f"{name} 进度 {_fmt_clock(cursors[kind])} / {denominator}"
+                    )
                     if enabled_by_kind[kind]
                     else f"{name} 进度 未启用",
                     "value": min(1.0, cursors[kind] / total_seconds)
@@ -1997,6 +2025,8 @@ class InputPlugin(Plugin):
                 if expected is not None
                 else f"已完成 {completed} 段"
             )
+            if live:
+                chunk_label += f" / 落后 {_fmt_clock(max(0.0, total_seconds - float(notes.get('published_end', 0))))}"
             blocks.append(
                 {
                     "type": BlockType.PROGRESS,
@@ -2004,8 +2034,30 @@ class InputPlugin(Plugin):
                     "value": note_ratio,
                 }
             )
-        if notes and notes.get("error"):
-            blocks.append({"type": BlockType.TEXT, "text": notes["error"]})
+        if notes:
+            messages = []
+            if notes.get("error"):
+                messages.append(
+                    f"笔记生成失败：{notes['error']}．删除笔记后可重新生成．"
+                )
+            for error in notes.get("errors", []):
+                message = str(error.get("error") or error.get("message") or "")
+                if not message or message == notes.get("error"):
+                    continue
+                location = str(error.get("source") or "来源读取")
+                if error.get("chunk") is not None:
+                    location = f"笔记片段 {error['chunk'] + 1}"
+                if error.get("start") is not None and error.get("end") is not None:
+                    location += f" {error['start']:.1f}-{error['end']:.1f}s"
+                messages.append(f"{location}：{message}")
+            if messages:
+                text = "\n".join(dict.fromkeys(messages))
+                blocks.append(
+                    {
+                        "type": BlockType.HTML,
+                        "html": f'<pre class="session-errors" aria-label="处理错误">{escape(text)}</pre>',
+                    }
+                )
 
         if progress_only:
             return blocks

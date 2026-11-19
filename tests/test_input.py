@@ -698,6 +698,91 @@ class TestCatalogMapping:
 
 
 class TestInputPluginUI:
+    def test_live_progress(self, tmp_path, monkeypatch):
+        from core.streams import StreamKind
+
+        ctx = _make_context(tmp_path)
+        session = ctx.streams.current
+        session.started_at = 1000.0
+        session.audio.discard(220)
+        ctx.streams.seal_text(session.session_id, StreamKind.TRANSCRIPT, 100)
+        ctx.streams.seal_text(session.session_id, StreamKind.VISUAL, 180)
+        status = {"session_id": session.session_id, "partial": {"end_ms": 218000}}
+        ctx.services.register(
+            "stt", SimpleNamespace(enabled=lambda: True, status=lambda: status)
+        )
+        ctx.services.register("vlm", SimpleNamespace(enabled=lambda: True))
+        notes = {
+            "chunk_enabled": True,
+            "completed_chunks": 0,
+            "expected_chunks": None,
+            "published_end": 0,
+            "error": "",
+            "errors": [],
+        }
+        ctx.services.register(
+            "notes-pipeline", SimpleNamespace(status=lambda sid: notes)
+        )
+        plugin = InputPlugin()
+        plugin._ctx = ctx
+        monkeypatch.setattr("plugins.input.plugin.time.time", lambda: 1240.0)
+        blocks = plugin._render_recording_page(
+            True, False, {}, session.session_id, active=True, progress_only=True
+        )
+        assert blocks[0]["value"] == pytest.approx(180 / 240)
+        assert "落后 01:00" in blocks[0]["label"]
+        assert blocks[1]["value"] == pytest.approx(218 / 240)
+        assert "落后 00:22" in blocks[1]["label"]
+        assert len(blocks) == 4
+        assert session.transcript_progress.before == 100
+        status["session_id"] = "another-course"
+        blocks = plugin._render_recording_page(
+            True, False, {}, session.session_id, active=True, progress_only=True
+        )
+        assert blocks[1]["value"] == pytest.approx(100 / 240)
+        recorded = plugin._render_recording_page(
+            True, False, {}, session.session_id, active=True, total=600
+        )
+        assert recorded[2]["value"] == pytest.approx(100 / 600)
+        session.input_done_at = 1240.0
+        monkeypatch.setattr("plugins.input.plugin.time.time", lambda: 2000.0)
+        finished = plugin._render_recording_page(
+            False, True, {}, session.session_id, progress_only=True
+        )
+        assert finished[0]["value"] == pytest.approx(100 / 240)
+
+    def test_class_errors(self, tmp_path):
+        ctx = _make_context(tmp_path)
+        sid = ctx.streams.current.session_id
+        notes = {
+            "chunk_enabled": False,
+            "completed_chunks": 0,
+            "error": "",
+            "errors": [],
+        }
+        ctx.services.register(
+            "notes-pipeline", SimpleNamespace(status=lambda sid: notes)
+        )
+        plugin = InputPlugin()
+        plugin._ctx = ctx
+        assert not any(
+            b["type"] == BlockType.HTML
+            for b in plugin._render_recording_page(False, False, {}, sid)
+        )
+        error = {
+            "source": "visual",
+            "start": 10.0,
+            "end": 20.0,
+            "message": "<script>failed</script>",
+        }
+        notes["errors"] = [error, error, {"chunk": 0, "error": "writer failed"}]
+        blocks = plugin._render_recording_page(False, False, {}, sid)
+        errors = [b for b in blocks if b["type"] == BlockType.HTML]
+        assert len(errors) == 1
+        assert errors[0]["html"].count("visual 10.0-20.0s") == 1
+        assert "&lt;script&gt;" in errors[0]["html"]
+        assert "writer failed" in errors[0]["html"]
+
     def test_course_download_progress(self, tmp_path):
         from core.events import Event
         from plugins.input.plugin import _Job

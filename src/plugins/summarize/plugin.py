@@ -34,27 +34,6 @@ def note_log_blocks(state, *, message_channel: bool = True):
         if agents
         else []
     )
-    if state["error"]:
-        blocks.append(
-            {
-                "type": BlockType.TEXT,
-                "text": f"笔记生成失败：{state['error']}．删除笔记后可重新生成．",
-            }
-        )
-    seen = set()
-    for error in state.get("errors", []):
-        message = str(error.get("error") or error.get("message") or "")
-        if not message or message == state["error"]:
-            continue
-        location = str(error.get("source") or "来源读取")
-        if error.get("chunk") is not None:
-            location = f"笔记片段 {error['chunk'] + 1}"
-        if error.get("start") is not None and error.get("end") is not None:
-            location += f" {error['start']:.1f}-{error['end']:.1f}s"
-        entry = (location, message)
-        if entry not in seen:
-            seen.add(entry)
-            blocks.append({"type": BlockType.TEXT, "text": f"{location}：{message}"})
     return blocks
 
 

@@ -356,16 +356,8 @@ export class Runtime {
     const config = await this.load();
     return {
       config,
-      models: validate(
-        modelsConfigurationSchema,
-        Bun.YAML.parse(config.models),
-        "models.yml",
-      ),
-      roles: validate(
-        rolesConfigurationSchema,
-        Bun.YAML.parse(config.roles),
-        "roles.yml",
-      ),
+      models: validate(modelsConfigurationSchema, Bun.YAML.parse(config.models), "models.yml"),
+      roles: validate(rolesConfigurationSchema, Bun.YAML.parse(config.roles), "roles.yml"),
     };
   }
 
@@ -378,9 +370,7 @@ export class Runtime {
       auth: provider.auth ?? "apiKey",
       baseUrl: String(provider.baseUrl ?? ""),
       configured:
-        provider.auth === "none" ||
-        !!provider.apiKey ||
-        this.auth!.credentials.list(id).length > 0,
+        provider.auth === "none" || !!provider.apiKey || this.auth!.credentials.list(id).length > 0,
       source: provider.apiKey ? ProviderSource.CONFIG : ProviderSource.PROJECT,
       models: provider.models.map((model) => ({
         id: model.id,
@@ -413,10 +403,7 @@ export class Runtime {
   }
 
   /** Validate and persist an edited configuration, then report the new catalog. */
-  private async applyEdited(
-    models: ModelsConfiguration,
-    roles: Record<string, string>,
-  ) {
+  private async applyEdited(models: ModelsConfiguration, roles: Record<string, string>) {
     const config = await this.configuration(
       Bun.YAML.stringify(models, null, 2),
       Bun.YAML.stringify(roles, null, 2),
@@ -593,8 +580,7 @@ export class Runtime {
       const provider = String(params.provider);
       const { models, roles } = await this.definitions();
       if (!models.providers[provider]) throw new Error(`Unknown provider: ${provider}`);
-      if (Object.keys(models.providers).length === 1)
-        throw new Error("至少保留一个提供方");
+      if (Object.keys(models.providers).length === 1) throw new Error("至少保留一个提供方");
       const providers = { ...models.providers };
       delete providers[provider];
       const next: Record<string, string> = {};
