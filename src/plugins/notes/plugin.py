@@ -56,6 +56,21 @@ class NotesService:
     def open_chunk_notes(self, session_id, doc=NoteKind.KNOWLEDGE):
         return self.view.open_chunk_notes(session_id, doc)
 
+    def writer_session_id(self, session_id=None):
+        return self.pipeline.writer_session_id(session_id)
+
+    def resume_writer_for_ask(self, session_id=None, tools=None):
+        return self.pipeline.resume_writer_for_ask(session_id, tools)
+
+    def message(self, payload):
+        """Send a continuation message to the published writer session."""
+
+        data = dict(payload or {})
+        sid = str(data.get("session_id") or "")
+        if not data.get("agent_session_id"):
+            data["agent_session_id"] = self.pipeline.writer_session_id(sid)
+        return self.pipeline.message(data)
+
 
 class NotesPlugin(Plugin):
     id = "notes"

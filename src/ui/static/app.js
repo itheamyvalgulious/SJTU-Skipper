@@ -4255,6 +4255,12 @@
         if (data.type === WS_MESSAGE_TYPE.REFRESH) scheduleRefresh();
         else if (data.type === WS_MESSAGE_TYPE.NOTIFY && data.topic === "qa.live") {
           applyQaLive(data.payload || {});
+        } else if (
+          data.type === WS_MESSAGE_TYPE.NOTIFY &&
+          data.topic === "ui.toast"
+        ) {
+          const message = String((data.payload || {}).message || "");
+          if (message) toast(message);
         }
       } catch (_) {}
     });
@@ -4285,6 +4291,22 @@
       if (Date.now() - state.lastLoad > 2500) loadState({ quiet: true });
     }, 4000);
   }
+
+  document.addEventListener("click", (event) => {
+    const link = event.target?.closest?.('a[href^="#"]');
+    if (!link) return;
+    const href = link.getAttribute("href") || "";
+    let id = href.slice(1);
+    try {
+      id = decodeURIComponent(id);
+    } catch (_) {
+      // keep the raw fragment
+    }
+    const target = id ? document.getElementById(id) : null;
+    if (!target) return;
+    event.preventDefault();
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 
   boot();
 })();

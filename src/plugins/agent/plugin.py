@@ -376,6 +376,10 @@ class AgentService:
                         steps=int(values.get("steps") or 0),
                         error=values.get("error"),
                         total_tokens=int(values.get("total_tokens") or 0),
+                        input_tokens=int(values.get("input_tokens") or 0),
+                        output_tokens=int(values.get("output_tokens") or 0),
+                        cache_read_tokens=int(values.get("cache_read_tokens") or 0),
+                        cache_miss_tokens=int(values.get("cache_miss_tokens") or 0),
                         tool_calls_made=calls,
                         finish_reason=FinishReason(
                             values.get("finish_reason") or FinishReason.STOP

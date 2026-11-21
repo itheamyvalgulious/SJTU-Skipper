@@ -225,7 +225,8 @@ def test_research_ask_reads_complete_snapshot(tmp_path: Path) -> None:
         assert "every condition" in note.read_text()
         assert snapshots[0]["lecture_source.md"] == "All conditions\n" * 1000
         assert "note_knowledge.md" in snapshots[0]
-        assert not sdk.sessions
+        # Conversations stay open so the next ask can reuse the prefix.
+        assert sdk.sessions
     finally:
         runtime.stop()
 
@@ -348,7 +349,6 @@ def test_completed_qa_message_does_not_reopen_or_finish_twice(tmp_path):
             assert _wait_until(
                 lambda: (
                     finished.call_count == 1
-                    and not sdk.sessions
                     and '"status": "done"' in note.read_text()
                 )
             )
@@ -442,3 +442,66 @@ def test_selection_character_limit():
     assert _truncate_chars(text, len(text)) == text
     assert _truncate_chars(text, 11) == text[:11] + "\n……（选中内容过长，已截断）"
     assert _truncate_chars(text, 0) == ""
+
+
+def test_second_ask_reuses_conversation_and_skips_note_snapshot(tmp_path: Path) -> None:
+    runs: list[str] = []
+
+    def script(sdk, params):
+        runs.append(str(params.get("instruction", "")))
+        yield {
+            "type": RuntimeFrameType.RESULT,
+            "result": {"final_message": "Answer", "steps": 1},
+        }
+
+    runtime, llm = _build(tmp_path, script)
+    try:
+        note = _open_note(runtime, tmp_path)
+        for index, question in enumerate(("Question one", "Question two"), start=1):
+            result = runtime.ui.dispatch_action(
+                "ask.ask", {"path": str(note), "question": question}
+            )
+            assert result.ok
+            assert _wait_until(lambda index=index: len(llm.runs) == index)
+        creates = [c for c in llm.calls if c[0] == IpcMethod.CREATE_SESSION]
+        assert len(creates) == 1
+        assert len(llm.runs) == 2
+        assert "## 笔记" in runs[0]
+        assert "## 笔记" not in runs[1]
+        assert "Question two" in runs[1]
+    finally:
+        runtime.stop()
+
+
+def test_preference_change_does_not_invalidate_conversation(tmp_path: Path) -> None:
+    runs: list[str] = []
+
+    def script(sdk, params):
+        runs.append(str(params.get("instruction", "")))
+        yield {
+            "type": RuntimeFrameType.RESULT,
+            "result": {"final_message": "Answer", "steps": 1},
+        }
+
+    runtime, llm = _build(tmp_path, script)
+    try:
+        settings = runtime.services.require("settings")
+        settings.set("tutor.preferences_text", "## 偏好\n\n- 先给结论")
+        note = _open_note(runtime, tmp_path)
+        result = runtime.ui.dispatch_action(
+            "ask.ask", {"path": str(note), "question": "Q1"}
+        )
+        assert result.ok
+        assert _wait_until(lambda: len(llm.runs) == 1)
+        settings.set("tutor.preferences_text", "## 偏好\n\n- 多给推导")
+        result = runtime.ui.dispatch_action(
+            "ask.ask", {"path": str(note), "question": "Q2"}
+        )
+        assert result.ok
+        assert _wait_until(lambda: len(llm.runs) == 2)
+        creates = [c for c in llm.calls if c[0] == IpcMethod.CREATE_SESSION]
+        assert len(creates) == 1
+        assert "偏好更新" in runs[1]
+        assert "多给推导" in runs[1]
+    finally:
+        runtime.stop()

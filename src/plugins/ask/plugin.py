@@ -7,10 +7,12 @@ back.  Answers live in the note as ``qa`` markdown blocks (owned by ``reader``).
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
+import tempfile
 import threading
 import time
-import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -24,7 +26,7 @@ from core.agent_types import (
     ExecutionBlockStatus,
     ExecutionStatus,
 )
-from core.note_document import AskIntensity, QaStatus
+from core.note_document import AskIntensity, QaStatus, strip_blocks
 from core.navigation import current_navigation
 from core.plugin import Plugin, PluginContext
 from core.settings_spec import SettingsSpec, SettingType
@@ -41,6 +43,17 @@ SELECTION_ID = "ask.ask"
 # The agent plugin owns this channel. Show it only when the action exists.
 MESSAGE_ACTION = "agent.message"
 
+# Fallback turn prompt when the tutor plugin (or its editable setting) is absent.
+_DEFAULT_TURN_PROMPT = r"""现在学生要针对上面的笔记向你提问。
+
+- 进入提问模式：只回答问题，不要继续写笔记，不要修改任何文件；回答由程序插入笔记。
+- 依据上面的课堂材料和笔记回答；笔记/材料里没有的，明确说「笔记里没有」。
+- 回答直接、面向本科生；学生追问时再展开，不要一次给太多。
+- 笔记里已有定义/记号时优先沿用；补充课外内容时标「补充（课外）」。
+- 不要写「根据笔记/根据材料」这类过程性文字。
+- 本轮附带的「选中片段 + 附近文字」只用于定位，不要把它当成完整上下文重复复述。
+- 工具列表中的文件工具不可用；文件工具之外的其它工具仍可正常使用。"""
+
 
 class AskService:
     __slots__ = ("_plugin",)
@@ -55,6 +68,11 @@ class AskService:
 
     def activity(self, path: str, qa_id: str) -> dict[str, Any] | None:
         return self._plugin._activity(path, qa_id)
+
+    def invalidate_conversations(self) -> None:
+        """Drop cached ask conversations (called after prompt/preference edits)."""
+
+        self._plugin.invalidate_conversations()
 
 
 class AskPlugin(Plugin):
@@ -73,6 +91,9 @@ class AskPlugin(Plugin):
         self._reader = ctx.require("reader")
         self._active: set[str] = set()
         self._live: dict[tuple[str, str], _Live] = {}
+        self._conversations: dict[tuple[str, str], dict[str, Any]] = {}
+        self._conv_lock = threading.Lock()
+        self._usages: dict[str, dict[str, int]] = {}
         self._active_lock = threading.Lock()
         self._closed = False
 
@@ -81,6 +102,9 @@ class AskPlugin(Plugin):
 
         ctx.register_service("ask", AskService(self))
         ctx.ui.register_action(ACTION, self._on_ask, plugin_id=self.id)
+        ctx.ui.register_action(
+            "ask.restore_prompts", self._restore_prompts, plugin_id=self.id
+        )
         self._reader.register_activity_provider(self.id, self._activity)
 
         self._reader.register_selection_action(
@@ -106,12 +130,14 @@ class AskPlugin(Plugin):
             self._closed = True
             for session_id in tuple(self._active):
                 self._agent.cancel(session_id)
+        self.invalidate_conversations()
         ctx = getattr(self, "ctx", None)
         if ctx is not None:
-            try:
-                ctx.ui.unregister_action(ACTION)
-            except Exception:  # noqa: BLE001 - shutdown is best effort
-                pass
+            for action in (ACTION, "ask.restore_prompts"):
+                try:
+                    ctx.ui.unregister_action(action)
+                except Exception:  # noqa: BLE001 - shutdown is best effort
+                    pass
         reader = getattr(self, "_reader", None)
         if reader is not None:
             try:
@@ -119,6 +145,15 @@ class AskPlugin(Plugin):
                 reader.unregister_activity_provider(self.id)
             except Exception:  # noqa: BLE001 - shutdown is best effort
                 pass
+
+    def _restore_prompts(self, payload):
+        defaults = {
+            "ask.instant_prompt": INSTANT_SYSTEM_PROMPT,
+            "ask.research_prompt": RESEARCH_SYSTEM_PROMPT,
+        }
+        for key, value in defaults.items():
+            self._settings.set(key, value)
+        return {"ok": True, "message": "已恢复 ask 默认提示词", "refresh": True}
 
     def _activity(self, path, qa_id):
         with self._active_lock:
@@ -179,7 +214,7 @@ class AskPlugin(Plugin):
         course_name = self._course_name(path)
         threading.Thread(
             target=self._run,
-            args=(path, qa_id, selection, intensity, course_name),
+            args=(path, qa_id, selection, intensity, course_name, question),
             name=f"ask-{qa_id}",
             daemon=True,
         ).start()
@@ -194,6 +229,17 @@ class AskPlugin(Plugin):
             "data": {"qa_id": qa_id},
         }
 
+    def invalidate_conversations(self) -> None:
+        with self._conv_lock:
+            conversations = list(self._conversations.values())
+            self._conversations.clear()
+        for conversation in conversations:
+            try:
+                self._agent.close(conversation["session_id"])
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+            shutil.rmtree(conversation.get("snapshot", ""), ignore_errors=True)
+
     def _run(
         self,
         path: str,
@@ -201,6 +247,7 @@ class AskPlugin(Plugin):
         selection: str,
         intensity: AskIntensity,
         course_name: str,
+        question: str,
     ) -> None:
         live = _Live(self, path, qa_id)
         key = (str(Path(path).resolve()), qa_id)
@@ -208,9 +255,11 @@ class AskPlugin(Plugin):
             self._live[key] = live
         status = QaStatus.DONE
         answer = ""
+        usage: dict[str, int] = {}
         started = time.time()
         try:
-            answer = self._answer(path, qa_id, selection, intensity, live, course_name)
+            answer = self._answer(path, qa_id, selection, intensity, live, course_name, question)
+            usage = self._usages.pop(qa_id, {})
         except Exception as exc:  # noqa: BLE001 - the failure belongs in the note
             self.ctx.logger.exception("ask %s failed", qa_id)
             status = QaStatus.ERROR
@@ -225,6 +274,7 @@ class AskPlugin(Plugin):
                 collapsed=(status == QaStatus.DONE),
             )
             live.finish(status=status, answer=answer, elapsed=time.time() - started)
+            self._log_turn(path, qa_id, question, answer, intensity, status, usage)
         finally:
             with self._active_lock:
                 self._live.pop(key, None)
@@ -237,51 +287,31 @@ class AskPlugin(Plugin):
         intensity: AskIntensity,
         live: "_Live",
         course_name: str,
+        question: str,
     ) -> str:
         context = self._reader.qa_context(
             path,
             qa_id,
-            before_chars=self._before_chars,
-            after_chars=self._after_chars,
+            before_chars=min(400, self._before_chars),
+            after_chars=min(400, self._after_chars),
             history_chars=self._history_chars,
         )
-        prompt = self._build_prompt(path, context, selection, intensity, course_name)
-        files = (
-            self._workspace_files(path) if intensity == AskIntensity.RESEARCH else {}
+        conversation, first = self._conversation(path, intensity)
+        prompt = self._prompt_for(
+            path, question, selection, context, intensity, first, conversation
         )
+
         started = time.time()
-        with tempfile.TemporaryDirectory(prefix="notes-ask-") as snapshot:
-            frozen = {}
-            with publication_lock(Path(path).parent):
-                for name, original in files.items():
-                    destination = Path(snapshot) / name
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    destination.write_bytes(Path(original).read_bytes())
-                    frozen[name] = destination
-            profile = self._profile(intensity)
-            with self._active_lock:
-                if self._closed:
-                    raise RuntimeError("Ask service is closed")
-                session = self._agent.create_session(
-                    name=f"ask-{qa_id}",
-                    agent=profile,
-                    workspace=FileWorkspace(frozen, readonly=frozen),
-                    meta={
-                        "role": ExecutionRole.QUESTION_ANSWER,
-                        "qa_id": qa_id,
-                        "intensity": intensity,
-                    },
-                )
-                self._active.add(session.id)
-            try:
-                live.bind_session(session.id)
-                result = self._agent.run(session.id, prompt, on_event=live.on_event)
-            finally:
-                try:
-                    self._agent.close(session.id)
-                finally:
-                    with self._active_lock:
-                        self._active.discard(session.id)
+        try:
+            result = self._run_turn(conversation, prompt, live)
+        except Exception:
+            # A stale conversation (e.g. runtime restarted) is rebuilt once.
+            self._drop_conversation(path, intensity)
+            conversation, first = self._conversation(path, intensity)
+            prompt = self._prompt_for(
+                path, question, selection, context, intensity, first, conversation
+            )
+            result = self._run_turn(conversation, prompt, live)
 
         self.ctx.logger.info(
             "ask %s finished in %.1fs: intensity=%s steps=%s tokens=%s error=%s",
@@ -292,9 +322,313 @@ class AskPlugin(Plugin):
             result.total_tokens,
             result.error,
         )
+        try:
+            conversation["chars"] = int(conversation.get("chars", 0)) + len(
+                prompt
+            ) + len(result.final_message or "")
+            tokens = int(result.input_tokens or 0) or int(conversation["chars"] * 0.56)
+            if self.ctx is not None:
+                self.ctx.events.emit(
+                    "ask.context_usage",
+                    session_id=path,
+                    chars=int(conversation["chars"]),
+                    tokens=tokens,
+                )
+        except Exception:  # noqa: BLE001 - usage reporting is best effort
+            pass
+        self._usages[qa_id] = {
+            "input_tokens": int(result.input_tokens),
+            "output_tokens": int(result.output_tokens),
+            "cache_read_tokens": int(result.cache_read_tokens),
+            "cache_miss_tokens": int(result.cache_miss_tokens),
+            "total_tokens": int(result.total_tokens),
+        }
         if result.error:
             raise RuntimeError(result.error)
         return result.final_message.strip() or "（模型没有返回内容）"
+
+    def _prompt_for(
+        self,
+        path: str,
+        question: str,
+        selection: str,
+        context: Mapping[str, Any],
+        intensity: AskIntensity,
+        first: bool,
+        conversation: dict[str, Any] | None = None,
+    ) -> str:
+        parts = [self._turn_prompt()]
+        preferences = self._preferences_text()
+        prefs_hash = _text_hash(preferences)
+        writer = bool((conversation or {}).get("writer"))
+        if first and not writer:
+            snapshot = self._notes_snapshot(path)
+            if preferences:
+                parts.append("## 学生长期偏好（已确认）\n\n" + preferences)
+            parts.append("## 笔记\n\n" + (snapshot or "（暂无笔记正文）"))
+            history = _format_history(context.get("history") or [])
+            if history and history != "（无）":
+                parts.append("## 此前问答记录\n\n" + history)
+        elif conversation is not None and preferences:
+            if conversation.get("prefs_hash", "") != prefs_hash:
+                parts.append(
+                    "## 偏好更新（以本节为准，之前提到的偏好不再生效）\n\n"
+                    + preferences
+                )
+        parts.append("## 本轮问题位置\n\n" + self._locator(selection, context))
+        parts.append("## 学生的问题\n\n" + question)
+        if conversation is not None:
+            conversation["prefs_hash"] = prefs_hash
+        if writer:
+            if intensity == AskIntensity.INSTANT:
+                parts.append(
+                    "快速模式禁止调用任何文件工具（read、grep、glob、edit、write）；"
+                    "文件工具之外的其它工具仍可正常使用，优先直接回答。"
+                )
+            else:
+                parts.append("可用 read、grep、glob 只读核对材料；不得修改任何文件。")
+        elif intensity == AskIntensity.RESEARCH:
+            readable = "、".join(f"`{item}`" for item in self._workspace_files(path))
+            parts.append(f"需要核对材料时可用 read、grep、glob 读取：{readable}。")
+        else:
+            parts.append("本题没有文件工具，材料已经足够时直接回答。")
+        return "\n\n".join(parts)
+
+    def _run_turn(self, conversation: dict[str, Any], prompt: str, live: "_Live"):
+        session_id = conversation["session_id"]
+        live.bind_session(session_id)
+        result = self._agent.run(session_id, prompt, on_event=live.on_event)
+        conversation["turns"] = int(conversation.get("turns", 0)) + 1
+        return result
+
+    def _drop_conversation(self, path: str, intensity: AskIntensity) -> None:
+        sid = Path(path).parent.parent.name
+        with self._conv_lock:
+            conversation = None
+            for key in list(self._conversations):
+                if key[0] == sid and (
+                    str(key[1]).startswith("writer:")
+                    or key == self._conversation_key(path, intensity)
+                ):
+                    conversation = conversation or self._conversations.pop(key, None)
+            conversation = conversation or self._conversations.pop(
+                self._conversation_key(path, intensity), None
+            )
+        if conversation is None:
+            return
+        try:
+            self._agent.close(conversation["session_id"])
+        except Exception:  # noqa: BLE001
+            pass
+        shutil.rmtree(conversation.get("snapshot", ""), ignore_errors=True)
+
+    def _conversation_key(self, path: str, intensity: AskIntensity):
+        sid = Path(path).parent.parent.name
+        return (sid, str(intensity))
+
+    def _conversation(self, path: str, intensity: AskIntensity):
+        notes = self.ctx.service("notes") if self.ctx is not None else None
+        resume = getattr(notes, "resume_writer_for_ask", None)
+        writer_id = getattr(notes, "writer_session_id", None)
+        sid = Path(path).parent.parent.name
+        has_writer = bool(callable(writer_id) and writer_id(sid))
+        if callable(resume) and has_writer:
+            return self._writer_conversation(path, resume, intensity)
+        return self._fallback_conversation(path, intensity)
+
+    def _writer_conversation(self, path: str, resume, intensity: AskIntensity):
+        sid = Path(path).parent.parent.name
+        key = (sid, f"writer:{intensity}")
+        signature = self._note_signature(path)
+        with self._conv_lock:
+            conversation = self._conversations.get(key)
+            if conversation is not None and conversation.get("signature") == signature:
+                return conversation, int(conversation.get("turns", 0)) == 0
+            old = self._conversations.pop(key, None)
+            # Only one resumed writer session may be live at a time.
+            others = [
+                (other_key, other)
+                for other_key, other in self._conversations.items()
+                if other_key[0] == sid
+                and other_key[1] != key[1]
+                and str(other_key[1]).startswith("writer:")
+            ]
+            for other_key, _other in others:
+                self._conversations.pop(other_key, None)
+        if old is not None:
+            try:
+                self._agent.close(old["session_id"])
+            except Exception:  # noqa: BLE001
+                pass
+        for _other_key, other in others:
+            try:
+                self._agent.close(other["session_id"])
+            except Exception:  # noqa: BLE001
+                pass
+        tools: list[str] = []
+        if intensity == AskIntensity.RESEARCH:
+            tools = [
+                AgentToolName.READ,
+                AgentToolName.GREP,
+                AgentToolName.GLOB,
+            ]
+        try:
+            info = resume(sid, tools)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the student
+            raise RuntimeError(str(exc)) from exc
+        conversation = {
+            "session_id": info.id,
+            "signature": signature,
+            "turns": 0,
+            "snapshot": "",
+            "prefs_hash": "",
+            "writer": True,
+        }
+        with self._conv_lock:
+            self._conversations[key] = conversation
+        return conversation, True
+
+    def _fallback_conversation(self, path: str, intensity: AskIntensity):
+        key = self._conversation_key(path, intensity)
+        signature = self._note_signature(path)
+        with self._conv_lock:
+            conversation = self._conversations.get(key)
+            if conversation is not None and conversation.get("signature") == signature:
+                return conversation, int(conversation.get("turns", 0)) == 0
+            old = self._conversations.pop(key, None)
+        if old is not None:
+            try:
+                self._agent.close(old["session_id"])
+            except Exception:  # noqa: BLE001
+                pass
+            shutil.rmtree(old.get("snapshot", ""), ignore_errors=True)
+
+        snapshot = ""
+        files: dict[str, str] = {}
+        if intensity == AskIntensity.RESEARCH:
+            snapshot = tempfile.mkdtemp(prefix="notes-ask-conv-")
+            for name, original in self._workspace_files(path).items():
+                destination = Path(snapshot) / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(Path(original).read_bytes())
+                files[name] = str(destination)
+        profile = self._profile(intensity)
+        session = self._agent.create_session(
+            name=f"ask-conv-{key[0][:12]}-{key[1]}",
+            agent=profile,
+            workspace=FileWorkspace(files, readonly=files),
+            meta={
+                "role": ExecutionRole.QUESTION_ANSWER,
+                "conversation": True,
+                "notes_session": key[0],
+            },
+        )
+        conversation = {
+            "session_id": session.id,
+            "signature": signature,
+            "turns": 0,
+            "snapshot": snapshot,
+            "prefs_hash": "",
+        }
+        with self._conv_lock:
+            self._conversations[key] = conversation
+        return conversation, True
+
+    def _note_signature(self, path: str) -> str:
+        digest = hashlib.sha256()
+        try:
+            sid = Path(path).parent.parent.name
+            notes = self.ctx.data_dir / "sessions" / sid / "notes"
+            pipeline = self.ctx.service("notes")
+            names = [Path(path).name]
+            if pipeline is not None:
+                for kind in NotePublication:
+                    names.extend(
+                        name for name, _label in pipeline.note_files(kind).values()
+                    )
+            for name in sorted(set(names)):
+                candidate = notes / name
+                if candidate.is_file():
+                    digest.update(name.encode())
+                    digest.update(
+                        strip_blocks(
+                            candidate.read_text("utf-8", errors="replace")
+                        ).encode("utf-8")
+                    )
+        except OSError:
+            return ""
+        return digest.hexdigest()
+
+    def _notes_snapshot(self, path: str) -> str:
+        notes = Path(path).parent
+        pipeline = self.ctx.service("notes")
+        names: list[tuple[str, str]] = []
+        if pipeline is not None:
+            for _key, (name, label) in pipeline.note_files(NotePublication.FINAL).items():
+                names.append((name, label))
+        else:
+            names = [(Path(path).name, "笔记")]
+        parts: list[str] = []
+        for name, label in names:
+            candidate = notes / name
+            if not candidate.is_file():
+                continue
+            text = strip_blocks(
+                candidate.read_text("utf-8", errors="replace")
+            ).strip()
+            if not text:
+                continue
+            parts.append(f"### {label}（{name}）\n\n{text}")
+        return "\n\n".join(parts)
+
+    def _locator(self, selection: str, context: Mapping[str, Any]) -> str:
+        selected = _truncate_chars(selection, self._selection_chars) or "（未选中，问题针对整篇笔记）"
+        before = _truncate_chars(str(context.get("before") or ""), 400) or "（无）"
+        after = _truncate_chars(str(context.get("after") or ""), 400) or "（无）"
+        return f"选中片段：\n{selected}\n\n前文：\n{before}\n\n后文：\n{after}"
+
+    def _preferences_text(self) -> str:
+        try:
+            return str(self._settings.get("tutor.preferences_text", "") or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _turn_prompt(self) -> str:
+        return str(
+            self._settings.get("tutor.ask_prompt", _DEFAULT_TURN_PROMPT)
+            or _DEFAULT_TURN_PROMPT
+        )
+
+    def _log_turn(
+        self,
+        path: str,
+        qa_id: str,
+        question: str,
+        answer: str,
+        intensity: AskIntensity,
+        status: QaStatus,
+        usage: dict[str, int] | None = None,
+    ) -> None:
+        try:
+            sid = Path(path).parent.parent.name
+            directory = self.ctx.data_dir / "sessions" / sid
+            directory.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "qa_id": qa_id,
+                "intensity": str(intensity),
+                "status": str(status),
+                "question": question,
+                "answer": answer,
+                **{
+                    key: int(value)
+                    for key, value in (usage or {}).items()
+                },
+            }
+            with (directory / "ask_log.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            self.ctx.logger.debug("ask log write failed", exc_info=True)
 
     def _profile(self, intensity: AskIntensity) -> AgentProfile:
         return AgentProfile(
@@ -309,38 +643,6 @@ class AskPlugin(Plugin):
                 AgentTool(name)
                 for name in (AgentToolName.READ, AgentToolName.GREP, AgentToolName.GLOB)
             ],
-        )
-
-    def _build_prompt(
-        self,
-        path: str,
-        context: Mapping[str, Any],
-        selection: str,
-        intensity: AskIntensity,
-        course_name: str,
-    ) -> str:
-        name = Path(path).name
-        if intensity == AskIntensity.RESEARCH:
-            readable = "、".join(f"`{item}`" for item in self._workspace_files(path))
-            instructions = (
-                f"可用 read、grep、glob 核对完整授权材料．可读文件：{readable}．"
-            )
-        else:
-            instructions = "材料已经足够，直接回答；本题没有工具可用。"
-        return ASK_PROMPT_TEMPLATE.format(
-            course_name=course_name,
-            file_label=self._doc_label(name),
-            file_name=name,
-            selection=_truncate_chars(selection, self._selection_chars)
-            or "（未提供选中内容）",
-            before_chars=self._before_chars,
-            before=context.get("before") or "（无）",
-            after_chars=self._after_chars,
-            after=context.get("after") or "（无）",
-            history_chars=self._history_chars,
-            history=_format_history(context.get("history") or []),
-            question=context.get("question") or "",
-            instructions=instructions,
         )
 
     def _workspace_files(self, path: str) -> dict[str, str]:
@@ -548,6 +850,10 @@ _DEFAULT_DOC_LABELS = {
     "chunk_note_gossip.md": "分段闲话",
     "chunk_note_notice.md": "分段通知",
 }
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
 def _truncate_chars(text: str, limit: int) -> str:

@@ -11,9 +11,10 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any, Callable, Iterable, Mapping
 
-from html import escape as html_escape
+from html import escape as html_escape, unescape as html_unescape
 
 from markdown_it import MarkdownIt
+from mdit_py_plugins.anchors import anchors_plugin
 from mdit_py_plugins.footnote import footnote_plugin
 
 from .navigation import current_navigation
@@ -105,6 +106,7 @@ def _markdown_renderer() -> MarkdownIt:
         except Exception:  # pragma: no cover - rule availability differs
             pass
     md.use(footnote_plugin)
+    md.use(anchors_plugin, max_level=3)
     return md
 
 
@@ -185,6 +187,55 @@ def render_markdown(text: str, *, document_id: str = "") -> str:
     html = _MD.render(prepared, env)
     html = _restore_math(html, blocked)
     return _sanitize_html(html)
+
+
+_HEADING_RE = re.compile(
+    r"<h([1-3])\b[^>]*\bid=\"([^\"]+)\"[^>]*>(.*?)</h\1>", re.I | re.S
+)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def markdown_toc(text: str) -> list[dict[str, Any]]:
+    """Return ``[{level, id, text}]`` for h1–h3 headings in *text*."""
+
+    html = render_markdown(text)
+    items: list[dict[str, Any]] = []
+    for match in _HEADING_RE.finditer(html):
+        body = html_unescape(_TAG_RE.sub("", match.group(3))).strip()
+        if not body:
+            continue
+        items.append(
+            {
+                "level": int(match.group(1)),
+                "id": match.group(2),
+                "text": body,
+            }
+        )
+    return items
+
+
+def render_toc(text: str) -> str:
+    """Render a collapsible table of contents; empty string when useless."""
+
+    items = markdown_toc(text)
+    if len(items) < 2:
+        return ""
+    rows: list[str] = []
+    for item in items:
+        indent = " style=\"padding-left:" + str((item["level"] - 1) * 12) + "px\""
+        rows.append(
+            '<a class="doc-toc-link" href="#'
+            + html_escape(str(item["id"]))
+            + '">'
+            + html_escape(str(item["text"]))
+            + "</a>"
+        )
+    return (
+        '<nav class="doc-toc" aria-label="目录">'
+        "<p class=\"doc-toc-title\">目录</p>"
+        + "".join(rows)
+        + "</nav>"
+    )
 
 
 @dataclass(slots=True)

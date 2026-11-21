@@ -660,6 +660,55 @@ class NotesPipeline:
                 "errors": list(state["errors"]),
             }
 
+    def resume_writer_for_ask(self, session_id=None, tools=None):
+        """Reopen the published writer conversation read-only for Q&A.
+
+        Permissions are enforced here: the resumed session only gets the
+        read/grep/glob tools.  Notes iteration first closes this session and
+        reopens it with the writer tools through the normal continuation path.
+        """
+
+        sid = self._sid(session_id)
+        if not sid:
+            raise RuntimeError("没有可用的笔记会话")
+        with self.condition:
+            saved = dict((self._state(sid).get("writer") or {}))
+        if not saved:
+            raise RuntimeError("这节课还没有可用的笔记写作会话")
+        try:
+            files = self._writer_inputs(sid, saved)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(f"笔记写作会话不可用：{exc}") from exc
+        workspace = FileWorkspace(files, readonly=saved["readonly"])
+        ok, reason = self.agent.can_resume(saved["session_id"])
+        if not ok:
+            raise RuntimeError(f"笔记写作会话不可用：{reason}")
+        return self.agent.reopen(
+            saved["session_id"],
+            name=saved["name"],
+            workspace=workspace,
+            system_prompt=saved["system_prompt"],
+            role=saved["role"],
+            tools=list(
+                tools
+                if tools is not None
+                else [
+                    AgentToolName.READ,
+                    AgentToolName.GREP,
+                    AgentToolName.GLOB,
+                ]
+            ),
+            meta={},
+        )
+
+    def writer_session_id(self, session_id=None):
+        sid = self._sid(session_id)
+        if not sid:
+            return ""
+        with self.condition:
+            writer = self._state(sid).get("writer") or {}
+            return str(writer.get("session_id") or "")
+
     def note_files(self, kind: NotePublication = NotePublication.FINAL):
         kind = NotePublication(kind)
         prefix = "chunk_note" if kind == NotePublication.CHUNK else "note"
@@ -1383,6 +1432,21 @@ class NotesPipeline:
         state["published_end"] = chunks[-1]["end"] if chunks else 0
         self.ctx.ui.refresh("notes.preview")
 
+    def _archive_published(self, sid):
+        notes = self.ctx.data_dir / "sessions" / sid / "notes"
+        if not notes.is_dir():
+            return
+        existing = sorted(notes.glob("note_*.md"))
+        if not existing:
+            return
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = self.ctx.data_dir / "sessions" / sid / "notes_history" / stamp
+        target.mkdir(parents=True, exist_ok=True)
+        import shutil
+
+        for path in existing:
+            shutil.copy2(path, target / path.name)
+
     def _publish_lecture(self, sid, workspace, *, draft=False):
         notes = self.ctx.data_dir / "sessions" / sid / "notes"
         notes.mkdir(parents=True, exist_ok=True)
@@ -1460,18 +1524,44 @@ class NotesPipeline:
                 files[name].write_text(header, encoding="utf-8")
         workspace = FileWorkspace(files, readonly=readonly)
         review_enabled = bool(self.setting("notes.review_enabled", True))
+        mode_requirement = str(self.setting("notes.mode_prompt", "") or "").strip()
+        if "{{course}}" in mode_requirement:
+            course = str(
+                (self.ctx.streams.get_session(sid).meta or {}).get("course_name", "")
+                if self.ctx.streams.get_session(sid) is not None
+                else ""
+            ) or "本课程"
+            mode_requirement = mode_requirement.replace("{{course}}", course)
+        review_instruction = REVIEW
+        if mode_requirement:
+            review_instruction += (
+                "\n\n## 本次笔记模式要求\n\n"
+                + mode_requirement
+                + "\n\n请按上述模式目标判断结构与完整性；模式没有要求的内容不算缺陷；"
+                "事实、来源与数学正确性仍按前述规则核对。"
+            )
         review = {
-            "prompt": REVIEW,
+            "prompt": review_instruction,
             "role": "note_review",
             "system": self.setting("notes.reviewer_prompt", "") or REVIEW_SYSTEM,
             "maxRounds": int(self.setting("notes.review_max_rounds", 0)),
             "targets": list(NOTE_HEADERS),
             "sources": [SOURCE_FILENAME],
         }
+        course = str(
+            (self.ctx.streams.get_session(sid).meta or {}).get("course_name", "")
+            if self.ctx.streams.get_session(sid) is not None
+            else ""
+        ) or "本课程"
+        system_prompt = (
+            self.setting("notes.writer_system_prompt", "")
+            or self.setting("notes.system_prompt", "")
+            or SYSTEM
+        ).replace("{{course}}", course)
         writer = self.agent.create_session(
             f"{sid} 笔记写作",
             workspace=workspace,
-            system_prompt=self.setting("notes.system_prompt", "") or SYSTEM,
+            system_prompt=system_prompt,
             role="note_writer",
             tools=[
                 AgentToolName.READ,
@@ -1488,7 +1578,7 @@ class NotesPipeline:
                 "session_id": writer.id,
                 "directory": str(directory.relative_to(self._directory(sid))),
                 "name": writer.name,
-                "system_prompt": self.setting("notes.system_prompt", "") or SYSTEM,
+                "system_prompt": system_prompt,
                 "role": "note_writer",
                 "tools": [
                     AgentToolName.READ,
@@ -1513,7 +1603,14 @@ class NotesPipeline:
             writer, workspace, directory, review_enabled = self._prepare_writer(
                 sid, records
             )
-            instruction = WRITER
+            extra = str(self.setting("notes.writer_instruction", "") or "").strip()
+            course = str(
+                (self.ctx.streams.get_session(sid).meta or {}).get("course_name", "")
+                if self.ctx.streams.get_session(sid) is not None
+                else ""
+            ) or "本课程"
+            extra = extra.replace("{{course}}", course)
+            instruction = (extra + "\n\n" + WRITER) if extra else WRITER
         else:
             with self.condition:
                 self._check_running(sid)
@@ -1570,6 +1667,7 @@ class NotesPipeline:
             if review_enabled and not result.review_passed:
                 raise RuntimeError("The saved notes do not have a passing review")
             self._validate_outputs(directory)
+            self._archive_published(sid)
             self._publish_lecture(sid, workspace)
             with self.condition:
                 self._check_running(sid)

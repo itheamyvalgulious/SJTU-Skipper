@@ -1321,11 +1321,19 @@ export class Runtime {
             ? (last.errorMessage ?? `Model run did not finish: ${last.stopReason}`)
             : "";
         emit(RuntimeEvent.MESSAGE, { session_id: id, role: "assistant", content: text });
-        const total_tokens = messages.reduce(
-          (total, message) =>
-            total + (message.role === "assistant" ? message.usage.totalTokens : 0),
-          0,
+        const usageTotals = messages.reduce(
+          (acc, message) => {
+            if (message.role !== "assistant") return acc;
+            const usage = (message.usage as unknown as Record<string, number>) || {};
+            acc.input += Number(usage.input || 0);
+            acc.output += Number(usage.output || 0);
+            acc.cacheRead += Number(usage.cacheRead || 0);
+            acc.total += Number(usage.totalTokens || 0);
+            return acc;
+          },
+          { input: 0, output: 0, cacheRead: 0, total: 0 },
         );
+        const total_tokens = usageTotals.total;
         return {
           session_id: id,
           final_message: text,
@@ -1333,6 +1341,10 @@ export class Runtime {
           steps,
           error,
           total_tokens,
+          input_tokens: usageTotals.input,
+          output_tokens: usageTotals.output,
+          cache_read_tokens: usageTotals.cacheRead,
+          cache_miss_tokens: Math.max(0, usageTotals.input - usageTotals.cacheRead),
           review_passed: true,
         };
       } catch (error) {

@@ -603,3 +603,32 @@ body.resizing {
 .table-shared-editor :is(th, td):last-child {
   width: 80px;
 }
+
+.doc-toc {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 2px;
+}
+.doc-toc-title {
+  margin: 0 0 6px;
+  color: var(--fg-2, #667085);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.doc-toc-link {
+  display: block;
+  overflow: hidden;
+  color: inherit;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+.doc-toc-link:hover {
+  background: var(--bg-2, rgba(0, 0, 0, 0.06));
+}
