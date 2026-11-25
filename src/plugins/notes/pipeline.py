@@ -333,7 +333,18 @@ class NotesPipeline:
             if session is None or event.get("started_at") != session.started_at:
                 return
             with self.condition:
-                self._state(sid).pop("restart_cancelled", None)
+                state = self._state(sid)
+                state.pop("restart_cancelled", None)
+                if state["phase"] == NotePhase.CANCELLED:
+                    # The class is being processed again: restore the chunks
+                    # that the previous shutdown cancelled so the coordinator
+                    # can regenerate them.
+                    state["phase"] = NotePhase.COLLECTING
+                    state["error"] = ""
+                    for chunk in state["chunks"]:
+                        if chunk["state"] == ChunkState.CANCELLED:
+                            chunk["state"] = ChunkState.PENDING
+                    self._save(state)
         with self.condition:
             state = self._state(sid)
             if event.get("error"):
@@ -360,10 +371,23 @@ class NotesPipeline:
             if self.closed:
                 return False
             state = self._state(sid)
-            if self._generation_state(sid) != GenerationState.NOT_STARTED:
+            if state.get("deleted"):
+                return False
+            # An explicit start may revive a run that a previous shutdown
+            # cancelled.  A published note is still left untouched.
+            cancelled = state.get("restart_cancelled") or state[
+                "phase"
+            ] == NotePhase.CANCELLED
+            if cancelled:
+                state.pop("restart_cancelled", None)
+                state["phase"] = NotePhase.COLLECTING
+                state["error"] = ""
+                for chunk in state["chunks"]:
+                    if chunk["state"] == ChunkState.CANCELLED:
+                        chunk["state"] = ChunkState.PENDING
+            elif self._generation_state(sid) != GenerationState.NOT_STARTED:
                 return False
             state["deleted"] = False
-            state.pop("restart_cancelled", None)
             state["phase"] = NotePhase.COLLECTING
             state["finalize_requested"] = True
             self._save(state)

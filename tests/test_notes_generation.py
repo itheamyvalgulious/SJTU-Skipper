@@ -33,6 +33,26 @@ from plugins.notes.prompts import NOTE_HEADERS, SOURCE_FILENAME
 from tests.support import FakeLLM, FakeSettings
 
 
+def test_read_log_ignores_partial_trailing_line(tmp_path):
+    from plugins.notes.material import read_log
+
+    path = tmp_path / "transcript.jsonl"
+    path.write_text(
+        '{"start": 0, "end": 1, "text": "ok"}\n'
+        '{"start": 1, "end": 2, "text": "partial',
+        encoding="utf-8",
+    )
+    assert [record["text"] for record in read_log(path)] == ["ok"]
+
+    path.write_text(
+        '{"start": 0, "end": 1, "text": "ok"}\n'
+        "not-json\n"
+        '{"start": 2, "end": 3, "text": "later"}\n',
+        encoding="utf-8",
+    )
+    assert [record["text"] for record in read_log(path)] == ["ok", "later"]
+
+
 def test_visual_gap_survives_reload(tmp_path):
     import json
     from core.events import Event
@@ -1504,6 +1524,31 @@ def test_continuation_accepts_sdk_title_envelope(tmp_path):
             env.pipeline.queue.clear()
             env.pipeline.writer_messages.clear()
             env.pipeline.continuations.clear()
+
+
+def test_cancelled_notes_restart_on_explicit_start(tmp_path):
+    def run(session, instruction):
+        return write_notes(session, "Resumed note")
+
+    with note_pipeline(
+        tmp_path, run, settings={"notes.chunks_enabled": False}
+    ) as env:
+        session = env.hub.start_session("resume-notes")
+        session.transcript.append("Resumed theorem", start=0, end=2)
+        env.hub.end_session()
+        env.hub.seal_text(session.session_id, StreamKind.TRANSCRIPT, 2, final=True)
+
+        state = env.pipeline._state(session.session_id)
+        state["phase"] = NotePhase.CANCELLED
+        state["restart_cancelled"] = True
+
+        assert env.pipeline.start(session.session_id)
+        env.wait_until(
+            lambda: env.pipeline.status(session.session_id)["phase"]
+            == NotePhase.PUBLISHED
+        )
+        source = env.pipeline.source_path(session.session_id).read_text()
+        assert "Resumed theorem" in source
 
 
 def test_same_id_reprocess_replaces_notes(tmp_path):

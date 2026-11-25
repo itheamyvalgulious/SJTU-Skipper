@@ -2,19 +2,45 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections import Counter
 from pathlib import Path
 
 from core.streams import StreamKind
 
+logger = logging.getLogger("lecture_agent.plugin.notes")
+
 
 def read_log(path: Path) -> list[dict]:
+    """Read an append-only JSONL log, tolerating a concurrent last write.
+
+    Producers append one record per write; a reader can catch the trailing
+    line while it is still being written, which must not break note
+    generation for the whole class.
+    """
+
     if not path.exists():
         return []
-    records = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            records.append(json.loads(line))
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    records: list[dict] = []
+    lines = raw.splitlines()
+    complete = raw.endswith("\n")
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            if index == len(lines) - 1 and not complete:
+                logger.debug("ignoring partial trailing line in %s", path)
+            else:
+                logger.warning("ignoring malformed line %d in %s", index + 1, path)
+            continue
+        if isinstance(record, dict):
+            records.append(record)
     return records
 
 
