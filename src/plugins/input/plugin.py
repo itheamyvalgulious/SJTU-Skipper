@@ -704,8 +704,11 @@ class InputPlugin(Plugin):
             data = json.loads(self._session_meta_path(class_id).read_text("utf-8"))
         except (OSError, ValueError):
             return None
-        if data.get("ended_at") and not (data.get("meta") or {}).get(
-            "processing_cancelled"
+        meta = data.get("meta") or {}
+        if (
+            data.get("ended_at")
+            and not meta.get("processing_cancelled")
+            and not meta.get("input_failed")
         ):
             return data
         return None
@@ -1554,6 +1557,14 @@ class InputPlugin(Plugin):
                     }
                 )
         elif job is not None and job_state == JobState.FAILED:
+            if job.kind != SourceKind.LIVE:
+                buttons.append(
+                    {
+                        "label": "继续处理",
+                        "action": "input.start_processing",
+                        "class": "btn-solid theme-primary",
+                    }
+                )
             buttons.append(
                 {
                     "label": "删除板书",

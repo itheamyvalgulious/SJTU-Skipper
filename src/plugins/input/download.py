@@ -130,6 +130,16 @@ class MediaDownloader:
     ) -> DownloadHandle:
         from .media_cache import MediaCache
 
+        dest = Path(dest)
+        # A recording is renamed from ``.part`` to ``dest`` only after every
+        # byte arrived.  Reuse it instead of downloading the same class again
+        # after a restart or a failed recognition pass.
+        if dest.is_file() and dest.stat().st_size > 0:
+            size = dest.stat().st_size
+            if on_progress is not None:
+                on_progress(size, size)
+            return DownloadHandle(None, str(dest))
+
         progress = _Progress(0, on_progress, progress_interval)
         cache = MediaCache(self, url, dest, stop_event, progress)
         input_url = cache.start()
@@ -172,15 +182,23 @@ class DownloadHandle:
     def __init__(self, cache, input_url: str) -> None:
         self._cache = cache
         self.input_url = input_url
-        self.path = cache.path
-        self.total = cache.total
+        if cache is None:
+            self.path = Path(input_url)
+            self.total = self.path.stat().st_size
+        else:
+            self.path = cache.path
+            self.total = cache.total
 
     def set_prefetch(self, value: bool) -> None:
+        if self._cache is None:
+            return
         self._cache.prefetch = bool(value)
         with self._cache.downloader._connection_condition:
             self._cache.downloader._connection_condition.notify_all()
 
     def wait(self) -> DownloadResult:
+        if self._cache is None:
+            return DownloadResult(self.path, self.total, True)
         self._cache.done.wait()
         if self._cache.error:
             return DownloadResult(
@@ -191,7 +209,8 @@ class DownloadHandle:
         return DownloadResult(self.path, self.path.stat().st_size, True)
 
     def close(self) -> None:
-        self._cache.close()
+        if self._cache is not None:
+            self._cache.close()
 
 
 __all__ = ["DownloadHandle", "DownloadResult", "MediaDownloader"]

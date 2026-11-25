@@ -1464,6 +1464,11 @@ class TestClassPlayer:
         before = plugin._render_session_item()[0]["html"]
         assert 'data-action="input.delete"' in before
         assert "删除板书" in before
+        if failed:
+            assert "继续处理" in before
+            assert 'data-action="input.start_processing"' in before
+        else:
+            assert "继续处理" not in before
         assert not ctx.ui.has_action("input.reprocess")
 
         result = ctx.ui.dispatch_action("input.delete", {})
@@ -2077,6 +2082,40 @@ class TestProcessingQueue:
             assert ctx.ui.dispatch_action("input.start_processing", {}).ok
             assert plugin._active_job is not job
             assert len(started) == 2
+        finally:
+            plugin.teardown()
+
+    def test_failed_session_is_not_finished(self, tmp_path):
+        ctx = _make_context(tmp_path)
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        try:
+            sid = "failed-class"
+            path = tmp_path / "sessions" / sid / "meta.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "session_id": sid,
+                        "started_at": 1,
+                        "ended_at": 2,
+                        "meta": {"class_id": sid, "input_failed": True},
+                    }
+                )
+            )
+            assert plugin._find_finished_class(sid) is None
+
+            path.write_text(
+                json.dumps(
+                    {
+                        "session_id": sid,
+                        "started_at": 1,
+                        "ended_at": 2,
+                        "meta": {"class_id": sid},
+                    }
+                )
+            )
+            assert plugin._find_finished_class(sid) is not None
         finally:
             plugin.teardown()
 

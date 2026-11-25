@@ -88,6 +88,28 @@ def test_downloads_to_final_path(http_base: str, tmp_path: Path) -> None:
     assert progress and progress[-1][0] == len(_Handler.payload)
 
 
+def test_reuses_complete_file_without_network(tmp_path: Path) -> None:
+    dest = tmp_path / "lecture.mp4"
+    dest.write_bytes(b"cached")
+    progress: list[tuple[int, int]] = []
+    downloader = MediaDownloader()
+
+    handle = downloader.start(
+        "http://127.0.0.1:1/unreachable.mp4",
+        dest,
+        on_progress=lambda received, total: progress.append((received, total)),
+    )
+    try:
+        result = handle.wait()
+    finally:
+        handle.close()
+
+    assert result.ok
+    assert result.path == dest
+    assert result.total == 6
+    assert progress == [(6, 6)]
+
+
 def test_failure_keeps_no_partial_file(http_base: str, tmp_path: Path) -> None:
     _Handler.fail = True
     try:
