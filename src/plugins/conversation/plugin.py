@@ -427,7 +427,7 @@ class ConversationPlugin(Plugin):
             course = str(item.context.get("course") or "未归属课程")
             session = str(item.context.get("session_title") or item.context.get("session_id") or "未分组")
             groups.setdefault(course, {}).setdefault(session, []).append(item)
-        blocks = [{"type": BlockType.HTML, "html": '<div class="conv-side-title">对话</div>'}]
+        blocks: list[dict[str, Any]] = []
         if not groups:
             blocks.append({"type": BlockType.TEXT, "text": "还没有对话。"})
             return blocks

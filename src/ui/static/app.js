@@ -3509,11 +3509,24 @@
 
   const desktopLayout = window.matchMedia("(min-width: 1024px)");
 
+  function resolveCssPixels(value) {
+    // The stylesheet default is a clamp()/vw expression; measure it instead of
+    // parseFloat (which yields NaN and poisons --*-col, collapsing the grid).
+    const probe = document.createElement("div");
+    probe.style.cssText =
+      "position:absolute;visibility:hidden;pointer-events:none;height:0;width:0";
+    $("#app").appendChild(probe);
+    probe.style.width = value;
+    const width = probe.getBoundingClientRect().width;
+    probe.remove();
+    return width;
+  }
+
   function sidebarWidth(side) {
     const app = $("#app");
     app.style.removeProperty(`--${side}-col`);
-    const base = getComputedStyle(app).getPropertyValue(`--${side}-col`).trim();
-    const fallback = base.endsWith("vw") ? (parseFloat(base) * innerWidth) / 100 : parseFloat(base);
+    const base = getComputedStyle(app).getPropertyValue(`--${side}-col`).trim() || "0px";
+    const fallback = resolveCssPixels(base);
     const stored = Number(localStorage.getItem(`lecture-agent.sidebar.${side}.w`));
     return clampWidth(Number.isFinite(stored) && stored > 0 ? stored : fallback);
   }
@@ -4461,7 +4474,18 @@
     const target = id ? document.getElementById(id) : null;
     if (!target) return;
     event.preventDefault();
-    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Scroll only the nearest content scroller; scrollIntoView() could also
+    // walk up to the document and shift the whole shell off its bottom edge.
+    const scroller = target.closest(".page-content, .drawer-body, .dialog-body");
+    if (scroller) {
+      const top =
+        target.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top +
+        scroller.scrollTop;
+      scroller.scrollTo({ top: Math.max(0, top - 12), behavior: "smooth" });
+    } else {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   });
 
   boot();

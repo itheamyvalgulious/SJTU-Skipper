@@ -3,6 +3,7 @@
   --right-col: clamp(280px, 24vw, 370px);
   --left-resizer: 6px;
   --right-resizer: 6px;
+  overflow: hidden;
   background: var(--layer);
 }
 .app-navbar {
@@ -39,6 +40,11 @@
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  /* A constrained row keeps tall pages (e.g. a full lecture note) scrolling
+     inside #page-content instead of stretching the grid and making the whole
+     document scrollable — which used to shift the statusbar on anchor jumps. */
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
 }
 .center {
   grid-column: 1;
