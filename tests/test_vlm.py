@@ -337,6 +337,21 @@ def test_structured_error_classification(
     assert not vlm_ctx.streams.current.visual.items_since(0)
 
 
+def test_token_limit_is_recoverable(vlm_plugin, vlm_ctx):
+    from plugins.vlm.plugin import VLMRecognitionError
+
+    vlm_ctx.service("llm").script = [
+        {
+            "content": "Truncated board",
+            "finish_reason": FinishReason.LENGTH,
+        }
+    ]
+    with pytest.raises(VLMRecognitionError, match="token limit") as caught:
+        vlm_plugin._ask_image(b"jpeg", "00:00")
+    assert caught.value.code is GenerationErrorCode.TOKEN_LIMIT
+    assert not vlm_ctx.streams.current.visual.items_since(0)
+
+
 def test_cancelled_loop_window_has_no_gap(vlm_plugin, vlm_ctx, monkeypatch):
     session = vlm_ctx.streams.current
     vlm_ctx.service("settings").set("vlm.fusion", False)
@@ -693,7 +708,7 @@ class TestVlmPlugin:
         visual = vlm_ctx.streams.current.visual
         assert [item.text for item in visual] == [f"{repeated}\n\n{old}", changed]
 
-    def test_truncated_response_is_not_committed(self, vlm_plugin, vlm_ctx):
+    def test_truncated_response_becomes_a_gap(self, vlm_plugin, vlm_ctx):
         settings = vlm_ctx.service("settings")
         settings.set("vlm.fusion", False)
         fake_llm = vlm_ctx.service("llm")
@@ -702,10 +717,15 @@ class TestVlmPlugin:
         ]
         session = vlm_ctx.streams.current
         frames = _make_frames(3)
-        with pytest.raises(RuntimeError, match="transcription is incomplete"):
-            vlm_plugin.process_window(0.0, 3.0, frames)
+        result = vlm_plugin.process_window(0.0, 3.0, frames)
+        assert result["ok"] is False
+        assert result["code"] == GenerationErrorCode.TOKEN_LIMIT
+        # The truncated board is not committed; the window is left uncovered
+        # so a later pass may retry it.
         assert not session.visual.items_since(0)
         assert not vlm_plugin._coverage(session).covers(MediaKind.VIDEO, 0.0, 3.0)
+        row = json.loads(vlm_plugin.visual_path().read_text().splitlines()[0])
+        assert row["error"]["code"] == GenerationErrorCode.TOKEN_LIMIT
 
     @pytest.mark.parametrize("cancel_before_sent", [False, True])
     def test_cancel_during_submission(
@@ -983,6 +1003,57 @@ def test_same_id_reprocess_resets_board(vlm_plugin, vlm_ctx):
     assert [item.text for item in session.visual] == ["Complete board theorem"]
     rows = [json.loads(line) for line in plugin.visual_path().read_text().splitlines()]
     assert [row["text"] for row in rows] == ["Complete board theorem"]
+
+
+def test_recording_skips_already_covered_windows(vlm_plugin, vlm_ctx):
+    settings = vlm_ctx.service("settings")
+    settings.set("vlm.enabled", True)
+    settings.set("vlm.window_seconds", 5.0)
+    settings.set("vlm.cadence_recording_seconds", 5.0)
+    settings.set("vlm.fusion", False)
+
+    session = vlm_ctx.streams.current
+    session.meta["mode"] = ProcessingMode.FAST
+    session.video_buffer_limiter.configure(60.0)
+    for _ in range(10):
+        session.video.append_frame(_to_jpeg(_synthetic_frame()), duration=1.0)
+    session.input_done = True
+    # A previous pass already recognized the first window.
+    vlm_plugin._coverage(session).mark(MediaKind.VIDEO, 0.0, 5.0)
+
+    calls: list[tuple[float, float]] = []
+
+    def run_window(start, end, frames):
+        calls.append((start, end))
+        return {"image_path": "", "text": f"第{int(start)}秒板书"}
+
+    vlm_plugin._run_window = run_window
+    vlm_plugin._run_recording_session()
+
+    assert calls == [(5.0, 10.0)]
+    assert [item.start for item in session.visual] == [5.0]
+
+
+def test_status_cursor_is_scoped_to_current_session(vlm_plugin, vlm_ctx):
+    old = vlm_ctx.streams.current
+    vlm_plugin._last_session = old.session_id
+    vlm_plugin._cursor = 6593.6
+
+    new = vlm_ctx.streams.start_session(
+        "next-class", meta={"mode": ProcessingMode.FAST}
+    )
+    assert vlm_ctx.events.flush(timeout=1)
+
+    # The worker has not switched yet (no window of video available), but the
+    # new session's progress must not inherit the previous class's cursor.
+    status = vlm_plugin.status()
+    assert status["session_id"] == new.session_id
+    assert status["cursor"] == 0.0
+
+    with vlm_plugin._lock:
+        vlm_plugin._last_session = new.session_id
+        vlm_plugin._cursor = 30.0
+    assert vlm_plugin.status()["cursor"] == 30.0
 
 
 def test_same_id_fill_preserves_board(vlm_plugin, vlm_ctx):

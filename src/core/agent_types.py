@@ -97,6 +97,7 @@ class FinishReason(StrEnum):
 
 class GenerationErrorCode(StrEnum):
     THINKING_LOOP = "thinking_loop"
+    TOKEN_LIMIT = "token_limit"
 
 
 class AgentToolName(StrEnum):

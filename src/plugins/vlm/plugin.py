@@ -425,9 +425,22 @@ class VlmPlugin(Plugin):
     def status(self) -> dict[str, Any]:
         with self._lock:
             session = self._ctx.streams.current if self._ctx is not None else None
+            session_id = str(session.session_id) if session is not None else ""
+            # ``_cursor`` belongs to the session the worker is on.  While a
+            # new class is still waiting for its first window (e.g. the
+            # recording is downloading), the worker has not switched yet and
+            # ``_cursor`` still holds the previous class's position.  Use the
+            # new session's own cursor instead of leaking the old one into
+            # its progress bar.
+            if not session_id:
+                cursor = 0.0
+            elif self._last_session == session_id:
+                cursor = self._cursor
+            else:
+                cursor = float(self._recording_cursor.get(session_id, 0.0))
             payload = {
-                "cursor": self._cursor,
-                "session_id": self._last_session,
+                "cursor": cursor,
+                "session_id": session_id or self._last_session,
                 "latest_image": self._latest_image_path,
                 "last_window": dict(self._last_window),
                 "consecutive_errors": self._consecutive_errors,
@@ -651,8 +664,12 @@ class VlmPlugin(Plugin):
                 )
             raise RuntimeError(error.get("message", str(error)))
         if response.get("finish_reason") == FinishReason.LENGTH:
-            raise RuntimeError(
-                "VLM output reached the model token limit; transcription is incomplete"
+            # One over-full board should not kill the whole session: record a
+            # gap and keep processing later windows, same as a thinking loop.
+            raise VLMRecognitionError(
+                "VLM output reached the model token limit; transcription is incomplete",
+                code=GenerationErrorCode.TOKEN_LIMIT,
+                attempts=1,
             )
         response["content"] = collapse_repetitions(
             str(response.get("content") or "").strip()
@@ -1186,11 +1203,19 @@ class VlmPlugin(Plugin):
                 self._coverage_cache[sid] = store
             return store
 
-    @staticmethod
-    def _should_skip(session: Any, start: float, end: float) -> bool:
-        return skip_coverage(getattr(session, "meta", None), MediaKind.VIDEO).covers(
+    def _should_skip(self, session: Any, start: float, end: float) -> bool:
+        """True when this window was already recognized in an earlier pass.
+
+        ``skip_ranges`` covers live gap-fill passes; the per-session coverage
+        file lets a failed recording resume without re-sending every board to
+        the model (and without appending duplicate ``visual.jsonl`` rows).
+        """
+
+        if skip_coverage(getattr(session, "meta", None), MediaKind.VIDEO).covers(
             start, end
-        )
+        ):
+            return True
+        return self._coverage(session).covers(MediaKind.VIDEO, start, end)
 
     def busy(self) -> bool:
         if not self.enabled():
@@ -1266,6 +1291,7 @@ class VlmPlugin(Plugin):
                         # frames instead of sending them to the model again.
                         with self._lock:
                             center += cadence
+                            self._cursor = max(self._cursor, float(end))
                             self._recording_cursor[sid] = center - half
                             self._next_center = center
                         session.video.trim(max(0.0, end - 30.0))
