@@ -30,6 +30,10 @@ class CanvasNetworkError(AssistantError):
     """Network or timeout failure while talking to Canvas."""
 
 
+class DownloadError(AssistantError):
+    """A Canvas file could not be downloaded or failed verification."""
+
+
 class VideoIntegrationError(AssistantError):
     """SJTU video integration failed with a token-safe message."""
 

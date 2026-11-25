@@ -47,6 +47,188 @@ class Course(CanvasModel):
         return self.name or self.course_code or f"course-{self.id}"
 
 
+class User(CanvasModel):
+    id: int
+    name: str = ""
+    sortable_name: str = ""
+    short_name: str = ""
+    login_id: str = ""
+    email: Optional[str] = None
+
+
+class Folder(CanvasModel):
+    id: int
+    name: str = ""
+    full_name: str = ""
+    parent_folder_id: Optional[int] = None
+    locked: bool = False
+    files_count: int = 0
+    folders_count: int = 0
+
+
+class CanvasFile(CanvasModel):
+    id: int
+    uuid: str = ""
+    folder_id: Optional[int] = None
+    display_name: str = ""
+    filename: str = ""
+    url: str = ""
+    size: int = 0
+    locked: bool = False
+    hidden: Optional[bool] = None
+    mime_class: str = ""
+    content_type: str = Field(default="", alias="content-type")
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    modified_at: Optional[str] = None
+
+    @property
+    def effective_name(self) -> str:
+        return self.display_name or self.filename or f"file-{self.id}"
+
+
+class CompletionRequirement(CanvasModel):
+    type: str = ""
+    min_score: Optional[float] = None
+    completed: Optional[bool] = None
+
+
+class ContentDetails(CanvasModel):
+    points_possible: Optional[float] = None
+    due_at: Optional[str] = None
+    unlock_at: Optional[str] = None
+    lock_at: Optional[str] = None
+
+
+class ModuleItem(CanvasModel):
+    id: int
+    module_id: Optional[int] = None
+    position: int = 0
+    title: str = ""
+    indent: int = 0
+    type: str = ""
+    content_id: Optional[int] = None
+    html_url: str = ""
+    url: Optional[str] = None
+    page_url: Optional[str] = None
+    external_url: Optional[str] = None
+    new_tab: Optional[bool] = None
+    completion_requirement: Optional[CompletionRequirement] = None
+    content_details: Optional[ContentDetails] = None
+    published: Optional[bool] = None
+
+
+class Module(CanvasModel):
+    id: int
+    position: int = 0
+    name: str = ""
+    unlock_at: Optional[str] = None
+    require_sequential_progress: bool = False
+    prerequisite_module_ids: List[int] = Field(default_factory=list)
+    items_count: int = 0
+    items_url: str = ""
+    items: List[ModuleItem] = Field(default_factory=list)
+    state: Optional[str] = None
+    completed_at: Optional[str] = None
+    published: Optional[bool] = None
+
+
+class AssignmentDate(CanvasModel):
+    id: Optional[int] = None
+    base: bool = False
+    title: str = ""
+    due_at: Optional[str] = None
+    unlock_at: Optional[str] = None
+    lock_at: Optional[str] = None
+
+
+class Assignment(CanvasModel):
+    id: int
+    course_id: Optional[int] = None
+    name: str = ""
+    description: Optional[str] = None
+    due_at: Optional[str] = None
+    unlock_at: Optional[str] = None
+    lock_at: Optional[str] = None
+    points_possible: Optional[float] = None
+    html_url: str = ""
+    submission_types: List[str] = Field(default_factory=list)
+    allowed_extensions: List[str] = Field(default_factory=list)
+    has_submitted_submissions: Optional[bool] = None
+    published: Optional[bool] = None
+    submissions_download_url: str = ""
+    all_dates: List[AssignmentDate] = Field(default_factory=list)
+    grading_type: str = ""
+
+
+class SubmissionAttachment(CanvasModel):
+    id: int
+    uuid: str = ""
+    display_name: str = ""
+    filename: str = ""
+    url: str = ""
+    size: int = 0
+    content_type: str = Field(default="", alias="content-type")
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    modified_at: Optional[str] = None
+
+    @property
+    def effective_name(self) -> str:
+        return self.display_name or self.filename or f"submission-file-{self.id}"
+
+    @field_validator("display_name", "filename", "url", "content_type", mode="before")
+    @classmethod
+    def _stringify(cls, value: object) -> str:
+        return "" if value is None else str(value)
+
+
+class SubmissionAttempt(CanvasModel):
+    id: Optional[int] = None
+    attempt: Optional[int] = None
+    submitted_at: Optional[str] = None
+    submission_type: str = ""
+    workflow_state: str = ""
+    attachments: List[SubmissionAttachment] = Field(default_factory=list)
+    body: Optional[str] = None
+    url: Optional[str] = None
+
+    @field_validator("submission_type", "workflow_state", mode="before")
+    @classmethod
+    def _stringify(cls, value: object) -> str:
+        return "" if value is None else str(value)
+
+
+class Submission(CanvasModel):
+    id: Optional[int] = None
+    assignment_id: Optional[int] = None
+    user_id: Optional[int] = None
+    submitted_at: Optional[str] = None
+    attempt: Optional[int] = None
+    workflow_state: str = ""
+    submission_type: str = ""
+    grade: Optional[str] = None
+    score: Optional[float] = None
+    late: Optional[bool] = None
+    missing: Optional[bool] = None
+    excused: Optional[bool] = None
+    attachments: List[SubmissionAttachment] = Field(default_factory=list)
+    submission_history: List[SubmissionAttempt] = Field(default_factory=list)
+    body: Optional[str] = None
+    url: Optional[str] = None
+    preview_url: str = ""
+
+    @field_validator("workflow_state", "submission_type", "preview_url", mode="before")
+    @classmethod
+    def _stringify(cls, value: object) -> str:
+        return "" if value is None else str(value)
+
+
+class MySubmission(CanvasModel):
+    assignment: Assignment
+    submission: Submission
+
+
 class VideoAuthSource(StrEnum):
     NONE = ""
     ENVIRONMENT = "environment"
