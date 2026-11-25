@@ -44,11 +44,13 @@ from .prompts import (
     REVIEW,
     KINDS,
     LABELS,
+    MODE_LABELS,
     NOTE_HEADERS,
     REVIEW_SYSTEM,
     SOURCE_FILENAME,
     SYSTEM,
     WRITER,
+    system_prompt_for_mode,
 )
 
 
@@ -65,7 +67,7 @@ class NotesPipeline:
             ctx.llm.register_role(ctx.plugin_id, role, title)
         self.settings = ctx.require("settings")
         self.agent = ctx.require("agent")
-        for key, default, kind, label, section, description, order in (
+        for key, default, kind, label, section, description, order, *extra in (
             (
                 "chunks_enabled",
                 True,
@@ -119,6 +121,16 @@ class NotesPipeline:
                 "笔记审阅",
                 "0 表示不限制审阅轮数．",
                 90,
+            ),
+            (
+                "generation_mode",
+                "default",
+                SettingType.SELECT,
+                "笔记生成模式",
+                "提示词",
+                "选择完整笔记使用的提示词；默认保持完整笔记提示词不变．",
+                190,
+                tuple((key, label) for key, label in MODE_LABELS.items()),
             ),
             (
                 "chunk_system_prompt",
@@ -1414,6 +1426,11 @@ class NotesPipeline:
             temporary.write_bytes(workspace.path(SOURCE_FILENAME).read_bytes())
             os.replace(temporary, source)
 
+    def _writer_system_prompt(self):
+        mode = str(self.setting("notes.generation_mode", "default") or "default")
+        original = self.setting("notes.system_prompt", "") or SYSTEM
+        return system_prompt_for_mode(mode, original)
+
     def _prepare_writer(self, sid, records):
         with self.condition:
             self._check_running(sid)
@@ -1471,7 +1488,7 @@ class NotesPipeline:
         writer = self.agent.create_session(
             f"{sid} 笔记写作",
             workspace=workspace,
-            system_prompt=self.setting("notes.system_prompt", "") or SYSTEM,
+            system_prompt=self._writer_system_prompt(),
             role="note_writer",
             tools=[
                 AgentToolName.READ,
@@ -1488,7 +1505,7 @@ class NotesPipeline:
                 "session_id": writer.id,
                 "directory": str(directory.relative_to(self._directory(sid))),
                 "name": writer.name,
-                "system_prompt": self.setting("notes.system_prompt", "") or SYSTEM,
+                "system_prompt": self._writer_system_prompt(),
                 "role": "note_writer",
                 "tools": [
                     AgentToolName.READ,

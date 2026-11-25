@@ -76,6 +76,7 @@ class IpcMethod(StrEnum):
     MESSAGE = "message"
     CANCEL = "cancel"
     CLOSE_SESSION = "close_session"
+    COMPACT = "compact"
     LOGOUT = "logout"
     CREDENTIALS = "credentials"
     IMPORT_CREDENTIALS = "import_credentials"
@@ -154,6 +155,10 @@ class AgentRunResult:
     finish_reason: FinishReason = FinishReason.STOP
     error: str | None = None
     total_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_miss_tokens: int = 0
     review_passed: bool = False
 
 

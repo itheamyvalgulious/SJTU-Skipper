@@ -738,6 +738,8 @@
     }
     if (canExpand || empty) {
       const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      caret.setAttribute("role", "button");
+      caret.setAttribute("aria-label", expanded ? "收起" : "展开");
       caret.setAttribute("class", "tree-caret ms-auto flex-shrink-0");
       caret.setAttribute("width", "14");
       caret.setAttribute("height", "14");
@@ -745,11 +747,17 @@
       caret.setAttribute("fill", "currentColor");
       caret.setAttribute("aria-hidden", "true");
       caret.innerHTML = '<path d="M16 22 6 12 7.4 10.6 16 19.2 24.6 10.6 26 12z"/>';
+      caret.addEventListener("click", (event) => {
+        if (!canExpand) return;
+        event.preventDefault();
+        event.stopPropagation();
+        toggle();
+      });
       row.appendChild(caret);
     }
     row.addEventListener("click", () => {
-      if (canExpand) toggle();
-      else if (node.action) runNodeAction(node.action);
+      if (node.action) runNodeAction(node.action);
+      else if (canExpand) toggle();
     });
     box.appendChild(row);
     updateExpansion();
@@ -4021,6 +4029,10 @@
   function renderPageContent() {
     const container = $("#page-content");
     const active = state.ui.active_page || "";
+    container.classList.toggle(
+      "conversation-page",
+      active.startsWith("conversation:") || active.startsWith("teaching:"),
+    );
     const blocks = active ? state.ui.page_content?.[active] : null;
     const previousPage = container.dataset.pageId;
     const samePage = previousPage === active;
@@ -4310,11 +4322,50 @@
     postAction(input.dataset.changeAction, values);
   });
 
-  document.addEventListener("submit", (event) => {
+  document.addEventListener("submit", async (event) => {
     const form = event.target.closest("form[data-action]");
     if (!form) return;
     event.preventDefault();
-    postAction(form.dataset.action, formValues(form));
+    const result = await postAction(form.dataset.action, formValues(form));
+    if (form.classList.contains("conv-composer") && result?.ok) {
+      const textarea = form.querySelector("textarea");
+      if (textarea) {
+        textarea.value = "";
+        textarea.style.height = "";
+        textarea.style.overflowY = "hidden";
+      }
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const textarea = event.target.closest?.(".conv-composer textarea");
+    if (!textarea) return;
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      textarea.closest("form")?.requestSubmit();
+    }
+  });
+
+  document.addEventListener("input", (event) => {
+    const textarea = event.target.closest?.(".conv-composer textarea");
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    const height = Math.min(textarea.scrollHeight, 160);
+    textarea.style.height = `${height}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 160 ? "auto" : "hidden";
+  });
+
+  document.addEventListener("click", (event) => {
+    const plus = event.target.closest?.(".conv-plus");
+    if (plus) {
+      event.preventDefault();
+      const wrap = plus.closest(".conv-plus-wrap");
+      wrap?.classList.toggle("open");
+      return;
+    }
+    if (!event.target.closest?.(".conv-plus-wrap")) {
+      for (const wrap of $$(".conv-plus-wrap.open")) wrap.classList.remove("open");
+    }
   });
 
   let refreshTimer = null;
@@ -4340,6 +4391,12 @@
         if (data.type === WS_MESSAGE_TYPE.REFRESH) scheduleRefresh();
         else if (data.type === WS_MESSAGE_TYPE.NOTIFY && data.topic === "qa.live") {
           applyQaLive(data.payload || {});
+        } else if (
+          data.type === WS_MESSAGE_TYPE.NOTIFY &&
+          data.topic === "ui.toast"
+        ) {
+          const message = String((data.payload || {}).message || "");
+          if (message) toast(message);
         }
       } catch (_) {}
     });
@@ -4370,6 +4427,35 @@
       if (Date.now() - state.lastLoad > 2500) loadState({ quiet: true });
     }, 4000);
   }
+
+  document.addEventListener("click", (event) => {
+    const filler = event.target?.closest?.("[data-fill-text]");
+    if (filler) {
+      const text = filler.getAttribute("data-fill-text") || "";
+      const root = filler.closest(".block")?.parentElement || document;
+      const target = root.querySelector("form textarea, form input[type=text]");
+      if (target) {
+        target.value = text;
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+        target.focus();
+        event.preventDefault();
+        return;
+      }
+    }
+    const link = event.target?.closest?.('a[href^="#"]');
+    if (!link) return;
+    const href = link.getAttribute("href") || "";
+    let id = href.slice(1);
+    try {
+      id = decodeURIComponent(id);
+    } catch (_) {
+      // keep the raw fragment
+    }
+    const target = id ? document.getElementById(id) : null;
+    if (!target) return;
+    event.preventDefault();
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 
   boot();
 })();

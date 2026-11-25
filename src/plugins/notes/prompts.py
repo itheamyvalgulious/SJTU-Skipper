@@ -96,3 +96,57 @@ REVIEW = """只读核对完整来源与三份文稿，同时检查覆盖、归�
 检查结构、重复、不完整的句子与公式定界符，按实际影响定级．
 检查来源说明是否用脚注与正文分离．偶发的转写更正或来源解释插入正文但不打断推导，归 P3；解释反复切断定义、证明或例题，使读者难以连续理解知识主线，归 P2，须指出被打断的具体位置和影响．核对脚注引用与定义一一对应，说明保留在文末，不能通过直接删除来源不确定性来修正．
 按系统规定输出分级 findings JSON．"""
+
+#: Optional full-note generation modes.  ``default`` keeps the original
+#: upstream prompt (or the user's edited ``notes.system_prompt``).
+MODE_LABELS = {
+    "default": "默认（原始提示词）",
+    "abstract": "概要",
+    "summary": "总结",
+    "detailed": "详细",
+}
+
+MODE_INSTRUCTIONS = {
+    "abstract": r"""你现在需要生成一份课程内容的概要，让学生可以顺畅阅读并快速了解这节课的内容。
+
+## 整体结构
+1. 本节课大概要解决什么问题，或者说本节课的内容为什么是有意义的。
+2. 本节课的大致思路以及关键结论。
+3. 开始对于每个步骤或结论展开概括，包括结论内容、证明思路等。
+4. 简单总结一下。
+
+## 要求
+可以不按照老师的讲解顺序来，但是必须完整覆盖老师讲到的关键内容。为了缩短长度，不关键的内容（具体计算，具体证明，具体例子等）应该简单概括或直接省略。""",
+    "summary": r"""你现在需要生成一份课程内容的总结，让学生能够根据总结进行快速学习。
+
+## 整体结构
+1. 本节课大概要解决什么问题，或者说本节课的内容为什么是有意义的。
+2. 本节课的大致思路以及关键结论。
+3. 按照老师的讲解顺序逐一讲解。对于每一部分，都先对内容和思路进行概括再详细展开。不要展开繁琐的计算或推导，只说思路或关键步骤即可。
+
+## 要求
+最好按照老师的讲解顺序来，必须完整覆盖老师讲到的关键内容。""",
+    "detailed": r"""你现在需要生成一份课程内容的详细笔记，让学生可以用阅读笔记代替听课，详细学习这节课的内容。
+
+## 整体结构
+完全按照老师的讲解顺序和方式，重写老师可能口语化的表达为更清晰明了、更容易学习的书面版本，去除重复，提取出老师的讲解思路，将所有内容整理成结构清晰的笔记。
+
+## 要求
+严格按照老师的讲解顺序来，必须完整覆盖老师讲到的关键内容。""",
+}
+
+
+def system_prompt_for_mode(mode: str, original: str) -> str:
+    """Return the system prompt selected in the note-generation mode picker."""
+
+    instruction = MODE_INSTRUCTIONS.get(str(mode or "default"))
+    if not instruction:
+        return original or SYSTEM
+    label = MODE_LABELS.get(str(mode), str(mode))
+    return (
+        (original or SYSTEM)
+        + "\n\n## 本次笔记类型："
+        + label
+        + "\n\n"
+        + instruction
+    )

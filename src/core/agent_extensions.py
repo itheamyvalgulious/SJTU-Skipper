@@ -157,6 +157,8 @@ class AgentExtensionRegistry:
     def _validate_roles(self, roles: tuple[str, ...]) -> None:
         registered = {item["id"] for item in self._registered_roles()}
         for role in roles:
+            if role == "*":
+                continue
             if not isinstance(role, str) or not role or role not in registered:
                 raise ValueError(f"Unregistered agent role: {role!r}")
 
@@ -171,7 +173,7 @@ class AgentExtensionRegistry:
                 (
                     (owner, item)
                     for (owner, _), item in self._entries.items()
-                    if role in item.roles
+                    if role in item.roles or "*" in item.roles
                 ),
                 key=lambda entry: (entry[1].priority, entry[0], entry[1].id),
             )

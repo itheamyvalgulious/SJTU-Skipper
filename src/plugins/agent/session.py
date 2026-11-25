@@ -29,6 +29,7 @@ class AgentSession:
     cancelled: threading.Event = field(default_factory=threading.Event)
     runtime_ready: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
+    compaction: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {

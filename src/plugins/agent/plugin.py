@@ -40,13 +40,65 @@ class AgentService:
         self._agents: dict[str, AgentProfile] = {}
         self._lock = threading.RLock()
         self._extensions = AgentExtensionRegistry(self._runtime.list_roles)
+        self._prompt_providers: dict[str, tuple[Any, tuple[str, ...], int]] = {}
+        self._prompt_lock = threading.RLock()
         self._callbacks_ready = False
+
+    def list_roles(self) -> list[dict[str, Any]]:
+        return self._runtime.list_roles()
+
+    def supports_callbacks(self) -> bool:
+        """Whether the runtime can execute extension tools/hooks."""
+
+        return callable(getattr(self._runtime, "set_callback_handler", None))
 
     def register_extension(self, owner: str, extension: AgentExtension) -> None:
         self._extensions.register(owner, extension)
 
     def unregister_extensions(self, owner: str) -> None:
         self._extensions.unregister(owner)
+
+    def register_prompt_provider(
+        self,
+        owner: str,
+        provider: Any,
+        *,
+        roles: tuple[str, ...] | list[str] = ("*",),
+        priority: int = 0,
+    ) -> None:
+        """Register dynamic context injected before every agent turn."""
+
+        if not owner or not callable(provider):
+            raise ValueError("Prompt provider requires an owner and a callable")
+        with self._prompt_lock:
+            self._prompt_providers[owner] = (
+                provider,
+                tuple(str(role) for role in roles),
+                int(priority),
+            )
+
+    def unregister_prompt_provider(self, owner: str) -> None:
+        with self._prompt_lock:
+            self._prompt_providers.pop(owner, None)
+
+    def _prompt_context(self, session: AgentSession) -> str:
+        with self._prompt_lock:
+            entries = sorted(
+                self._prompt_providers.values(),
+                key=lambda item: item[2],
+            )
+        blocks: list[str] = []
+        for provider, roles, _priority in entries:
+            if "*" not in roles and session.role not in roles:
+                continue
+            try:
+                text = str(provider(session.role, session.meta) or "").strip()
+            except Exception:  # noqa: BLE001 - context providers are best effort
+                self._ctx.logger.warning("prompt provider failed", exc_info=True)
+                continue
+            if text:
+                blocks.append(text)
+        return "\n\n".join(blocks)
 
     def _prepare_extensions(self, session: AgentSession) -> None:
         review = session.meta.get("review")
@@ -149,6 +201,7 @@ class AgentService:
         files: Mapping[str, str | Path] | FileWorkspace | None = None,
         workspace: FileWorkspace | None = None,
         tools: list[str | AgentTool] | None = None,
+        compaction: Mapping[str, Any] | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> AgentSessionInfo:
         if isinstance(agent, str):
@@ -189,6 +242,7 @@ class AgentService:
             system_prompt=prompt,
             workspace=ws,
             tools=names,
+            compaction=dict(compaction or {}),
             meta=dict(meta or {}),
         )
         self._prepare_extensions(session)
@@ -211,15 +265,18 @@ class AgentService:
         system_prompt: str,
         role: str,
         tools: list[str],
+        compaction: Mapping[str, Any] | None = None,
         meta: Mapping[str, Any],
     ) -> AgentSessionInfo:
+        copied = workspace.copy()
         session = AgentSession(
             id=session_id,
             name=name,
-            workspace=workspace.copy(),
+            workspace=copied,
             system_prompt=system_prompt,
             role=role,
             tools=tuple(str(tool) for tool in tools),
+            compaction=dict(compaction or {}),
             meta=dict(meta),
         )
         self._prepare_extensions(session)
@@ -235,6 +292,19 @@ class AgentService:
             raise
         return session.to_info()
 
+    def compact(self, session_id: str) -> dict[str, Any]:
+        """Ask the runtime to compact the live session context now."""
+
+        if not session_id:
+            return {"ok": False, "reason": "session is required"}
+        if self._session(session_id) is None:
+            return {"ok": False, "reason": "agent session is not live"}
+        try:
+            result = self._runtime.call(IpcMethod.COMPACT, session_id=session_id)
+            return result if isinstance(result, dict) else {"ok": True}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": str(exc)}
+
     def message(self, session_id: str, message: str) -> dict[str, Any]:
         if not session_id or not message.strip():
             return {
@@ -244,6 +314,10 @@ class AgentService:
         session = self._session(session_id)
         if session is not None and session.cancelled.is_set():
             return {"accepted": False, "reason": "Agent session is closing"}
+        if session is not None:
+            context = self._prompt_context(session)
+            if context:
+                message = context + "\n\n" + message
         # Bun owns reviewer sessions and checks admission for every exact ID.
         try:
             result = self._runtime.call(
@@ -287,6 +361,7 @@ class AgentService:
             },
             readonly=list(session.workspace.readonly),
             tools=list(session.tools),
+            compaction=dict(session.compaction),
             extensions=self._extension_payload(session),
             meta=session.meta,
         )
@@ -359,6 +434,9 @@ class AgentService:
                 raise RuntimeError("Agent run cancelled")
             if not session.runtime_ready:
                 self._create_runtime_session(session)
+            context = self._prompt_context(session)
+            if context:
+                user_input = context + "\n\n" + user_input
             session.step = 0
             self._emit(AgentEventType.RUN_STARTED, session, 0, on_event)
             completed = False
@@ -376,6 +454,10 @@ class AgentService:
                         steps=int(values.get("steps") or 0),
                         error=values.get("error"),
                         total_tokens=int(values.get("total_tokens") or 0),
+                        input_tokens=int(values.get("input_tokens") or 0),
+                        output_tokens=int(values.get("output_tokens") or 0),
+                        cache_read_tokens=int(values.get("cache_read_tokens") or 0),
+                        cache_miss_tokens=int(values.get("cache_miss_tokens") or 0),
                         tool_calls_made=calls,
                         finish_reason=FinishReason(
                             values.get("finish_reason") or FinishReason.STOP

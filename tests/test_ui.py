@@ -29,7 +29,7 @@ def test_tabs_items_pages_and_state() -> None:
     assert "home" in state["page_content"]
     assert state["page_content"]["home"][0]["type"] is BlockType.MARKDOWN
     html = state["page_content"]["home"][0]["html"]
-    assert "<h1>" in html
+    assert "<h1" in html
     assert "$E=mc^2$" in html
     assert changes
 

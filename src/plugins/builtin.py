@@ -17,12 +17,16 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
 
     from .agent.plugin import AgentPlugin
     from .ask.plugin import AskPlugin
+    from .conversation.plugin import ConversationPlugin
     from .input.plugin import InputPlugin
+    from .learning.plugin import LearningPlugin
     from .llm_core.plugin import LLMPlugin
     from .notes import NotesPlugin
+    from .preference.plugin import PreferencePlugin
     from .note_check_stc import NoteCheckSTCPlugin
     from .reader.plugin import ReaderPlugin
     from .settings.plugin import SettingsPlugin
+    from .teaching.plugin import TeachingPlugin
     from .stt import STTPlugin
     from .vlm.plugin import VLMPlugin
 
@@ -31,6 +35,7 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
         LLMPlugin(),
         AgentPlugin(),
         ReaderPlugin(),
+        ConversationPlugin(),
         AskPlugin(),
     ]
     if config.enable_input:
@@ -42,4 +47,7 @@ def builtin_plugins(config: AppConfig) -> list["Plugin"]:
     if config.enable_notes:
         plugins.append(NotesPlugin())
         plugins.append(NoteCheckSTCPlugin())
+    plugins.append(PreferencePlugin())
+    plugins.append(LearningPlugin())
+    plugins.append(TeachingPlugin())
     return plugins

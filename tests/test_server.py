@@ -66,7 +66,7 @@ def test_state_and_action(client) -> None:
     state = response.json()
     assert state["left_tabs"][0]["id"] == "test"
     assert state["active_page"] == "test.page"
-    assert "<h1>" in state["page_content"]["test.page"][0]["html"]
+    assert "<h1" in state["page_content"]["test.page"][0]["html"]
 
     response = test_client.post(
         "/api/ui/action",

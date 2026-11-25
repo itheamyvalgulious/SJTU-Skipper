@@ -5,6 +5,7 @@ from html import escape
 from core.navigation import current_navigation
 from core.ui import BlockType, Side, StatusLabel
 from core.settings_spec import SettingsSpec, SettingType
+from .prompts import MODE_LABELS
 from .types import GenerationState, NoteKind, NotePublication
 
 
@@ -130,6 +131,7 @@ class NotesView:
             ("read", self._read),
             ("logs", self._logs),
             ("set_mode", self._set_mode),
+            ("set_generation_mode", self._set_generation_mode),
             ("fill_again", self._fill_again),
             ("delete", self._delete),
             ("generate", self._generate),
@@ -174,6 +176,13 @@ class NotesView:
             f'<option value="{key}"{" selected" if key == mode else ""}>{text}</option>'
             for key, text in self.ON_STOP_LABELS
         )
+        generation_mode = str(
+            self.settings.get("notes.generation_mode", "default") or "default"
+        )
+        generation_options = "".join(
+            f'<option value="{key}"{" selected" if key == generation_mode else ""}>{text}</option>'
+            for key, text in MODE_LABELS.items()
+        )
         notice = (
             f'<p class="fg-2 mt-2 mb-0">{escape(self.notices[sid])}</p>'
             if sid in self.notices
@@ -192,6 +201,11 @@ class NotesView:
                 <button type="button" class="btn-outline theme-primary" data-action="notes.read">打开完整笔记</button>
                 <button type="button" class="btn-outline theme-secondary" data-action="notes.logs">查看日志</button>
                 <button type="button" class="{style}" data-action="notes.{action}">{label}</button>
+              </div>
+              <div class="mt-3 pt-3 border-top">
+                <label class="d-block fw-semibold mb-2" for="notes-generation-mode">笔记生成模式</label>
+                <select id="notes-generation-mode" name="generation_mode" class="form-control min-w-0"
+                  data-change-action="notes.set_generation_mode">{generation_options}</select>
               </div>
               <div class="mt-3 pt-3 border-top">
                 <label class="d-block fw-semibold mb-2" for="notes-on-stop">课次结束策略</label>
@@ -293,6 +307,13 @@ class NotesView:
                 "text": "无 Agent 日志．",
             }
         ]
+
+    def _set_generation_mode(self, payload):
+        mode = str(payload.get("mode") or payload.get("generation_mode") or "")
+        if mode not in MODE_LABELS:
+            return {"ok": False, "message": "未知的笔记生成模式"}
+        self.settings.set("notes.generation_mode", mode)
+        return {"ok": True, "refresh": True}
 
     def _set_mode(self, payload):
         try:

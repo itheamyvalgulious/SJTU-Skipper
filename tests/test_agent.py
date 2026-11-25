@@ -470,8 +470,9 @@ def test_runtime_json_survives_restart(tmp_path):
         assert (tmp_path / "auth.json").stat().st_mode & 0o777 == 0o600
     finally:
         client.close()
-    assert not directory.exists()
-    assert not (tmp_path / "llm_runtime").exists()
+    assert directory.exists()
+    assert directory == tmp_path / "llm_runtime"
+    assert (tmp_path / "llm_runtime" / "bootstrap.json").exists()
     replacement = RuntimeClient(tmp_path)
     replacement.register_role("ask", "ask_instant", "快速问答")
     try:

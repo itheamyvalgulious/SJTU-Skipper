@@ -20,7 +20,7 @@ class RuntimeClient:
     def __init__(self, data_dir: Path, *, settings=None):
         self.data_dir = Path(data_dir).resolve()
         self._settings = settings
-        self._temporary: tempfile.TemporaryDirectory | None = None
+        self._runtime_dir: Path | None = None
         self._reader: threading.Thread | None = None
         self._process = None
         self._lock = threading.RLock()
@@ -261,9 +261,9 @@ class RuntimeClient:
 
     @property
     def runtime_dir(self) -> Path:
-        if self._temporary is None:
+        if self._runtime_dir is None:
             raise RuntimeError("Agent runtime has not started")
-        return Path(self._temporary.name)
+        return self._runtime_dir
 
     def _settings_store(self):
         from plugins.settings.store import SettingsStore
@@ -333,9 +333,10 @@ class RuntimeClient:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             if self._reader is not None:
                 self._reader.join()
-            if self._temporary is not None:
-                self._temporary.cleanup()
-            self._temporary = tempfile.TemporaryDirectory(prefix="skipper-llm-")
+            # Agent transcripts and session pointers must survive backend
+            # restarts so reopen_session can restore full agent context.
+            self._runtime_dir = self.data_dir / "llm_runtime"
+            self._runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             bootstrap = self.runtime_dir / "bootstrap.json"
             bootstrap.write_text(
                 json.dumps(self._bootstrap(), ensure_ascii=False), "utf-8"
@@ -509,9 +510,7 @@ class RuntimeClient:
             process = self._process
             self._closed = True
         if process is None:
-            if self._temporary is not None:
-                self._temporary.cleanup()
-                self._temporary = None
+            self._runtime_dir = None
             return
         if process.poll() is None:
             assert process.stdin is not None
@@ -528,6 +527,4 @@ class RuntimeClient:
                     process.wait()
         if self._reader is not None:
             self._reader.join()
-        if self._temporary is not None:
-            self._temporary.cleanup()
-            self._temporary = None
+        self._runtime_dir = None

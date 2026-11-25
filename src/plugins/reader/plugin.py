@@ -21,7 +21,7 @@ from core.plugin import Plugin, PluginContext
 from core.file_access import path_lock, publication_lock
 from contextlib import ExitStack
 from core.navigation import current_navigation
-from core.ui import BlockType, render_markdown
+from core.ui import BlockType, Side, render_markdown, render_toc
 
 from core import note_document as qa
 from .types import SelectionKind
@@ -179,6 +179,15 @@ class ReaderPlugin(Plugin):
             order=5,
             plugin_id=self.id,
         )
+        ctx.ui.add_tab(Side.RIGHT, "reader-toc", "目录", order=15, plugin_id=self.id)
+        ctx.ui.add_toolbox_item(
+            "reader-toc",
+            "reader.toc",
+            "",
+            render=self._render_toc,
+            order=0,
+            plugin_id=self.id,
+        )
         ctx.ui.register_action(OPEN_ACTION, self._act_open, plugin_id=self.id)
         ctx.ui.register_action(DELETE_QA_ACTION, self._act_delete_qa, plugin_id=self.id)
         ctx.ui.register_action(
@@ -205,6 +214,10 @@ class ReaderPlugin(Plugin):
                 ctx.ui.remove_page(page_id)
             except Exception:  # noqa: BLE001 - shutdown is best effort
                 pass
+        try:
+            ctx.ui.remove_tab("reader-toc")
+        except Exception:  # noqa: BLE001 - shutdown is best effort
+            pass
 
     def show(
         self,
@@ -591,6 +604,31 @@ class ReaderPlugin(Plugin):
                 except OSError:
                     continue
         return None
+
+    def _render_toc(self) -> list[dict[str, Any]]:
+        navigation = current_navigation()
+        page_id = str(navigation.page or "")
+        with self._lock:
+            state = self._states.get(page_id) or {}
+            docs = list(state.get("docs") or [])
+        if not docs:
+            return [
+                {
+                    "type": BlockType.TEXT,
+                    "text": "打开一份笔记后，这里会显示标题目录。",
+                }
+            ]
+        active = str(navigation.doc or "")
+        doc = next((item for item in docs if item.get("key") == active), docs[0])
+        path = Path(str(doc.get("path") or ""))
+        try:
+            text = path.read_text("utf-8")
+        except OSError:
+            return [{"type": BlockType.TEXT, "text": "文稿读取失败。"}]
+        html = render_toc(text)
+        if not html:
+            return [{"type": BlockType.TEXT, "text": "这份文稿没有足够的标题。"}]
+        return [{"type": BlockType.HTML, "html": html}]
 
     def _render_page(self, page_id: str) -> list[dict[str, Any]]:
         with self._lock:
