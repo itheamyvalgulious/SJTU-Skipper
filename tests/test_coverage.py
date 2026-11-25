@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,28 @@ def test_store_persists_across_instances(tmp_path: Path) -> None:
     assert again.covered_seconds(MediaKind.VIDEO) == 20.0
     assert again.snapshot()["audio"]["intervals"] == [[0.0, 50.0]]
     assert again.gaps(MediaKind.AUDIO, 0, 100) == [(50.0, 100.0)]
+
+
+def test_concurrent_stores_merge_instead_of_clobbering(tmp_path: Path) -> None:
+    """STT and VLM each own a store over the same file; neither may lose ranges."""
+
+    stt = CoverageStore(tmp_path, "sess-merge")
+    vlm = CoverageStore(tmp_path, "sess-merge")
+
+    stt.mark(MediaKind.AUDIO, 0, 20)
+    vlm.mark(MediaKind.VIDEO, 0, 20)
+    stt.mark(MediaKind.AUDIO, 20, 40)
+    vlm.mark(MediaKind.VIDEO, 20, 40)
+
+    raw = json.loads(
+        (tmp_path / "sessions" / "sess-merge" / "coverage.json").read_text("utf-8")
+    )
+    assert raw["audio"] == [[0.0, 40.0]]
+    assert raw["video"] == [[0.0, 40.0]]
+    # A fresh reader (the input plugin renders progress this way) sees both.
+    fresh = CoverageStore(tmp_path, "sess-merge")
+    assert fresh.covered_seconds(MediaKind.AUDIO) == 40.0
+    assert fresh.covered_seconds(MediaKind.VIDEO) == 40.0
 
 
 def test_skip_coverage_reads_session_meta() -> None:

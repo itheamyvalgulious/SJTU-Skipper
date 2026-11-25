@@ -22,6 +22,19 @@ KINDS = tuple(MediaKind)
 
 _EPS = 1e-6
 
+# Several plugins keep their own CoverageStore for the same session file
+# (STT writes "audio", VLM writes "video") and every _save replaces the
+# whole file from memory.  Without merging, the last writer would clobber
+# the other's ranges.  Each save therefore reloads the file under a
+# per-path lock and folds on-disk ranges into memory before writing.
+_FILE_LOCKS: dict[Path, threading.Lock] = {}
+_FILE_LOCKS_LOCK = threading.Lock()
+
+
+def _file_lock(path: Path) -> threading.Lock:
+    with _FILE_LOCKS_LOCK:
+        return _FILE_LOCKS.setdefault(path.resolve(), threading.Lock())
+
 
 def merge_intervals(intervals: Iterable[Interval]) -> list[Interval]:
     """Return the sorted, merged union of *intervals*."""
@@ -143,16 +156,33 @@ class CoverageStore:
             raw = {}
         self._data = {kind: Coverage.from_any(raw.get(kind.value)) for kind in KINDS}
 
-    def _save(self) -> None:
-        payload = {kind.value: self._data[kind].to_list() for kind in KINDS}
+    def _merge_disk(self) -> None:
+        """Fold ranges written by sibling stores into ``self._data``."""
+
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(payload), "utf-8")
-            tmp.replace(self.path)
-        except OSError:
-            # Coverage is an optimisation; never break the pipeline over it.
-            pass
+            raw = json.loads(self.path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict):
+            return
+        for kind in KINDS:
+            for start, end in Coverage.from_any(raw.get(kind.value)).intervals:
+                self._data[kind].add(start, end)
+
+    def _save(self) -> None:
+        payload: dict[str, list[list[float]]] | None = None
+        with _file_lock(self.path):
+            with self._lock:
+                self._merge_disk()
+                payload = {kind.value: self._data[kind].to_list() for kind in KINDS}
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(payload), "utf-8")
+                tmp.replace(self.path)
+            except OSError:
+                # Coverage is an optimisation; never break the pipeline over it.
+                pass
 
     def mark(self, kind: MediaKind, start: float, end: float) -> None:
         """Record that ``[start, end)`` of *kind* has been processed."""
