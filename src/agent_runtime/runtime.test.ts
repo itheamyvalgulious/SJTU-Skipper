@@ -2388,6 +2388,47 @@ test("provider_set creates a provider from the endpoint and provider_remove rema
   }
 });
 
+test("provider_set remaps roles left dangling by the last provider removal", async () => {
+  const fixture = await catalogFixture();
+  try {
+    await fixture.runtime.dispatch(
+      IpcMethod.PROVIDER_REMOVE,
+      { provider: "second" },
+      () => {},
+    );
+    await fixture.runtime.dispatch(IpcMethod.PROVIDER_REMOVE, { provider: "local" }, () => {});
+    const added = await fixture.runtime.dispatch(
+      IpcMethod.PROVIDER_SET,
+      {
+        id: "third",
+        base_url: `${fixture.base}/v1`,
+        api: "openai-completions",
+        auth: "none",
+      },
+      () => {},
+    );
+    expect(added.providers.map((provider) => provider.id)).toEqual(["third"]);
+    // proof satisfies the image-capable board_recognition role, so it wins.
+    expect(added.selectors.default).toBe("third/proof");
+    expect(added.roles.default).toMatchObject({ provider: "third", model: "proof" });
+    for (const [role, selector] of Object.entries(added.selectors)) {
+      if (role === AgentRole.DEFAULT) continue;
+      expect(selector).toBe("@default");
+      expect(added.roles[role as string]).toEqual(added.roles.default);
+    }
+    // An unresolvable selector passed explicitly still fails.
+    await expect(
+      fixture.runtime.dispatch(
+        IpcMethod.ROLE_SET,
+        { role: "note_writer", selector: "third/missing" },
+        () => {},
+      ),
+    ).rejects.toThrow();
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("role_set rewrites one selector and keeps the rest", async () => {
   const fixture = await catalogFixture();
   try {

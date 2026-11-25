@@ -288,6 +288,7 @@ export class Runtime {
       const config = await this.configuration(
         Bun.YAML.stringify(models),
         Bun.YAML.stringify(roles),
+        true,
       );
       const savedRoles = this.persistence?.roles;
       const changedRoles =
@@ -333,7 +334,11 @@ export class Runtime {
     };
   }
 
-  private async configuration(models: string, roles: string): Promise<Configuration> {
+  private async configuration(
+    models: string,
+    roles: string,
+    repairRoles = false,
+  ): Promise<Configuration> {
     const parsed = validate(modelsConfigurationSchema, Bun.YAML.parse(models), "models.yml");
     const supplied = validate(rolesConfigurationSchema, Bun.YAML.parse(roles), "roles.yml");
     const selectors: Record<string, string> = {};
@@ -397,10 +402,50 @@ export class Runtime {
       allowed,
       selectors,
     };
-    if (allowed.length) {
-      for (const role of this.roleDefinitions.keys()) this.resolve(config, role);
+    if (!allowed.length) return config;
+    // Provider edits can leave selectors pointing at models that no longer
+    // exist (e.g. the last provider was removed). Repair rebinds them the way
+    // provider removal does: unresolvable roles inherit @default, and a
+    // dangling default lands on the first available model. Roles that stay
+    // unresolvable (e.g. missing input support) report the validation error.
+    let unresolved = this.unresolvableRoles(config);
+    for (let pass = this.roleDefinitions.size + 1; repairRoles && unresolved.length && pass--; ) {
+      const fallback = this.fallbackModel(allowed);
+      const before = unresolved;
+      for (const role of unresolved)
+        selectors[role] = role === AgentRole.DEFAULT ? fallback : "@default";
+      config.roles = Bun.YAML.stringify(selectors, null, 2);
+      unresolved = this.unresolvableRoles(config);
+      if (unresolved.every((role, index) => role === before[index])) break;
     }
+    if (unresolved.length) this.resolve(config, unresolved[0]);
     return config;
+  }
+
+  /**
+   * Model a dangling default role binds to: prefer one satisfying every role's
+   * input requirements so inherited roles stay runnable.
+   */
+  private fallbackModel(allowed: Model<Api>[]): string {
+    const required = new Set(
+      [...this.roleDefinitions.values()].flatMap((definition) => definition.input),
+    );
+    const capable = allowed.find((model) =>
+      [...required].every((input) => model.input.includes(input)),
+    );
+    const model = capable ?? allowed[0];
+    return `${model.provider}/${model.id}`;
+  }
+
+  private unresolvableRoles(config: Configuration): string[] {
+    return [...this.roleDefinitions.keys()].filter((role) => {
+      try {
+        this.resolve(config, role);
+        return false;
+      } catch {
+        return true;
+      }
+    });
   }
 
   private resolve(config: Configuration, role: string) {
@@ -507,10 +552,15 @@ export class Runtime {
   }
 
   /** Validate and persist an edited configuration, then report the new catalog. */
-  private async applyEdited(models: ModelsConfiguration, roles: Record<string, string>) {
+  private async applyEdited(
+    models: ModelsConfiguration,
+    roles: Record<string, string>,
+    repairRoles = false,
+  ) {
     const config = await this.configuration(
       Bun.YAML.stringify(models, null, 2),
       Bun.YAML.stringify(roles, null, 2),
+      repairRoles,
     );
     await this.storeConfiguration(config);
     return this.catalog();
@@ -745,7 +795,7 @@ export class Runtime {
         patch.models = discovered.map((model) => ({ ...model }) as Record<string, unknown>);
       }
       models.providers = { ...models.providers, [id]: patch as never };
-      return this.applyEdited(models, roles);
+      return this.applyEdited(models, roles, true);
     }
     if (method === IpcMethod.PROVIDER_REMOVE) {
       const provider = String(params.provider);
@@ -763,7 +813,7 @@ export class Runtime {
       }
       if (next.default.startsWith("@")) throw new Error("请先把默认角色切换到其他模型");
       models.providers = providers;
-      return this.applyEdited(models, next);
+      return this.applyEdited(models, next, true);
     }
     if (method === IpcMethod.ROLE_SET) {
       const role = validate(agentRoleSchema, params.role, "agent role");
