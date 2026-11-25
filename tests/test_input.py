@@ -795,6 +795,105 @@ class TestInputPluginUI:
         assert "&lt;script&gt;" in errors[0]["html"]
         assert "writer failed" in errors[0]["html"]
 
+    def test_unknown_download_total_shows_current_part(self, tmp_path):
+        from core.streams import StreamKind
+
+        ctx = _make_context(tmp_path)
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        try:
+            session = ctx.streams.current
+            ctx.services.register(
+                "stt", SimpleNamespace(enabled=lambda: True)
+            )
+            ctx.services.register(
+                "vlm", SimpleNamespace(enabled=lambda: True)
+            )
+            download = {
+                "status": DownloadState.PROGRESS,
+                "received": 831,
+                "total": 0,
+                "part_index": 1,
+                "part_count": 2,
+                "part_received": 831,
+                "part_total": 831,
+            }
+            blocks = plugin._render_recording_page(
+                True,
+                False,
+                download,
+                session.session_id,
+                active=True,
+                total=600,
+                progress_only=True,
+            )
+            download_block = [
+                b for b in blocks if b["type"] == BlockType.PROGRESS
+            ][1]
+            assert "第 1/2 段" in download_block["label"]
+            assert download_block["value"] == 1.0
+            assert "indeterminate" not in download_block
+
+            download.update(part_received=500, part_total=0)
+            blocks = plugin._render_recording_page(
+                True,
+                False,
+                download,
+                session.session_id,
+                active=True,
+                total=600,
+                progress_only=True,
+            )
+            download_block = [
+                b for b in blocks if b["type"] == BlockType.PROGRESS
+            ][1]
+            assert "获取大小中" in download_block["label"]
+            assert download_block["value"] == 0.0
+            assert download_block["indeterminate"] is True
+        finally:
+            plugin.teardown()
+
+    def test_total_progress_ignores_pending_notes(self, tmp_path):
+        from core.streams import StreamKind
+
+        ctx = _make_context(tmp_path)
+        plugin = InputPlugin()
+        plugin.setup(ctx)
+        try:
+            session = ctx.streams.current
+            ctx.services.register(
+                "stt", SimpleNamespace(enabled=lambda: True)
+            )
+            ctx.services.register(
+                "vlm", SimpleNamespace(enabled=lambda: True)
+            )
+            notes = {
+                "chunk_enabled": True,
+                "completed_chunks": 0,
+                "expected_chunks": 11,
+                "published_end": 0,
+                "error": "",
+                "errors": [],
+            }
+            ctx.services.register(
+                "notes", SimpleNamespace(status=lambda sid: notes)
+            )
+            ctx.streams.seal_text(session.session_id, StreamKind.TRANSCRIPT, 100)
+            ctx.streams.seal_text(session.session_id, StreamKind.VISUAL, 200)
+            blocks = plugin._render_recording_page(
+                True,
+                False,
+                {},
+                session.session_id,
+                active=True,
+                total=600,
+                progress_only=True,
+            )
+            total = [b for b in blocks if b["type"] == BlockType.PROGRESS][0]
+            assert total["value"] == pytest.approx(100 / 600)
+        finally:
+            plugin.teardown()
+
     def test_course_download_progress(self, tmp_path):
         from core.events import Event
         from plugins.input.plugin import _Job
@@ -831,6 +930,10 @@ class TestInputPluginUI:
                 "status": DownloadState.PROGRESS,
                 "received": 125,
                 "total": 200,
+                "part_index": 2,
+                "part_count": 2,
+                "part_received": 25,
+                "part_total": 100,
             }
             blocks = plugin._render_session()
             assert [b for b in blocks if b["type"] == BlockType.PROGRESS][1][

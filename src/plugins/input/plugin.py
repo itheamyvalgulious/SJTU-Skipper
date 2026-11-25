@@ -1872,17 +1872,34 @@ class InputPlugin(Plugin):
 
     def _download_progress(self, job: _Job) -> dict[str, Any]:
         videos = [str(value) for value in job.cls.get("videos", [])]
-        progress = [job.downloads.get(video, {}) for video in videos]
-        if not any(progress):
+        items = [(video, job.downloads.get(video, {})) for video in videos]
+        if not any(item for _, item in items):
             return {}
-        complete = all(item.get("status") == DownloadState.DONE for item in progress)
-        known = all(int(item.get("total", 0)) > 0 for item in progress)
+        complete = all(item.get("status") == DownloadState.DONE for _, item in items)
+        known = all(int(item.get("total", 0)) > 0 for _, item in items)
+        # Show the part currently downloading instead of an aggregate whose
+        # total is unknown until the not-yet-started parts report theirs.
+        current = 0
+        for index, (_, item) in enumerate(items):
+            if item and item.get("status") != DownloadState.DONE:
+                current = index
+                break
+        else:
+            for index in range(len(items) - 1, -1, -1):
+                if items[index][1]:
+                    current = index
+                    break
+        part = items[current][1]
         return {
             "status": DownloadState.DONE if complete else DownloadState.PROGRESS,
-            "received": sum(int(item.get("received", 0)) for item in progress),
-            "total": sum(int(item.get("total", 0)) for item in progress)
+            "received": sum(int(item.get("received", 0)) for _, item in items),
+            "total": sum(int(item.get("total", 0)) for _, item in items)
             if known
             else 0,
+            "part_index": current + 1,
+            "part_count": len(items),
+            "part_received": int(part.get("received", 0)),
+            "part_total": int(part.get("total", 0)),
         }
 
     def _render_recording_page(
@@ -1984,8 +2001,8 @@ class InputPlugin(Plugin):
             if total_seconds and note_enabled
             else 0.0
         )
-        if note_enabled and not live:
-            ratios.append(note_ratio)
+        # Notes have their own bar: a slow first chunk must not pin the media
+        # progress at 0% for the whole download/recognition phase.
         blocks.append(
             {
                 "type": BlockType.PROGRESS,
@@ -2000,22 +2017,43 @@ class InputPlugin(Plugin):
                 int(download.get("received", 0)),
                 int(download.get("total", 0)),
             )
+            part_count = max(1, int(download.get("part_count", 1) or 1))
+            part_index = max(1, int(download.get("part_index", 1) or 1))
+            part_received = int(download.get("part_received", received))
+            part_total = int(download.get("part_total", size))
             download_done = download.get("status") == DownloadState.DONE or (
                 finished and not download
             )
-            blocks.append(
-                {
-                    "type": BlockType.PROGRESS,
-                    "label": "下载进度 完成"
-                    if download_done
-                    else f"下载进度 {_fmt_size(received)} / {_fmt_size(size) if size else '待获取大小'}",
-                    "value": 1.0
-                    if download_done
-                    else min(1.0, received / size)
-                    if size
-                    else 0.0,
-                }
-            )
+            if download_done:
+                download_label = "下载进度 完成"
+                download_value = 1.0
+                indeterminate = False
+            elif size:
+                # Every part reported its size: show the whole class.
+                download_label = (
+                    f"下载进度 {_fmt_size(received)} / {_fmt_size(size)}"
+                )
+                download_value = min(1.0, received / size)
+                indeterminate = False
+            else:
+                # Unknown aggregate: show the part currently downloading.
+                prefix = (
+                    f"下载进度 第 {part_index}/{part_count} 段"
+                    if part_count > 1
+                    else "下载进度"
+                )
+                amount = f"{_fmt_size(part_received)} / {_fmt_size(part_total) if part_total else '获取大小中'}"
+                download_label = f"{prefix} {amount}"
+                download_value = min(1.0, part_received / part_total) if part_total else 0.0
+                indeterminate = bool(part_received and not part_total)
+            block = {
+                "type": BlockType.PROGRESS,
+                "label": download_label,
+                "value": download_value,
+            }
+            if indeterminate:
+                block["indeterminate"] = True
+            blocks.append(block)
         for kind, name in ((MediaKind.AUDIO, "STT"), (MediaKind.VIDEO, "VLM")):
             blocks.append(
                 {

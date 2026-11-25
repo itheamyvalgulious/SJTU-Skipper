@@ -490,6 +490,28 @@ body.resizing {
 .progress-block + .progress-block {
   margin-block-start: 10px;
 }
+.progress-bar-indeterminate {
+  background-image: linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.28) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.28) 50%,
+    rgba(255, 255, 255, 0.28) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 16px 16px;
+  animation: progress-stripes 0.9s linear infinite;
+}
+@keyframes progress-stripes {
+  from {
+    background-position: 16px 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
 .keyvalue {
   display: grid;
   grid-template-columns: minmax(120px, 1fr) minmax(0, 2.2fr);

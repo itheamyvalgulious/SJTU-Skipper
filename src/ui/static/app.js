@@ -3127,10 +3127,14 @@
     if (type === BLOCK_TYPE.PROGRESS) {
       const value = Number(block.value ?? 0);
       const pct = value <= 1 ? value * 100 : value;
+      const indeterminate = Boolean(block.indeterminate);
       return el("div", { class: "block progress-block" }, [
         el("div", { class: "d-flex justify-content-between small fg-2 mb-2" }, [
           el("span", { text: block.label || "进度" }),
-          el("span", { class: "fw-semibold fg-body", text: `${Math.round(pct)}%` }),
+          el("span", {
+            class: "fw-semibold fg-body",
+            text: indeterminate ? "进行中" : `${Math.round(pct)}%`,
+          }),
         ]),
         el(
           "div",
@@ -3138,14 +3142,17 @@
             class: "progress",
             role: "progressbar",
             "aria-label": block.label || "进度",
-            "aria-valuenow": pct,
+            "aria-valuenow": indeterminate ? undefined : pct,
             "aria-valuemin": 0,
             "aria-valuemax": 100,
+            "aria-valuetext": indeterminate ? "进行中" : undefined,
           },
           [
             el("div", {
-              class: "progress-bar",
-              style: `width:${Math.max(0, Math.min(100, pct))}%`,
+              class: `progress-bar${indeterminate ? " progress-bar-indeterminate" : ""}`,
+              style: indeterminate
+                ? "width:100%"
+                : `width:${Math.max(0, Math.min(100, pct))}%`,
             }),
           ],
         ),
