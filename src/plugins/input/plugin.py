@@ -266,6 +266,7 @@ class InputPlugin(Plugin):
 
     def setup(self, ctx: PluginContext) -> None:
         self._ctx = ctx
+        self._class_children_providers: dict[str, Any] = {}
         self._pending_message = ""
         self._last_error = ""
         settings = ctx.require("settings")
@@ -1056,6 +1057,25 @@ class InputPlugin(Plugin):
             def resolve_class(self, class_id: str) -> dict[str, Any]:
                 return plugin._resolve_class(class_id)
 
+            def register_class_children(self, owner: str, provider: Any) -> None:
+                with plugin._class_lock:
+                    plugin._class_children_providers[owner] = provider
+
+            def unregister_class_children(self, owner: str) -> None:
+                with plugin._class_lock:
+                    plugin._class_children_providers.pop(owner, None)
+
+            def class_children(self, class_id: str) -> list[dict[str, Any]]:
+                rows: list[dict[str, Any]] = []
+                with plugin._class_lock:
+                    providers = list(plugin._class_children_providers.values())
+                for provider in providers:
+                    try:
+                        rows.extend(provider(class_id) or [])
+                    except Exception:  # noqa: BLE001
+                        _log.debug("class children provider failed", exc_info=True)
+                return rows
+
             def open_class(self, class_id: str) -> None:
                 result = plugin._act_open_class(plugin._resolve_class(class_id))
                 if not result.get("ok"):
@@ -1282,6 +1302,10 @@ class InputPlugin(Plugin):
             node_id = str(node.get("id", ""))
             if node.get("action"):
                 node["active"] = node_id == current
+                input_service = self._ctx.service("input") if self._ctx is not None else None
+                rows = input_service.class_children(node_id) if input_service is not None else []
+                if rows:
+                    node["children"] = list(node.get("children") or []) + rows
                 value = node["action"].get("value") or {}
                 job_state = job_states.get(str(value.get("id", "")))
                 if job_state:

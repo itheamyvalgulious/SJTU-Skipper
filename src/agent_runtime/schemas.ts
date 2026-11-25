@@ -25,6 +25,7 @@ export enum IpcMethod {
   MESSAGE = "message",
   CANCEL = "cancel",
   CLOSE_SESSION = "close_session",
+  COMPACT = "compact",
   LOGOUT = "logout",
   CREDENTIALS = "credentials",
   IMPORT_CREDENTIALS = "import_credentials",
@@ -289,6 +290,7 @@ export const createSessionInputSchema = type({
   "files?": stringMap,
   "readonly?": "string[]",
   "tools?": "string[]",
+  "compaction?": { "[string]": "unknown" },
   "meta?": { "[string]": "unknown" },
 });
 const sessionParams = type({ "+": "reject", session_id: sessionId });
