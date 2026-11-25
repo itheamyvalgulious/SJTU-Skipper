@@ -710,7 +710,7 @@ class TeachingPlugin(Plugin):
                 "buttons": [
                     {"label": "生成教案", "action": "teaching.start", "class": "btn-solid theme-primary"},
                     {"label": "查看教案", "action": "teaching.open_plan", "class": "btn btn-sm"},
-                    {"label": "确认删除教案" if self._sid() in self._delete_pending else "删除教案", "action": "teaching.delete_plan", "class": "btn btn-sm btn-danger"},
+                    {"label": "确认删除教案" if self._sid() in self._delete_pending else "删除教案", "action": "teaching.delete_plan", "class": "btn btn-sm theme-danger"},
                     {"label": "进入对话", "action": "teaching.open", "class": "btn btn-sm"},
                 ],
             }

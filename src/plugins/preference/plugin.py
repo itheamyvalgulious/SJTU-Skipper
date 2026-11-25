@@ -317,7 +317,7 @@ class PreferencePlugin(Plugin):
                     {
                         "type": BlockType.BUTTONS,
                         "buttons": [
-                            {"label": "接受", "action": "preference.accept", "value": {"id": proposal.id}, "class": "btn btn-sm btn-primary"},
+                            {"label": "接受", "action": "preference.accept", "value": {"id": proposal.id}, "class": "btn-solid theme-primary btn-sm"},
                             {"label": "拒绝", "action": "preference.reject", "value": {"id": proposal.id}, "class": "btn btn-sm"},
                         ],
                     }
@@ -364,7 +364,7 @@ class PreferencePlugin(Plugin):
                 "buttons": [
                     {"label": "导出为默认", "action": "preference.export", "class": "btn btn-sm"},
                     {"label": "恢复默认", "action": "preference.reset", "class": "btn btn-sm"},
-                    {"label": "清空", "action": "preference.clear", "class": "btn btn-sm btn-danger"},
+                    {"label": "清空", "action": "preference.clear", "class": "btn btn-sm theme-danger"},
                 ],
             }
         )

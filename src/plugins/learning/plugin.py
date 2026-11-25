@@ -529,7 +529,7 @@ class LearningPlugin(Plugin):
                 ],
                 "submit": {"label": "保存状态", "action": "learning.update_value"},
             })
-            blocks.append({"type": BlockType.BUTTONS, "buttons": [{"label": "删除", "action": "learning.remove", "value": {"id": entry["id"]}, "class": "btn btn-sm btn-danger"}]})
+            blocks.append({"type": BlockType.BUTTONS, "buttons": [{"label": "删除", "action": "learning.remove", "value": {"id": entry["id"]}, "class": "btn btn-sm theme-danger"}]})
         if self.ctx.service("conversation") is not None:
             blocks.append({"type": BlockType.BUTTONS, "buttons": [{"label": "用对话修改学情", "action": "learning.admin_open", "class": "btn-solid theme-primary"}]})
         return blocks
