@@ -26,6 +26,7 @@ output_*/
 # Heavy Data & Media (Videos, Audio, Datasets, Weights)
 weights/
 *.mp4
+!docs/assets/*.mp4
 *.mkv
 *.avi
 *.mov

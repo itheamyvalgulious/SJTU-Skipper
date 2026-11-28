@@ -1,0 +1,31 @@
+<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .cloud { fill: #1a73e8; opacity: 0.28; }
+    .stop1 { stop-color: #38bdf8; }
+    .stop2 { stop-color: #1a73e8; }
+    .stop3 { stop-color: #0b57d0; }
+    @media (prefers-color-scheme: dark) {
+      .cloud { fill: #ffffff; opacity: 0.94; }
+      .stop3 { stop-color: #3b82f6; }
+    }
+  </style>
+  <defs>
+    <linearGradient id="fav-grad" x1="16" y1="3.5" x2="16" y2="28.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" class="stop1"/>
+      <stop offset="50%" class="stop2"/>
+      <stop offset="100%" class="stop3"/>
+    </linearGradient>
+  </defs>
+  <g class="cloud">
+    <circle cx="8.8" cy="18.8" r="5.6"/>
+    <circle cx="16" cy="13.8" r="6.8"/>
+    <circle cx="23.2" cy="18.8" r="5.4"/>
+    <rect x="8.4" y="15.2" width="15.2" height="9.2" rx="4.6"/>
+  </g>
+  <path
+    d="M22.2 5.4C20.2 3.4 17.6 4.4 17 8.6L15 23.4C14.4 27.6 11.8 28.6 9.8 26.6"
+    stroke="url(#fav-grad)"
+    stroke-width="3.2"
+    stroke-linecap="round"
+  />
+</svg>
